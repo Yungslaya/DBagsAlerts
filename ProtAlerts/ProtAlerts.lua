@@ -1829,9 +1829,20 @@ ProtAlertsState.dotPool = pool
 local function plateUnit(p)
     return p.namePlateUnitToken or (p.UnitFrame and p.UnitFrame.unit)
 end
+local allOff = false
 updateRange = function()
+    -- only while YOU are in combat: out of combat nothing is read at all
+    local on = DB.range ~= false and ctx.combat
+    if not on then
+        if not allOff then
+            allOff = true
+            for _, d in pairs(pool) do d:Hide() end
+            dot:Hide()
+        end
+        return
+    end
+    allOff = false
     wipe(used)
-    local on = DB.range ~= false
     -- every enemy nameplate that is fighting
     if on and C_NamePlate and C_NamePlate.GetNamePlates then
         local ok, plates = pcall(C_NamePlate.GetNamePlates)
