@@ -2413,8 +2413,8 @@ local WARRIOR_MACROS = {
       "Berserker Stance, then Berserker Rage." },
     { "PA Wall", "#showtooltip Shield Wall\n/cast [nostance:2] Defensive Stance; Shield Wall",
       "Shield Wall (goes Defensive first if needed)." },
-    { "PA Defensive", "#showtooltip Defensive Stance\n/cast [nostance:2] Defensive Stance",
-      "Back to Defensive Stance." },
+    { "PA Stance", "#showtooltip\n/cast [stance:2] Battle Stance; Defensive Stance",
+      "Swap stance: Defensive <-> Battle. Icon shows where it goes.", "PA Defensive" },
 }
 
 -- Paladin: no stances. Attacks start auto-attack; help spells work on the friend
@@ -2454,6 +2454,8 @@ makeMacros = function()
     for _, m in ipairs(list) do
         local name, body = m[1], m[2]
         local idx = GetMacroIndexByName(name)
+        -- renamed macro: rewrite the old one in place so it stays on your action bar
+        if (not idx or idx == 0) and m[4] then idx = GetMacroIndexByName(m[4]) end
         local ok
         if idx and idx > 0 then
             ok = pcall(EditMacro, idx, name, Q, body)
