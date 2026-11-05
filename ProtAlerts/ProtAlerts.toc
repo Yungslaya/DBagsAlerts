@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: |cffc79c6eProt|r Alerts
+## Notes: Tank alerts, bars and swing timer for Warrior and Paladin.
+## Author: brandon
+## Version: 0.9.0-wip
+## SavedVariables: ProtAlertsDB
+
+ProtAlerts.lua
