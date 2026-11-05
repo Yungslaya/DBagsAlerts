@@ -2398,8 +2398,8 @@ local WARRIOR_MACROS = {
       "Mouseover taunt (goes Defensive first if needed)." },
     { "PA Interrupt", "#showtooltip\n/startattack\n/cast [@mouseover,harm,nodead,stance:3][stance:3] Pummel; [@mouseover,harm,nodead][] Shield Bash",
       "Mouseover Shield Bash / Pummel." },
-    { "PA Charge", "#showtooltip Charge\n/startattack\n/cast Charge",
-      "Charge + auto-attack." },
+    { "PA Charge", "#showtooltip Charge\n/startattack\n/cast [nostance:1] Battle Stance; Charge",
+      "Charge. Not in Battle Stance? 1st press: Battle, 2nd: Charge." },
     { "PA Pull", "#showtooltip\n/cast [equipped:Bows] Shoot Bow; [equipped:Guns] Shoot Gun; [equipped:Crossbows] Shoot Crossbow; Throw",
       "Ranged pull." },
     -- stance dancing in combat
