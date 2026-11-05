@@ -55,6 +55,7 @@ local DEFAULTS = {
     cursorSize = 48,
     cursorCombat = false,
     buffNag = true,      -- missing Battle Shout reminder, also out of combat
+    stanceNag = true,    -- flashing "DEFENSIVE" in combat when you are in another stance
     range = true,        -- melee range ring around the big icon
     lowMana = 20,        -- paladin: mana % for the LOW MANA warning
     dumpTank = 90,       -- warrior: spend line while you are getting hit a lot
@@ -2160,6 +2161,80 @@ do   -- missing buff reminder (own block: Lua's 200 top-level locals limit)
     end
 end
 
+do   -- stance reminder (own block: Lua's 200 top-level locals limit)
+    -- Icy Veins (Forever prot leveling): "Open with Charge when possible, then swap to
+    -- Defensive Stance" - Revenge and your main tank tools need it. So: in a fight with
+    -- an enemy, out of Defensive for more than 2 seconds (time to Charge / Overpower /
+    -- Intercept), a big DEFENSIVE icon flashes a bit above the middle of the screen.
+    local f = CreateFrame("Frame", nil, UIParent)
+    f:SetSize(64, 64)
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 190)
+    f:SetFrameStrata("HIGH")
+    f:Hide()
+    f.icon = f:CreateTexture(nil, "ARTWORK")
+    f.icon:SetAllPoints(); f.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    addBorder(f, 0, 0, 0, 1, 1)
+    f.gold = goldFrame(f, 4)
+    f.glow = f:CreateTexture(nil, "OVERLAY", nil, 7)
+    f.glow:SetTexture(MEDIA .. "ProcGlow.tga"); f.glow:SetBlendMode("ADD")
+    f.glow:SetVertexColor(1, 0.3, 0.2); f.glow:SetPoint("CENTER")
+    f.glow:SetSize(64 / 0.64, 64 / 0.64)
+    f.text = f:CreateFontString(nil, "OVERLAY")
+    styleText(f.text, 22, 1, 0.3, 0.25)
+    f.text:SetPoint("TOP", f, "BOTTOM", 0, -4)
+    f.text:SetText("DEFENSIVE")
+    local ga = f:CreateAnimationGroup()          -- flashing
+    ga:SetLooping("BOUNCE")
+    local fa = ga:CreateAnimation("Alpha")
+    fa:SetFromAlpha(1); fa:SetToAlpha(0.25); fa:SetDuration(0.4)
+    ProtAlertsState.stanceNag = f
+
+    -- is Defensive Stance the active stance? true / false, or nil when we can't tell
+    local function inDefensive()
+        local id = spell["Defensive Stance"]
+        if not id or not GetNumShapeshiftForms or not GetShapeshiftFormInfo then return nil end
+        local okN, n = pcall(GetNumShapeshiftForms)
+        if not okN or secret(n) or not n then return nil end
+        for i = 1, n do
+            local ok, _, active, _, sid = pcall(GetShapeshiftFormInfo, i)
+            if ok and not secret(sid) and not secret(active) then
+                local okName, nm = pcall(C_Spell.GetSpellName, sid)
+                if sid == id or (okName and nm == "Defensive Stance") then return active and true or false end
+            end
+        end
+        return nil
+    end
+    ProtAlertsState.inDefensive = inDefensive
+
+    local offSince
+    local t = 0
+    local drv = CreateFrame("Frame")
+    drv:SetScript("OnUpdate", function(_, e)
+        t = t + e
+        if t < 0.2 then return end
+        t = 0
+        pcall(function()
+            local want = DB and DB.stanceNag ~= false and CLASS == "WARRIOR" and ctx.combat and ctx.hostile
+                         and not UnitIsDeadOrGhost("player")
+            local def = want and inDefensive()
+            if want and def == false then
+                offSince = offSince or GetTime()
+                if GetTime() - offSince >= 2 then
+                    if not f:IsShown() then
+                        f.icon:SetTexture(C_Spell.GetSpellTexture(spell["Defensive Stance"]) or DEFAULT_ICON)
+                        f.gold:SetShown(classic())
+                        f:Show(); ga:Play()
+                    end
+                    return
+                end
+            else
+                offSince = nil
+            end
+            if f:IsShown() then ga:Stop(); f:Hide() end
+        end)
+    end)
+end
+
 do   -- click buttons (own block: Lua's 200 top-level locals limit)
     -- Blizzard's secure unit buttons over our frames: right-click = the normal WoW
     -- menu (invite, whisper, trade...), left-click = target, mouseover = tooltip.
@@ -2494,8 +2569,15 @@ local WARRIOR_MACROS = {
       "Mouseover taunt (goes Defensive first if needed)." },
     { "PA Interrupt", "#showtooltip\n/startattack\n/cast [@mouseover,harm,nodead,stance:3][stance:3] Pummel; [@mouseover,harm,nodead][] Shield Bash",
       "Mouseover Shield Bash / Pummel." },
-    { "PA Charge", "#showtooltip Charge\n/startattack\n/cast [nostance:1] Battle Stance; Charge",
-      "Charge. Not in Battle Stance? 1st press: Battle, 2nd: Charge." },
+    { "PA Charge", function()
+          -- Vanguard (talent, 25+): Charge works in Defensive, so don't leave it
+          local okI, info = pcall(C_Spell.GetSpellInfo, "Vanguard")
+          local vid = okI and type(info) == "table" and not sectable(info) and plain(info.spellID, nil)
+          local known = vid and IsPlayerSpell and plain(IsPlayerSpell(vid), false)
+          if known then return "#showtooltip Charge\n/startattack\n/cast Charge" end
+          return "#showtooltip Charge\n/startattack\n/cast [nostance:1] Battle Stance; Charge"
+      end,
+      "Charge. Before Vanguard (25): 1st press Battle, 2nd Charge. Run /pa macros again after 25." },
     { "PA Pull", "#showtooltip\n/cast [equipped:Bows] Shoot Bow; [equipped:Guns] Shoot Gun; [equipped:Crossbows] Shoot Crossbow; Throw",
       "Ranged pull." },
     -- stance dancing in combat
@@ -2549,6 +2631,7 @@ makeMacros = function()
     local made, updated, failed = 0, 0, 0
     for _, m in ipairs(list) do
         local name, body = m[1], m[2]
+        if type(body) == "function" then body = body() end   -- some macros depend on talents
         local idx = GetMacroIndexByName(name)
         -- renamed macro: rewrite the old one in place so it stays on your action bar
         if (not idx or idx == 0) and m[4] then idx = GetMacroIndexByName(m[4]) end
@@ -2731,6 +2814,9 @@ local function buildSettings()
     local nag = add(makeCheck(w, "Buff reminder", "Shows your missing buff (Battle Shout) next to the icons, even out of combat. Hidden in towns.",
         function() return DB.buffNag ~= false end, function(v) DB.buffNag = v end))
     nag:SetPoint("TOPLEFT", 16, -246)
+    local snag = add(makeCheck(w, "Stance reminder", "Flashes DEFENSIVE above your character when you fight in another stance (warrior).",
+        function() return DB.stanceNag ~= false end, function(v) DB.stanceNag = v end))
+    snag:SetPoint("TOPLEFT", 180, -246)
     local test = makeButton(w, "Preview", 200, function() testUntil = GetTime() + 8 end)
     test:SetPoint("TOPLEFT", 20, -276)
     if CLASS_MACROS[CLASS] then
