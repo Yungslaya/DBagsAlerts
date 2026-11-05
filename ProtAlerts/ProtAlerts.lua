@@ -954,21 +954,62 @@ end
 local info = main:CreateFontString(nil, "OVERLAY")
 styleText(info, 9, 0.7, 0.7, 0.75)
 
--- Health color slides red -> yellow -> green with your health (works on secret health too).
-local hpCurves
-local function healthCurves()
-    if hpCurves ~= nil then return hpCurves or nil end
-    local ok, c = pcall(function()
-        local function ch(a, b, c2)
-            local cv = C_CurveUtil.CreateCurve()
-            cv:SetType(Enum.LuaCurveType.Linear)
-            cv:AddPoint(0, a); cv:AddPoint(0.5, b); cv:AddPoint(1, c2)
-            return cv
+-- Health color: green -> yellow -> orange -> red as you drop.
+-- Two copies of the health bar (yellow, red) sit on top of the green one and fade in
+-- as health falls. Their fade comes from UnitHealthPercent + a curve, so it keeps
+-- working when health is secret in combat (we only hand the value to SetAlpha).
+local updateHealthColor, styleHealthColor
+do
+    local text = CreateFrame("Frame", nil, healthBar)    -- keeps the % above the color layers
+    text:SetAllPoints()
+    healthBar.text:SetParent(text)
+    local function layer(r, g, b)
+        local s = CreateFrame("StatusBar", nil, healthBar)
+        s:SetAllPoints(); s:SetStatusBarTexture(BAR_TEX); s:SetStatusBarColor(r, g, b)
+        s:SetMinMaxValues(0, 1); s:SetValue(0); s:SetAlpha(0)
+        return s
+    end
+    local yellow = layer(1, 0.82, 0.1)
+    local red = layer(0.9, 0.1, 0.08)
+    -- fade in: yellow from 75% down to 45%, red from 45% down to 15% (yellow+red = orange)
+    local function fadeCurve(full, none)
+        local ok, cv = pcall(function()
+            local c = C_CurveUtil.CreateCurve()
+            c:SetType(Enum.LuaCurveType.Linear)
+            c:AddPoint(0, 1); c:AddPoint(full, 1); c:AddPoint(none, 0); c:AddPoint(1, 0)
+            return c
+        end)
+        return ok and cv or nil
+    end
+    local yC = C_CurveUtil and fadeCurve(0.45, 0.75)
+    local rC = C_CurveUtil and fadeCurve(0.15, 0.45)
+    local function plainFade(frac, full, none)
+        if frac <= full then return 1 elseif frac >= none then return 0 end
+        return (none - frac) / (none - full)
+    end
+    local function fade(s, cv, full, none, h, m)
+        if not secret(h) and not secret(m) then
+            s:SetAlpha((m and m > 0) and plainFade(h / m, full, none) or 0)
+        elseif cv and UnitHealthPercent then
+            local ok, a = pcall(UnitHealthPercent, "player", false, cv)
+            if ok and not pcall(s.SetAlpha, s, a) then s:SetAlpha(0) end
         end
-        return { r = ch(0.85, 0.95, 0.2), g = ch(0.15, 0.75, 0.8), b = ch(0.15, 0.1, 0.3) }
-    end)
-    hpCurves = ok and c or false
-    return ok and c or nil
+    end
+    -- setValue = the same smooth setter the green bar uses, so the layers move together
+    updateHealthColor = function(h, m, setValue)
+        for _, s in ipairs({ yellow, red }) do
+            pcall(s.SetMinMaxValues, s, 0, m)
+            setValue(s, h)
+        end
+        fade(yellow, yC, 0.45, 0.75, h, m)
+        fade(red, rC, 0.15, 0.45, h, m)
+    end
+    styleHealthColor = function(tex)
+        yellow:SetStatusBarTexture(tex); yellow:SetStatusBarColor(1, 0.82, 0.1)
+        red:SetStatusBarTexture(tex); red:SetStatusBarColor(0.9, 0.1, 0.08)
+        local L = healthBar:GetFrameLevel() or 1
+        yellow:SetFrameLevel(L + 1); red:SetFrameLevel(L + 2); text:SetFrameLevel(L + 3)
+    end
 end
 
 -- Swing timer. Forever fires PLAYER_SWING the moment your auto-attack lands
@@ -1142,6 +1183,7 @@ local function applyStyle()
         bar.frame:SetFrameLevel(bar:GetFrameLevel() + 4)
         colorBorder(bar.px, 0, 0, 0, c and 0 or 1)
     end
+    styleHealthColor(c and CLASSIC_TEX or BAR_TEX)
 end
 
 local blockW = BAR_W
@@ -1539,7 +1581,7 @@ local function updateHealth()
         local okP, pct = pcall(UnitHealthPercent, "player", false, CurveConstants.ScaleTo100)
         if okP then pcall(healthBar.text.SetFormattedText, healthBar.text, "%.0f%%", pct) end
     end
-    -- (health keeps your class color; set once in layout)
+    updateHealthColor(h, m, setBar)
 end
 
 local function updatePower()
