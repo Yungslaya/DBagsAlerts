@@ -570,6 +570,7 @@ local WARRIOR_ALERTS = {
       end },
     { key = "shout", row = 2, label = "BATTLE SHOUT", icon = "Battle Shout",
       test = function(st)
+          need(st, DB.buffNag == false)   -- the buff reminder icon shows it instead (no doubles)
           need(st, spell["Battle Shout"] and timeLeft("Battle Shout") <= 10 and not IsMounted())
           need(st, usable("Battle Shout"))
       end },
@@ -2095,19 +2096,36 @@ do   -- missing buff reminder (own block: Lua's 200 top-level locals limit)
         ProtAlertsState.buffNag = f
 
         -- seconds of buff left: the real aura when the game shows it, else our cast timer
+        -- In combat WoW hides auras from addons: then "no aura" does NOT mean "no buff".
+        -- So: read the aura only when the game isn't hiding them, remember the end time
+        -- we last saw, and in combat use that (or our own cast timer, whichever is later).
+        local seenEnd                   -- plain expiration time from the last real read
+        local seenNone                  -- last real read said: not on you
+        local function aurasHidden()
+            if not (C_Secrets and C_Secrets.ShouldAurasBeSecret) then return false end
+            local ok, r = pcall(C_Secrets.ShouldAurasBeSecret)
+            return not ok or secret(r) or r == true
+        end
         local function buffLeft()   -- (cfg set by check)
-            if C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName then
+            local now = GetTime()
+            if not aurasHidden() and C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName then
                 local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", cfg.buff, "HELPFUL")
                 if ok and not secret(a) and not sectable(a) then
-                    if not a then return 0 end
+                    if not a then seenEnd = nil; seenNone = true; return 0 end
+                    seenNone = false
                     local e = a.expirationTime
                     if not secret(e) then
-                        if not e or e == 0 then return 999 end
-                        return e - GetTime()
+                        if not e or e == 0 then seenEnd = math.huge; return 999 end
+                        seenEnd = e
+                        return e - now
                     end
                 end
             end
-            return timeLeft(cfg.buff)
+            local mine = timeLeft(cfg.buff)
+            local seen = seenEnd and (seenEnd - now) or 0
+            -- never seen it either way and no cast of ours: don't guess "missing"
+            if not seenEnd and not seenNone and mine <= 0 then return 999 end
+            return math.max(mine, seen)
         end
         local function plainYes(v) return v == true end    -- secret or table -> no
         local shownKey
