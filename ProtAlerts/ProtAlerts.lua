@@ -54,6 +54,7 @@ local DEFAULTS = {
     cursor = true,       -- ring around the mouse cursor
     cursorSize = 48,
     cursorCombat = false,
+    buffNag = true,      -- missing Battle Shout reminder, also out of combat
     range = true,        -- melee range ring around the big icon
     lowMana = 20,        -- paladin: mana % for the LOW MANA warning
     dumpTank = 90,       -- warrior: spend line while you are getting hit a lot
@@ -2064,6 +2065,83 @@ local function hideBlizzard()
     end
 end
 
+do   -- missing buff reminder (own block: Lua's 200 top-level locals limit)
+    -- Battle Shout fell off? A gold-glowing icon sits left of the block, in or out of
+    -- combat. Out of combat with too little rage it shows Bloodrage first (free rage),
+    -- then Battle Shout. Hidden in towns/inns, on a mount, and when dead.
+    local NAG = { WARRIOR = { buff = "Battle Shout", helper = "Bloodrage" } }
+    do      -- class is only known after login, so the frame is always made and checks it live
+        local cfg
+        local f = CreateFrame("Frame", nil, main)
+        f:SetSize(44, 44)
+        f:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, 0)
+        f:Hide()
+        f.icon = f:CreateTexture(nil, "ARTWORK")
+        f.icon:SetAllPoints(); f.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        addBorder(f, 0, 0, 0, 1, 1)
+        f.gold = goldFrame(f, 4)
+        f.glow = f:CreateTexture(nil, "OVERLAY", nil, 7)
+        f.glow:SetTexture(MEDIA .. "ProcGlow.tga"); f.glow:SetBlendMode("ADD")
+        f.glow:SetVertexColor(1, 0.82, 0.25); f.glow:SetPoint("CENTER")
+        f.glow:SetSize(44 / 0.64, 44 / 0.64)
+        local ga = f:CreateAnimationGroup()
+        ga:SetLooping("BOUNCE")
+        local fa = ga:CreateAnimation("Alpha")
+        fa:SetFromAlpha(1); fa:SetToAlpha(0.55); fa:SetDuration(0.6)
+        ga:Play()
+        f.text = f:CreateFontString(nil, "OVERLAY")
+        styleText(f.text, 13, 1, 0.82, 0.2)
+        f.text:SetPoint("TOP", f, "BOTTOM", 0, -3)
+        ProtAlertsState.buffNag = f
+
+        -- seconds of buff left: the real aura when the game shows it, else our cast timer
+        local function buffLeft()   -- (cfg set by check)
+            if C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName then
+                local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", cfg.buff, "HELPFUL")
+                if ok and not secret(a) and not sectable(a) then
+                    if not a then return 0 end
+                    local e = a.expirationTime
+                    if not secret(e) then
+                        if not e or e == 0 then return 999 end
+                        return e - GetTime()
+                    end
+                end
+            end
+            return timeLeft(cfg.buff)
+        end
+        local function plainYes(v) return v == true end    -- secret or table -> no
+        local shownKey
+        local function check()
+            cfg = CLASS and NAG[CLASS]
+            if not cfg or not DB or DB.buffNag == false or not spell[cfg.buff] or UnitIsDeadOrGhost("player") or IsMounted()
+               or (IsResting() and not ctx.combat) then
+                f:Hide(); shownKey = nil return
+            end
+            if buffLeft() > 10 then f:Hide(); shownKey = nil return end
+            -- out of combat, rage too low to shout: Bloodrage first
+            local show = cfg.buff
+            if not ctx.combat and not plainYes(usable(cfg.buff)) and spell[cfg.helper] and plainYes(ready(cfg.helper)) then
+                show = cfg.helper
+            end
+            if show ~= shownKey then
+                shownKey = show
+                f.icon:SetTexture(C_Spell.GetSpellTexture(spell[show]) or DEFAULT_ICON)
+                f.text:SetText(show == cfg.helper and "BLOODRAGE" or "SHOUT")
+            end
+            f.gold:SetShown(classic())
+            f:Show()
+        end
+        local t = 0
+        local drv = CreateFrame("Frame")
+        drv:SetScript("OnUpdate", function(_, e)
+            t = t + e
+            if t < 0.25 then return end
+            t = 0
+            pcall(check)
+        end)
+    end
+end
+
 do   -- click buttons (own block: Lua's 200 top-level locals limit)
     -- Blizzard's secure unit buttons over our frames: right-click = the normal WoW
     -- menu (invite, whisper, trade...), left-click = target, mouseover = tooltip.
@@ -2632,11 +2710,14 @@ local function buildSettings()
     local curc = add(makeCheck(w, "Ring only in combat", "Show the cursor ring only while you fight.",
         function() return DB.cursorCombat end, function(v) DB.cursorCombat = v end))
     curc:SetPoint("TOPLEFT", 180, -224)
+    local nag = add(makeCheck(w, "Buff reminder", "Shows your missing buff (Battle Shout) next to the icons, even out of combat. Hidden in towns.",
+        function() return DB.buffNag ~= false end, function(v) DB.buffNag = v end))
+    nag:SetPoint("TOPLEFT", 16, -246)
     local test = makeButton(w, "Preview", 200, function() testUntil = GetTime() + 8 end)
-    test:SetPoint("TOPLEFT", 20, -254)
+    test:SetPoint("TOPLEFT", 20, -276)
     if CLASS_MACROS[CLASS] then
         local mk = makeButton(w, "Create macros", 200, makeMacros)
-        mk:SetPoint("TOPLEFT", 20, -282)
+        mk:SetPoint("TOPLEFT", 20, -304)
         mk:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:SetText("Create macros", 1, 0.82, 0.2)
@@ -2648,8 +2729,8 @@ local function buildSettings()
     end
 
     -- WARNINGS
-    heading(w, "Thresholds", -318)
-    local y = -358
+    heading(w, "Thresholds", -340)
+    local y = -380
     local hp = add(makeSlider(w, "Low health", 10, 80, 5, "%d%%", function() return DB.lowHp end,
         function(v) DB.lowHp = v end))
     hp:SetPoint("TOPLEFT", 20, y)
