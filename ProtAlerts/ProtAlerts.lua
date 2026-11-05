@@ -1727,53 +1727,32 @@ local function setRing(state)     -- "in", "near", "far"
     elseif state == "near" then tintNext(0.75, 0.4)
     else tintNext(1, 1) end
 end
--- Range dot above your target's head: pinned on top of its nameplate (turn enemy
--- nameplates on with V). Uses WoW's own round status dots.
--- Green = in melee, orange = one step out, red = out of range.
-local dot = CreateFrame("Frame", nil, UIParent)
-dot:SetSize(24, 24)
-dot:SetFrameStrata("HIGH")
-dot:Hide()
-local function dotTex(path, r, g, b)
-    local t = dot:CreateTexture(nil, "OVERLAY")
-    t:SetAllPoints(); t:SetTexture(path); t:SetAlpha(0)
-    if r then t:SetVertexColor(r, g, b) end
-    return t
-end
--- our own dot art (Forever has no Interface\COMMON\Indicator-* files)
-dot.g = dotTex(MEDIA .. "Dot.tga", 0.2, 1, 0.2)
-dot.o = dotTex(MEDIA .. "Dot.tga", 1, 0.85, 0.1)   -- yellow: about to lose aggro
-dot.r = dotTex(MEDIA .. "Dot.tga", 1, 0.15, 0.15)
-local dotState
-ProtAlertsState.dot = dot
-
-local function placeDot()
-    if not DB.range or not ctx.hostile then dot:Hide(); dot.plate = nil return false end
-    local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, "target")
-    if not ok or (plate and plate.IsForbidden and plate:IsForbidden())
-       or (plate and plate.IsVisible and not plate:IsVisible()) then plate = nil end
-    -- no nameplate (plates off, or too far): sit on our target frame instead
-    local tfr = ProtAlertsState.targetFrame
-    local anchor = plate or (tfr and tfr:IsShown() and tfr) or nil
-    if not anchor then dot:Hide(); dot.plate = nil return false end
-    if dot.plate ~= anchor then
-        dot.plate = anchor
-        dot:ClearAllPoints()
-        local okP
-        if plate then okP = pcall(dot.SetPoint, dot, "BOTTOM", plate, "TOP", 0, 4)
-        else okP = pcall(dot.SetPoint, dot, "CENTER", anchor, "TOPRIGHT", -12, -12) end
-        if not okP then dot:Hide() return false end
-    end
-    dot:Show()
-    return true
-end
-
--- AGGRO dot (was range). Threat status on your target:
+-- AGGRO dots: one over EVERY enemy nameplate that is in a fight, plus one on our
+-- target frame when your target has no nameplate. Threat status on that mob:
 --   3 = it's on you, solid  -> green
 --   2 = it's on you, but someone is about to take it -> yellow
 --   0/1 or not on its list while it fights -> red (it's NOT hitting you)
 -- If the game locks the status number in combat, step curves turn it into alphas
 -- without reading it; if even that isn't allowed, it falls back to green/red.
+local function newDot()
+    local d = CreateFrame("Frame", nil, UIParent)
+    d:SetSize(24, 24)
+    d:SetFrameStrata("HIGH")
+    d:Hide()
+    local function tex(r, g, b)
+        local t = d:CreateTexture(nil, "OVERLAY")
+        t:SetAllPoints(); t:SetTexture(MEDIA .. "Dot.tga"); t:SetAlpha(0)   -- our own dot art
+        t:SetVertexColor(r, g, b)
+        return t
+    end
+    d.g = tex(0.2, 1, 0.2)
+    d.o = tex(1, 0.85, 0.1)       -- yellow: about to lose aggro
+    d.r = tex(1, 0.15, 0.15)
+    return d
+end
+local dot = newDot()              -- the target-frame dot (target without a nameplate)
+ProtAlertsState.dot = dot
+
 local threatCurves
 local function statusCurves()
     if threatCurves ~= nil then return threatCurves or nil end
@@ -1789,41 +1768,103 @@ local function statusCurves()
     threatCurves = ok and c or false
     return ok and c or nil
 end
-local function setDot(state)
-    if state == dotState then return end
-    dotState = state
-    dot.g:SetAlpha(state == "g" and 1 or 0)
-    dot.o:SetAlpha(state == "o" and 1 or 0)
-    dot.r:SetAlpha(state == "r" and 1 or 0)
+local function setState(d, state)
+    if state == d.state then return end
+    d.state = state
+    d.g:SetAlpha(state == "g" and 1 or 0)
+    d.o:SetAlpha(state == "o" and 1 or 0)
+    d.r:SetAlpha(state == "r" and 1 or 0)
 end
-updateRange = function()
-    if not placeDot() then return end
-    local s = UnitThreatSituation("player", "target")
+-- Color dot d for unit. Returns false when that mob isn't fighting (no dot).
+-- trustCombat: the mob's own "in combat" flag may be guessed from ours when locked
+-- (only for your target - for every plate that would light up random mobs).
+local function colorDot(d, unit, trustCombat)
+    local s = UnitThreatSituation("player", unit)
     if not secret(s) then
         if s == nil then
-            -- not on its threat list: red if it's fighting (someone else), else no dot
-            local tc = UnitAffectingCombat("target")
-            local fighting = (secret(tc) and ctx.combat) or (not secret(tc) and tc)
-            if not fighting then dot:Hide(); dotState = nil return end
-            setDot("r")
-        elseif s >= 3 then setDot("g")
-        elseif s == 2 then setDot("o")
-        else setDot("r") end
-        return
+            local tc = UnitAffectingCombat(unit)
+            local fighting
+            if secret(tc) then fighting = trustCombat and ctx.combat else fighting = tc end
+            if not fighting then return false end
+            setState(d, "r")
+        elseif s >= 3 then setState(d, "g")
+        elseif s == 2 then setState(d, "o")
+        else setState(d, "r") end
+        return true
     end
-    dotState = nil                              -- locked number: never compared
+    d.state = nil                               -- locked number: never compared
     local cv = statusCurves()
     if cv and cv.g.Evaluate then
         local ok1, ag = pcall(cv.g.Evaluate, cv.g, s)
         local ok2, ao = pcall(cv.o.Evaluate, cv.o, s)
         local ok3, ar = pcall(cv.r.Evaluate, cv.r, s)
-        if ok1 and ok2 and ok3 and pcall(dot.g.SetAlpha, dot.g, ag)
-           and pcall(dot.o.SetAlpha, dot.o, ao) and pcall(dot.r.SetAlpha, dot.r, ar) then
-            return
+        if ok1 and ok2 and ok3 and pcall(d.g.SetAlpha, d.g, ag)
+           and pcall(d.o.SetAlpha, d.o, ao) and pcall(d.r.SetAlpha, d.r, ar) then
+            return true
         end
     end
-    local isTanking = UnitDetailedThreatSituation("player", "target")   -- green / red only
-    boolAlpha(dot.g, isTanking, 1, 0); boolAlpha(dot.r, isTanking, 0, 1); dot.o:SetAlpha(0)
+    local isTanking = UnitDetailedThreatSituation("player", unit)   -- green / red only
+    boolAlpha(d.g, isTanking, 1, 0); boolAlpha(d.r, isTanking, 0, 1); d.o:SetAlpha(0)
+    return true
+end
+local function pin(d, anchor, onPlate)
+    if d.anchor ~= anchor then
+        d.anchor = anchor
+        d:ClearAllPoints()
+        local ok
+        if onPlate then ok = pcall(d.SetPoint, d, "BOTTOM", anchor, "TOP", 0, 4)
+        else ok = pcall(d.SetPoint, d, "CENTER", anchor, "TOPRIGHT", -12, -12) end
+        if not ok then d.anchor = nil return false end
+    end
+    d:Show()
+    return true
+end
+local function plateOK(plate)
+    return plate and not (plate.IsForbidden and plate:IsForbidden())
+       and not (plate.IsVisible and not plate:IsVisible())
+end
+
+local pool, used = {}, {}       -- plate frame -> dot
+ProtAlertsState.dotPool = pool
+local function plateUnit(p)
+    return p.namePlateUnitToken or (p.UnitFrame and p.UnitFrame.unit)
+end
+updateRange = function()
+    wipe(used)
+    local on = DB.range ~= false
+    -- every enemy nameplate that is fighting
+    if on and C_NamePlate and C_NamePlate.GetNamePlates then
+        local ok, plates = pcall(C_NamePlate.GetNamePlates)
+        if ok and type(plates) == "table" and not sectable(plates) then
+            for _, p in ipairs(plates) do
+                local u = plateOK(p) and plateUnit(p)
+                if u and not secret(u) then
+                    local okA, atk = pcall(UnitCanAttack, "player", u)
+                    local dead = UnitIsDead(u)
+                    if okA and plain(atk, true) and not plain(dead, false) then
+                        local d = pool[p]
+                        if not d then d = newDot(); pool[p] = d end
+                        if colorDot(d, u, UnitIsUnit(u, "target") == true) and pin(d, p, true) then
+                            used[p] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for p, d in pairs(pool) do if not used[p] then d:Hide() end end
+    -- your target without a nameplate: the dot sits on our target frame
+    local tplate
+    if on and ctx.hostile then
+        local okT, tp = pcall(C_NamePlate.GetNamePlateForUnit, "target")
+        if okT and plateOK(tp) then tplate = tp end
+    end
+    local tfr = ProtAlertsState.targetFrame
+    if on and ctx.hostile and not tplate and tfr and tfr:IsShown()
+       and colorDot(dot, "target", true) and pin(dot, tfr, false) then
+        return
+    end
+    dot:Hide()
 end
 
 end   -- range block
@@ -2974,7 +3015,7 @@ local function buildSettings()
     local nm = add(makeCheck(w, "Spell names", "Name under the big icon.",
         function() return DB.names end, function(v) DB.names = v; relayout() end))
     nm:SetPoint("TOPLEFT", 180, -136)
-    local rg = add(makeCheck(w, "Aggro dot", "Dot over your target's head. Green: it's on you. Yellow: about to lose it. Red: it's not hitting you.",
+    local rg = add(makeCheck(w, "Aggro dot", "Dot over every mob in a fight. Green: it's on you. Yellow: about to lose it. Red: it's not hitting you.",
         function() return DB.range end, function(v) DB.range = v; relayout() end))
     rg:SetPoint("TOPLEFT", 16, -158)
     local tip = add(makeCheck(w, "Rage tips", "Short tip line under the rage bar.",

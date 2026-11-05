@@ -10,7 +10,7 @@ Tank helper for **WoW: Forever** (Interface 16001). Protection Warrior and Palad
 - Health, rage/mana, threat and swing timer bars.
 - Emergency cooldown row with proc glow.
 - Target frame with cast bar. Right-click it for the normal menu.
-- Aggro dot over your target: green = it's on you, yellow = about to lose it, red = it's not hitting you.
+- Aggro dot over every mob in a fight: green = it's on you, yellow = about to lose it, red = it's not hitting you.
 - Cursor ring.
 - Makes your tank macros in game (stance dancing, mouseover taunt/kick, /startattack).
 
