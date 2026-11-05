@@ -4,6 +4,15 @@ Tank helper for **WoW: Forever** (Interface 16001). Protection Warrior and Palad
 
 > **WIP:** it's being built and tested while leveling. Expect changes and rough edges.
 
+## What's new
+
+- **0.9.11:** Demoralizing Shout now shows early in every fight, not only on packs and elites. /reload.
+- **0.9.10:** Aggro dots only run while you are in combat. /reload.
+- **0.9.9:** Aggro dot over every mob in a fight, not just your target. /reload.
+- **0.9.8:** The dot over your target shows aggro instead of range. /reload.
+- **0.9.7:** EAT button when you're missing Well Fed (+5% XP) and carry food. /reload.
+- **0.9.6:** Flashing DEFENSIVE stance reminder; Charge macro knows Vanguard. /reload, then /pa macros.
+
 ## What it does
 
 - Big icons for what matters right now: danger (low HP, loose mobs, taunt, kick), next button, buffs/debuffs to refresh (pandemic window).
