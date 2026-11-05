@@ -56,6 +56,7 @@ local DEFAULTS = {
     cursorCombat = false,
     buffNag = true,      -- missing Battle Shout reminder, also out of combat
     stanceNag = true,    -- flashing "DEFENSIVE" in combat when you are in another stance
+    foodNag = true,      -- "EAT" button when Well Fed (+5% XP in Forever) is missing and you carry food
     range = true,        -- melee range ring around the big icon
     lowMana = 20,        -- paladin: mana % for the LOW MANA warning
     dumpTank = 90,       -- warrior: spend line while you are getting hit a lot
@@ -2235,6 +2236,157 @@ do   -- stance reminder (own block: Lua's 200 top-level locals limit)
     end)
 end
 
+do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
+    -- Forever: every cooked food gives Well Fed + "Well Fed XP Boost" (+5% XP from
+    -- kills, Wowhead spell 1243969, a hidden aura). Out of combat, when you have no
+    -- Well Fed and a food in your bags says "well fed", an EAT button shows. Click it
+    -- to eat (one click = one use, like an action button). Hidden in combat, on a
+    -- mount, when dead, at max level, and while you're already eating.
+    local XP_AURA = 1243969
+    local b = CreateFrame("Button", "ProtAlertsEatButton", UIParent, "SecureActionButtonTemplate")
+    b:SetSize(44, 44)
+    b:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, -72)
+    b:RegisterForClicks("AnyUp", "AnyDown")
+    b:SetAttribute("type", "item")
+    b:Hide()
+    b.icon = b:CreateTexture(nil, "ARTWORK")
+    b.icon:SetAllPoints(); b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    addBorder(b, 0, 0, 0, 1, 1)
+    b.gold = goldFrame(b, 4)
+    b.glow = b:CreateTexture(nil, "OVERLAY", nil, 7)
+    b.glow:SetTexture(MEDIA .. "ProcGlow.tga"); b.glow:SetBlendMode("ADD")
+    b.glow:SetVertexColor(0.4, 1, 0.4); b.glow:SetPoint("CENTER")
+    b.glow:SetSize(44 / 0.64, 44 / 0.64)
+    local ga = b:CreateAnimationGroup()
+    ga:SetLooping("BOUNCE")
+    local fa = ga:CreateAnimation("Alpha")
+    fa:SetFromAlpha(1); fa:SetToAlpha(0.6); fa:SetDuration(0.7)
+    ga:Play()
+    b.text = b:CreateFontString(nil, "OVERLAY")
+    styleText(b.text, 13, 0.45, 1, 0.45)
+    b.text:SetPoint("TOP", b, "BOTTOM", 0, -3)
+    b.text:SetText("EAT")
+    b:SetScript("OnEnter", function(self)
+        if not self.itemID then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        pcall(GameTooltip.SetItemByID, GameTooltip, self.itemID)
+        GameTooltip:AddLine("Click to eat: +5% XP (Well Fed).", 0.45, 1, 0.45)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    ProtAlertsState.eatButton = b
+
+    -- true = fed (or eating), false = not, nil = the game hides auras right now
+    local function hasAura(name)
+        local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", name, "HELPFUL")
+        if not ok or secret(a) or sectable(a) then return nil end
+        return a ~= nil
+    end
+    local function fed()
+        if not C_UnitAuras then return nil end
+        if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+            local ok, r = pcall(C_Secrets.ShouldAurasBeSecret)
+            if not ok or secret(r) or r == true then return nil end
+        end
+        if C_UnitAuras.GetPlayerAuraBySpellID then
+            local ok, a = pcall(C_UnitAuras.GetPlayerAuraBySpellID, XP_AURA)
+            if ok and not secret(a) and not sectable(a) and a then return true end
+        end
+        local wf, food, fd = hasAura("Well Fed"), hasAura("Food"), hasAura("Food & Drink")
+        if wf == nil then return nil end
+        return wf or food or fd or false
+    end
+
+    -- Does this item's tooltip promise Well Fed? Cached per item (nil = not loaded yet).
+    local isFood = {}
+    local function wellFedFood(id)
+        if isFood[id] ~= nil then return isFood[id] end
+        if not (C_TooltipInfo and C_TooltipInfo.GetItemByID) then return false end
+        local ok, data = pcall(C_TooltipInfo.GetItemByID, id)
+        if not ok or type(data) ~= "table" or sectable(data) or type(data.lines) ~= "table" then return nil end
+        local yes = false
+        for _, line in ipairs(data.lines) do
+            local t = line.leftText
+            if type(t) == "string" and not secret(t) and t:lower():find("well fed", 1, true) then yes = true break end
+        end
+        isFood[id] = yes
+        return yes
+    end
+    local function minLevel(id)
+        local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+        if not getInfo then return 0 end
+        local ok, _, _, _, _, lvl = pcall(getInfo, id)
+        if ok and type(lvl) == "number" then return lvl end
+        return 0
+    end
+    -- the best well-fed food you can eat now: highest required level wins
+    local function findFood()
+        if not (C_Container and C_Container.GetContainerNumSlots and C_Container.GetContainerItemInfo) then return nil end
+        local myLevel = UnitLevel("player") or 1
+        local best, bestLvl, bestIcon
+        for bag = 0, 4 do
+            local okN, n = pcall(C_Container.GetContainerNumSlots, bag)
+            for slot = 1, (okN and n or 0) do
+                local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+                if ok and type(info) == "table" and not sectable(info) and info.itemID then
+                    local id = info.itemID
+                    if wellFedFood(id) then
+                        local lvl = minLevel(id)
+                        if lvl <= myLevel and (not bestLvl or lvl > bestLvl) then
+                            best, bestLvl, bestIcon = id, lvl, info.iconFileID
+                        end
+                    end
+                end
+            end
+        end
+        return best, bestIcon
+    end
+
+    local driven = false
+    local function hide()
+        if driven and UnregisterStateDriver then UnregisterStateDriver(b, "visibility") end
+        driven = false
+        b:Hide()
+    end
+    local function update()
+        if InCombatLockdown() then return end          -- secure button: only change it out of combat
+        local maxLvl = (GetMaxPlayerLevel and GetMaxPlayerLevel()) or 60
+        if not DB or DB.foodNag == false or UnitIsDeadOrGhost("player") or (UnitLevel("player") or 1) >= maxLvl then
+            hide() return
+        end
+        if fed() ~= false then hide() return end         -- fed, eating, or can't tell
+        local id, icon = findFood()
+        if not id then hide() return end
+        if b.itemID ~= id then
+            b.itemID = id
+            b:SetAttribute("item", "item:" .. id)
+            b.icon:SetTexture(icon or (C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(id)) or DEFAULT_ICON)
+        end
+        b.gold:SetShown(classic())
+        if not driven and RegisterStateDriver then
+            RegisterStateDriver(b, "visibility", "[combat][mounted][dead] hide; show")
+            driven = true
+        elseif not RegisterStateDriver then
+            b:Show()
+        end
+    end
+    ProtAlertsState.foodUpdate = update
+
+    local ev = CreateFrame("Frame")
+    for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "BAG_UPDATE_DELAYED", "PLAYER_REGEN_ENABLED", "PLAYER_LEVEL_UP" }) do
+        pcall(ev.RegisterEvent, ev, e)
+    end
+    pcall(ev.RegisterUnitEvent, ev, "UNIT_AURA", "player")
+    local due = 0
+    ev:SetScript("OnEvent", function() due = 0 end)   -- check again on the next tick
+    ev:SetScript("OnUpdate", function(_, e)
+        due = due - e
+        if due > 0 then return end
+        due = 2                                          -- also every 2 s (buff running out)
+        pcall(update)
+    end)
+end
+
 do   -- click buttons (own block: Lua's 200 top-level locals limit)
     -- Blizzard's secure unit buttons over our frames: right-click = the normal WoW
     -- menu (invite, whisper, trade...), left-click = target, mouseover = tooltip.
@@ -2743,7 +2895,7 @@ end
 
 local function buildSettings()
     local w = CreateFrame("Frame", "ProtAlertsSettings", UIParent)
-    w:SetSize(360, 600)
+    w:SetSize(360, 640)
     w:SetPoint("CENTER")
     w:SetFrameStrata("DIALOG")
     w:SetMovable(true); w:EnableMouse(true); w:SetClampedToScreen(true)
@@ -2817,11 +2969,14 @@ local function buildSettings()
     local snag = add(makeCheck(w, "Stance reminder", "Flashes DEFENSIVE above your character when you fight in another stance (warrior).",
         function() return DB.stanceNag ~= false end, function(v) DB.stanceNag = v end))
     snag:SetPoint("TOPLEFT", 180, -246)
+    local fnag = add(makeCheck(w, "Eat reminder", "Shows an EAT button when you have no Well Fed (+5% XP) but carry food that gives it. Click it to eat.",
+        function() return DB.foodNag ~= false end, function(v) DB.foodNag = v end))
+    fnag:SetPoint("TOPLEFT", 16, -268)
     local test = makeButton(w, "Preview", 200, function() testUntil = GetTime() + 8 end)
-    test:SetPoint("TOPLEFT", 20, -276)
+    test:SetPoint("TOPLEFT", 20, -298)
     if CLASS_MACROS[CLASS] then
         local mk = makeButton(w, "Create macros", 200, makeMacros)
-        mk:SetPoint("TOPLEFT", 20, -304)
+        mk:SetPoint("TOPLEFT", 20, -326)
         mk:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:SetText("Create macros", 1, 0.82, 0.2)
@@ -2833,8 +2988,8 @@ local function buildSettings()
     end
 
     -- WARNINGS
-    heading(w, "Thresholds", -340)
-    local y = -380
+    heading(w, "Thresholds", -362)
+    local y = -402
     local hp = add(makeSlider(w, "Low health", 10, 80, 5, "%d%%", function() return DB.lowHp end,
         function(v) DB.lowHp = v end))
     hp:SetPoint("TOPLEFT", 20, y)
