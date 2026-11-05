@@ -2,7 +2,7 @@
 ## Title: |cffc79c6eProt|r Alerts
 ## Notes: Tank alerts, bars and swing timer for Warrior and Paladin.
 ## Author: brandon
-## Version: 0.9.11
+## Version: 0.9.12
 ## SavedVariables: ProtAlertsDB
 
 ProtAlerts.lua

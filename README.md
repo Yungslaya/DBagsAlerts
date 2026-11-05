@@ -6,6 +6,7 @@ Tank helper for **WoW: Forever** (Interface 16001). Protection Warrior and Palad
 
 ## What's new
 
+- **0.9.12:** EAT button fix: food is re-checked when WoW hadn't loaded it yet; new /pa food check. /reload.
 - **0.9.11:** Demoralizing Shout now shows early in every fight, not only on packs and elites. /reload.
 - **0.9.10:** Aggro dots only run while you are in combat. /reload.
 - **0.9.9:** Aggro dot over every mob in a fight, not just your target. /reload.
@@ -32,7 +33,7 @@ Copy the `ProtAlerts` folder into `World of Warcraft\_forever_\Interface\AddOns\
 - `/pa` - settings
 - `/pa macros` - make the macros
 - `/pa unlock` - move it
-- `/pa range` - show what the range check sees
+- `/pa food` - why the EAT button is or isn't showing
 
 ## Rules it follows
 

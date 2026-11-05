@@ -2372,19 +2372,19 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
         if not ok or secret(a) or sectable(a) then return nil end
         return a ~= nil
     end
+    -- Out of combat buffs are readable; the "secret" flag is only trusted in combat
+    -- (this only runs out of combat anyway). Second value = which buff, for /pa food.
     local function fed()
-        if not C_UnitAuras then return nil end
-        if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+        if not C_UnitAuras then return nil, "no aura API" end
+        if InCombatLockdown() and C_Secrets and C_Secrets.ShouldAurasBeSecret then
             local ok, r = pcall(C_Secrets.ShouldAurasBeSecret)
-            if not ok or secret(r) or r == true then return nil end
-        end
-        if C_UnitAuras.GetPlayerAuraBySpellID then
-            local ok, a = pcall(C_UnitAuras.GetPlayerAuraBySpellID, XP_AURA)
-            if ok and not secret(a) and not sectable(a) and a then return true end
+            if not ok or secret(r) or r == true then return nil, "buffs hidden" end
         end
         local wf, food, fd = hasAura("Well Fed"), hasAura("Food"), hasAura("Food & Drink")
-        if wf == nil then return nil end
-        return wf or food or fd or false
+        if wf == nil then return nil, "buffs hidden" end
+        if wf then return true, "Well Fed" end
+        if food or fd then return true, "eating" end
+        return false, "not fed"
     end
 
     -- Does this item's tooltip promise Well Fed? Cached per item (nil = not loaded yet).
@@ -2394,11 +2394,17 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
         if not (C_TooltipInfo and C_TooltipInfo.GetItemByID) then return false end
         local ok, data = pcall(C_TooltipInfo.GetItemByID, id)
         if not ok or type(data) ~= "table" or sectable(data) or type(data.lines) ~= "table" then return nil end
-        local yes = false
+        local yes, hasUse = false, false
         for _, line in ipairs(data.lines) do
             local t = line.leftText
-            if type(t) == "string" and not secret(t) and t:lower():find("well fed", 1, true) then yes = true break end
+            if type(t) == "string" and not secret(t) then
+                local low = t:lower()
+                if low:find("well fed", 1, true) then yes = true break end
+                if low:find("use:", 1, true) or low:find("sell price", 1, true) or low:find("max stack", 1, true) then hasUse = true end
+            end
         end
+        -- a half-loaded tooltip (item not cached yet) has only a line or two: ask again later
+        if not yes and not hasUse and #data.lines < 4 then return nil end
         isFood[id] = yes
         return yes
     end
@@ -2412,24 +2418,28 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
     -- the best well-fed food you can eat now: highest required level wins
     local function findFood()
         if not (C_Container and C_Container.GetContainerNumSlots and C_Container.GetContainerItemInfo) then return nil end
-        local myLevel = UnitLevel("player") or 1
+        local myLevel = plain(UnitLevel("player"), 1) or 1
         local best, bestLvl, bestIcon
+        local seen, done = {}, {}         -- what we looked at, for /pa food
         for bag = 0, 4 do
             local okN, n = pcall(C_Container.GetContainerNumSlots, bag)
-            for slot = 1, (okN and n or 0) do
+            for slot = 1, (okN and type(n) == "number" and n or 0) do
                 local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
                 if ok and type(info) == "table" and not sectable(info) and info.itemID then
                     local id = info.itemID
-                    if wellFedFood(id) then
-                        local lvl = minLevel(id)
-                        if lvl <= myLevel and (not bestLvl or lvl > bestLvl) then
-                            best, bestLvl, bestIcon = id, lvl, info.iconFileID
-                        end
+                    local wf = wellFedFood(id)
+                    local lvl = minLevel(id)
+                    if not done[id] and #seen < 12 then
+                        done[id] = true
+                        seen[#seen + 1] = id .. "=" .. (wf == nil and "?" or (wf and "food" or "no")) .. "/lv" .. lvl
+                    end
+                    if wf and lvl <= myLevel and (not bestLvl or lvl > bestLvl) then
+                        best, bestLvl, bestIcon = id, lvl, info.iconFileID
                     end
                 end
             end
         end
-        return best, bestIcon
+        return best, bestIcon, table.concat(seen, " ")
     end
 
     local driven = false
@@ -2438,15 +2448,23 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
         driven = false
         b:Hide()
     end
+    -- why the button is hidden, for "/pa food" and "check logs" (saved in ProtAlertsDB)
+    local function note(why, extra)
+        if DB then DB.foodDebug = { why = why, extra = extra, at = date and date("%H:%M:%S") or "" } end
+    end
     local function update()
         if InCombatLockdown() then return end          -- secure button: only change it out of combat
-        local maxLvl = (GetMaxPlayerLevel and GetMaxPlayerLevel()) or 60
-        if not DB or DB.foodNag == false or UnitIsDeadOrGhost("player") or (UnitLevel("player") or 1) >= maxLvl then
-            hide() return
-        end
-        if fed() ~= false then hide() return end         -- fed, eating, or can't tell
-        local id, icon = findFood()
-        if not id then hide() return end
+        local okM, maxLvl = pcall(GetMaxPlayerLevel or function() return 60 end)
+        if not okM or type(maxLvl) ~= "number" or secret(maxLvl) or maxLvl < 10 then maxLvl = 60 end
+        if not DB or DB.foodNag == false then hide() note("turned off") return end
+        if UnitIsDeadOrGhost("player") then hide() note("dead") return end
+        local lvl = plain(UnitLevel("player"), 1) or 1
+        if lvl >= maxLvl then hide() note("max level", maxLvl) return end
+        local f, which = fed()
+        if f ~= false then hide() note(f == nil and "can't read buffs" or "already fed / eating", which) return end
+        local id, icon, seen = findFood()
+        if not id then hide() note("no well-fed food found", seen) return end
+        note("showing", id)
         if b.itemID ~= id then
             b.itemID = id
             b:SetAttribute("item", "item:" .. id)
@@ -3201,6 +3219,11 @@ SlashCmdList.PROTALERTS = function(msg)
         DB.sound = not DB.sound; say("danger sound %s.", DB.sound and "ON" or "OFF")
     elseif cmd == "reset" then
         ProtAlertsDB = nil; ReloadUI()
+    elseif cmd == "food" then
+        if ProtAlertsState.foodUpdate then pcall(ProtAlertsState.foodUpdate) end
+        local d = DB.foodDebug
+        if d then say("eat button: %s %s", tostring(d.why), tostring(d.extra or ""))
+        else say("eat button: not checked yet (try out of combat).") end
     elseif cmd == "range" then
         local d = DB.rangeDebug
         if d then say("range %s: bar=%s book=%s 10yd=%s", tostring(d.spell), d.bar, d.book, d.close)
