@@ -1742,7 +1742,7 @@ local function dotTex(path, r, g, b)
 end
 -- our own dot art (Forever has no Interface\COMMON\Indicator-* files)
 dot.g = dotTex(MEDIA .. "Dot.tga", 0.2, 1, 0.2)
-dot.o = dotTex(MEDIA .. "Dot.tga", 1, 0.55, 0.1)
+dot.o = dotTex(MEDIA .. "Dot.tga", 1, 0.85, 0.1)   -- yellow: about to lose aggro
 dot.r = dotTex(MEDIA .. "Dot.tga", 1, 0.15, 0.15)
 local dotState
 ProtAlertsState.dot = dot
@@ -1768,27 +1768,62 @@ local function placeDot()
     return true
 end
 
+-- AGGRO dot (was range). Threat status on your target:
+--   3 = it's on you, solid  -> green
+--   2 = it's on you, but someone is about to take it -> yellow
+--   0/1 or not on its list while it fights -> red (it's NOT hitting you)
+-- If the game locks the status number in combat, step curves turn it into alphas
+-- without reading it; if even that isn't allowed, it falls back to green/red.
+local threatCurves
+local function statusCurves()
+    if threatCurves ~= nil then return threatCurves or nil end
+    local ok, c = pcall(function()
+        local function step(a0, a1, a2, a3)
+            local cv = C_CurveUtil.CreateCurve()
+            cv:SetType(Enum.LuaCurveType.Step)
+            cv:AddPoint(0, a0); cv:AddPoint(1, a1); cv:AddPoint(2, a2); cv:AddPoint(3, a3)
+            return cv
+        end
+        return { g = step(0, 0, 0, 1), o = step(0, 0, 1, 0), r = step(1, 1, 0, 0) }
+    end)
+    threatCurves = ok and c or false
+    return ok and c or nil
+end
+local function setDot(state)
+    if state == dotState then return end
+    dotState = state
+    dot.g:SetAlpha(state == "g" and 1 or 0)
+    dot.o:SetAlpha(state == "o" and 1 or 0)
+    dot.r:SetAlpha(state == "r" and 1 or 0)
+end
 updateRange = function()
     if not placeDot() then return end
-    local m = rangeOf(firstKnown(MELEE[CLASS] or {}), true)
-    if secret(m) then                         -- locked: green or red only
-        dotState = nil
-        boolAlpha(dot.g, m, 1, 0); boolAlpha(dot.r, m, 0, 1); dot.o:SetAlpha(0)
+    local s = UnitThreatSituation("player", "target")
+    if not secret(s) then
+        if s == nil then
+            -- not on its threat list: red if it's fighting (someone else), else no dot
+            local tc = UnitAffectingCombat("target")
+            local fighting = (secret(tc) and ctx.combat) or (not secret(tc) and tc)
+            if not fighting then dot:Hide(); dotState = nil return end
+            setDot("r")
+        elseif s >= 3 then setDot("g")
+        elseif s == 2 then setDot("o")
+        else setDot("r") end
         return
     end
-    if m == nil then dot:Hide() return end    -- no range info for this target
-    local state = "far"
-    if m then state = "in"
-    else
-        local n = rangeOf(nearSpell)
-        if not secret(n) and n then state = "near" end
+    dotState = nil                              -- locked number: never compared
+    local cv = statusCurves()
+    if cv and cv.g.Evaluate then
+        local ok1, ag = pcall(cv.g.Evaluate, cv.g, s)
+        local ok2, ao = pcall(cv.o.Evaluate, cv.o, s)
+        local ok3, ar = pcall(cv.r.Evaluate, cv.r, s)
+        if ok1 and ok2 and ok3 and pcall(dot.g.SetAlpha, dot.g, ag)
+           and pcall(dot.o.SetAlpha, dot.o, ao) and pcall(dot.r.SetAlpha, dot.r, ar) then
+            return
+        end
     end
-    if state ~= dotState then
-        dotState = state
-        dot.g:SetAlpha(state == "in" and 1 or 0)
-        dot.o:SetAlpha(state == "near" and 1 or 0)
-        dot.r:SetAlpha(state == "far" and 1 or 0)
-    end
+    local isTanking = UnitDetailedThreatSituation("player", "target")   -- green / red only
+    boolAlpha(dot.g, isTanking, 1, 0); boolAlpha(dot.r, isTanking, 0, 1); dot.o:SetAlpha(0)
 end
 
 end   -- range block
@@ -2939,7 +2974,7 @@ local function buildSettings()
     local nm = add(makeCheck(w, "Spell names", "Name under the big icon.",
         function() return DB.names end, function(v) DB.names = v; relayout() end))
     nm:SetPoint("TOPLEFT", 180, -136)
-    local rg = add(makeCheck(w, "Range dot", "Dot over your target's head. Green: melee. Orange: one step out. Red: too far. Needs enemy nameplates (V).",
+    local rg = add(makeCheck(w, "Aggro dot", "Dot over your target's head. Green: it's on you. Yellow: about to lose it. Red: it's not hitting you.",
         function() return DB.range end, function(v) DB.range = v; relayout() end))
     rg:SetPoint("TOPLEFT", 16, -158)
     local tip = add(makeCheck(w, "Rage tips", "Short tip line under the rage bar.",
