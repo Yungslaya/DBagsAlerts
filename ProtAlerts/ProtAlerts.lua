@@ -521,9 +521,12 @@ local WARRIOR_ALERTS = {
       end },
     { key = "demo", row = 2, label = "DEMO SHOUT", icon = "Demoralizing Shout",
       test = function(st)
-          local worth = (ctx.enemies or 0) >= 2 or ctx.elite
-          need(st, ctx.combat and worth and timeLeft("Demoralizing Shout") <= durationOf("Demoralizing Shout") * 0.3)   -- pandemic: refresh at 30% left
+          -- Icy Veins (Forever prot leveling): "Use Demoralizing Shout early in the fight
+          -- to reduce damage taken" - single mob AND packs. Less damage = less eating.
+          -- Skipped when the mob is almost dead (wasted rage).
+          need(st, ctx.combat and ctx.hostile and timeLeft("Demoralizing Shout") <= durationOf("Demoralizing Shout") * 0.3)   -- pandemic: refresh at 30% left
           need(st, usable("Demoralizing Shout"))
+          if (ctx.enemies or 0) < 2 and not ctx.elite then needTargetAbove(st, 40) end
       end },
     { key = "execute", row = 2, label = "EXECUTE", icon = "Execute",
       test = function(st)
