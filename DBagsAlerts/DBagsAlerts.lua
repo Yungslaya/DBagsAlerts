@@ -3121,8 +3121,31 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         f.bar:SetPoint("BOTTOMLEFT"); f.bar:SetPoint("BOTTOMRIGHT"); f.bar:SetHeight(3)
         f.bar:SetStatusBarTexture(BAR_TEX); f.bar:SetMinMaxValues(0, 1)
         f.edge = addBorder(f.top, 0.12, 0.12, 0.16, 1, 1)
+        f.refreshGlow = CreateFrame("Frame", nil, f.top)
+        f.refreshGlow:SetPoint("CENTER"); f.refreshGlow:SetSize(40 / 0.64, 40 / 0.64)
+        f.refreshGlow:SetFrameLevel(f.top:GetFrameLevel() + 1)
+        f.refreshGlow.t = f.refreshGlow:CreateTexture(nil, "OVERLAY")
+        f.refreshGlow.t:SetAllPoints(); f.refreshGlow.t:SetTexture(MEDIA .. "ProcGlow.tga")
+        f.refreshGlow.t:SetBlendMode("ADD"); f.refreshGlow.t:SetVertexColor(1, 0.82, 0.2)
+        f.refreshPulse = f.refreshGlow:CreateAnimationGroup()
+        f.refreshPulse:SetLooping("BOUNCE")
+        local pulse = f.refreshPulse:CreateAnimation("Alpha")
+        pulse:SetFromAlpha(1); pulse:SetToAlpha(0.45); pulse:SetDuration(0.5)
+        f.refreshGlow:Hide()
         dots[i] = f
         return f
+    end
+    -- Match the existing spell-specific refresh advice. Expiry-only spells stay
+    -- expiry-only; a visual refresh warning does not assume Pandemic mechanics.
+    local refreshAt = { ["Rend"] = 0.3, ["Moonfire"] = 0.3, ["Insect Swarm"] = 0.3,
+        ["Corruption"] = 0.1, ["Immolate"] = 0.1, ["Siphon Life"] = 0.1,
+        ["Faerie Fire"] = 0.1, ["Faerie Fire (Feral)"] = 0.1 }
+    local function setRefreshGlow(f, want)
+        want = want and DB.glow ~= false or false
+        if f.refreshWanted == want then return end
+        f.refreshWanted = want
+        if want then f.refreshGlow:Show(); f.refreshPulse:Play()
+        else f.refreshPulse:Stop(); f.refreshGlow:Hide() end
     end
     local function dotLeft(name, now, key)
         -- Own-cast history is readable. Do not scan secret aura fields every tick.
@@ -3297,11 +3320,14 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
             f:SetShown(ctx.hostile and true or false)
             local left, length
             if ctx.hostile then left, length = dotLeft(f.name, now, key) end
+            local refreshSoon = left ~= nil and length ~= nil and length > 0
+                and left <= length * (refreshAt[f.name] or 0)
+            setRefreshGlow(f, ctx.hostile and ctx.combat and (not left or left <= 0 or refreshSoon))
             if left and left > 0 then
                 f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
                 f.num:SetFormattedText("%d", math.ceil(left))
                 f.bar:SetValue(length > 0 and left / length or 0)
-                local soon = left <= 3
+                local soon = refreshSoon
                 f.num:SetTextColor(1, soon and 0.73 or 1, soon and 0.28 or 1)
                 f.bar:SetStatusBarColor(soon and 0.95 or 0.55, soon and 0.62 or 0.38, soon and 0.20 or 0.78)
             else
