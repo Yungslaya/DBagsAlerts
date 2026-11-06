@@ -26,7 +26,7 @@ local IsCurrentSpell = (C_Spell and C_Spell.IsCurrentSpell) or _G.IsCurrentSpell
 local RAGE = (Enum and Enum.PowerType and Enum.PowerType.Rage) or 1
 local MANA = (Enum and Enum.PowerType and Enum.PowerType.Mana) or 0
 local POWER = RAGE        -- rage (warrior), mana (paladin), druid: follows your form
-local CLASS               -- "WARRIOR", "PALADIN" or "DRUID"
+local CLASS               -- "WARRIOR", "PALADIN", "DRUID" or "WARLOCK"
 -- Druid bits live in one table (Lua allows only 200 top-level locals)
 local DRU = {
     ENERGY = (Enum and Enum.PowerType and Enum.PowerType.Energy) or 3,
@@ -34,7 +34,12 @@ local DRU = {
     dotAt = {},          -- dot name -> target key -> time we cast it
     anyRange = false,    -- caster form: count mobs at any range, not only melee
     DOTS = { ["Moonfire"] = true, ["Insect Swarm"] = true, ["Rake"] = true, ["Rip"] = true,
-             ["Faerie Fire"] = true, ["Faerie Fire (Feral)"] = true },
+             ["Faerie Fire"] = true, ["Faerie Fire (Feral)"] = true,
+             -- warlock (Forever calls Curse of Agony "Bane of Agony")
+             ["Corruption"] = true, ["Bane of Agony"] = true, ["Curse of Agony"] = true, ["Immolate"] = true,
+             ["Siphon Life"] = true, ["Curse of the Elements"] = true, ["Curse of Weakness"] = true },
+    passive = {},        -- passive spells / talents in the spellbook (name -> true)
+    icons = {},          -- non-spell icons for alerts (bag items like Healthstone)
     -- GetShapeshiftFormID -> what we call it (moonkin / tree count as caster)
     FORM = { [1] = "cat", [5] = "bear", [8] = "bear", [3] = "travel", [4] = "travel",
              [27] = "travel", [29] = "travel", [2] = "caster", [31] = "caster", [36] = "caster" },
@@ -74,6 +79,7 @@ local DEFAULTS = {
     range = true,        -- melee range ring around the big icon
     lowMana = 20,        -- paladin: mana % for the LOW MANA warning
     dumpTank = 90,       -- warrior: spend line while you are getting hit a lot
+    shardGoal = 5,       -- warlock: Soul Shards to keep (Drain Soul alert below this)
 }
 
 -- Fallback lengths when neither the aura nor the tooltip tells us.
@@ -93,6 +99,11 @@ for k, v in pairs({ ["Moonfire"] = 12, ["Insect Swarm"] = 12, ["Rake"] = 9, ["Ri
     ["Mark of the Wild"] = 1800, ["Gift of the Wild"] = 3600, ["Rejuvenation"] = 12 }) do
     DEFAULT_DURATION[k] = v
 end
+for k, v in pairs({ ["Corruption"] = 18, ["Bane of Agony"] = 24, ["Curse of Agony"] = 24, ["Immolate"] = 15,
+    ["Siphon Life"] = 30, ["Curse of the Elements"] = 300, ["Curse of Weakness"] = 120, ["Demon Skin"] = 1800,
+    ["Demon Armor"] = 1800, ["Demonic Sacrifice"] = 7200, ["Searing Pain"] = 10 }) do
+    DEFAULT_DURATION[k] = v
+end
 
 -- Buffs we follow by our own casts. A group means "any one of these counts"
 -- (one seal at a time, one blessing on you, one aura).
@@ -108,6 +119,11 @@ local GROUPS = {
     ["Thorns"] = { "Thorns" },
     ["Rejuvenation"] = { "Rejuvenation" },
     ["Demoralizing Roar"] = { "Demoralizing Roar" },
+    ARMOR = { "Demon Armor", "Demon Skin", "Fel Armor" },
+    -- Demonic Sacrifice buffs (Imp / Voidwalker / Succubus / Felhunter), or our own cast of it
+    SACRIFICE = { "Demonic Sacrifice", "Touch of Shadow", "Fel Stamina", "Burning Wish", "Fel Energy" },
+    SOULLINK = { "Soul Link" },
+    BRAND = { "Searing Pain" },        -- Demonic Brand: Searing Pain brands the target for 10 sec
     SEAL = { "Seal of Fury", "Seal of Righteousness", "Seal of Command", "Seal of the Crusader",
              "Seal of Wisdom", "Seal of Light", "Seal of Justice" },
     BLESSING = { "Blessing of Sanctuary", "Blessing of Kings", "Blessing of Might", "Blessing of Wisdom",
@@ -118,12 +134,13 @@ local GROUPS = {
 }
 local GROUP_OF = {}
 for key, names in pairs(GROUPS) do for _, n in ipairs(names) do GROUP_OF[n] = key end end
-local PERMANENT = { AURA = true }       -- auras last until changed
+local PERMANENT = { AURA = true, SOULLINK = true }       -- auras last until changed
 -- Which groups to re-read from real aura data whenever it is readable.
 local READ = {
     WARRIOR = { "Battle Shout", "Shield Block" },
     PALADIN = { "Righteous Fury", "SEAL", "BLESSING", "AURA", "Holy Shield" },
     DRUID = { "MOTW", "Thorns", "Rejuvenation" },
+    WARLOCK = { "ARMOR", "SACRIFICE", "SOULLINK" },
 }
 
 ---------------------------------------------------------------------------
@@ -138,6 +155,7 @@ end
 
 local function buildSpells()
     wipe(spell)
+    wipe(DRU.passive)
     if not (C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines) then return end
     local bank = Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player or 0
     local SPELL = Enum and Enum.SpellBookItemType and Enum.SpellBookItemType.Spell
@@ -154,6 +172,8 @@ local function buildSpells()
                         best[item.name] = r
                         spell[item.name] = item.spellID
                     end
+                elseif item and item.isPassive and type(item.name) == "string" and not secret(item.name) then
+                    DRU.passive[item.name] = true      -- talents like Shadow and Flame
                 end
             end
         end
@@ -412,8 +432,7 @@ function DRU.needCP(st, n)
 end
 -- our dot needs (re)applying: the real debuff when the game shares it, else our cast
 -- timer. refresh = part of the duration left when it's worth refreshing (0 = let it end).
-function DRU.needDot(st, name, refresh)
-    if not st.ok then return end
+function DRU.dotGone(name, refresh)     -- plain true/false
     local t = DRU.dotAt[name]
     local at = t and t[targetKey()]
     local real, aura = targetDebuff(name)
@@ -421,9 +440,29 @@ function DRU.needDot(st, name, refresh)
     local now = GetTime()
     if real == "on" then
         local exp = aura and plain(aura.expirationTime, nil)
-        need(st, exp and exp > 0 and exp - now <= d * refresh)
-    elseif real == "off" then need(st, not at or now - at > 1)   -- 1s: it lands just after the cast
-    else need(st, not at or now - at > d * (1 - refresh)) end
+        return (exp and exp > 0 and exp - now <= d * refresh) and true or false
+    elseif real == "off" then return not at or now - at > 1   -- 1s: it lands just after the cast
+    end
+    return not at or now - at > d * (1 - refresh)
+end
+function DRU.needDot(st, name, refresh)
+    if not st.ok then return end
+    need(st, DRU.dotGone(name, refresh))
+end
+-- unit health above pct% (below=false) or under pct% (below=true); unreadable = no block
+function DRU.needUnitHP(st, unit, pct, below)
+    if not st.ok then return end
+    local h, m = UnitHealth(unit), UnitHealthMax(unit)
+    if not secret(h) and not secret(m) then
+        if m and m > 0 then
+            if below then need(st, h / m < pct / 100) else need(st, h / m >= pct / 100) end
+        end
+        return
+    end
+    local cv = UnitHealthPercent and stepCurve("uhp" .. unit .. pct .. tostring(below), below, pct / 100)
+    if not cv then return end
+    local ok, a = pcall(UnitHealthPercent, unit, false, cv)
+    if ok then needAlpha(st, a) end
 end
 
 ---------------------------------------------------------------------------
@@ -994,7 +1033,301 @@ local DRUID_ALERTS = {
       end },
 }
 
-local CLASS_ALERTS = { WARRIOR = WARRIOR_ALERTS, PALADIN = PALADIN_ALERTS, DRUID = DRUID_ALERTS }
+-- Warlock: Icy Veins WoW Forever Affliction, Demonology and Destruction leveling
+-- guides (Nov 2026). DoTs only on mobs that will live, Life Tap when health is
+-- fine, Drain Soul for shards, pet out unless Demonic Sacrifice is on you.
+do
+    -- bags: Soul Shards + your Healthstone (read at most once a second)
+    DRU.SHARD = 6265
+    DRU.HS_IDS = { [5512] = true, [19004] = true, [19005] = true, [5511] = true, [19006] = true, [19007] = true,
+        [5509] = true, [19008] = true, [19009] = true, [5510] = true, [19010] = true, [19011] = true,
+        [9421] = true, [19012] = true, [19013] = true }
+    DRU.icons.Healthstone = "Interface\\Icons\\INV_Stone_04"
+    local bagAt, shards, hsID = -10, 0, nil
+    local function nameOf(info, id)
+        local n = info.itemName
+        if type(n) ~= "string" or secret(n) then
+            local ok, n2 = pcall(C_Item.GetItemInfo, id)
+            n = ok and n2 or nil
+        end
+        if type(n) == "string" and not secret(n) then return n end
+    end
+    function DRU.bags()
+        local now = GetTime()
+        if now - bagAt < 1 then return shards, hsID end
+        bagAt = now
+        local s, hs, icon = 0, nil, nil
+        if C_Container and C_Container.GetContainerNumSlots and C_Container.GetContainerItemInfo then
+            for bag = 0, 5 do              -- 5 = reagent bag slot (soul shard bag)
+                local okN, n = pcall(C_Container.GetContainerNumSlots, bag)
+                n = okN and plain(n, 0) or 0
+                for slot = 1, (type(n) == "number" and n or 0) do
+                    local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+                    if ok and type(info) == "table" and not sectable(info) and info.itemID and not secret(info.itemID) then
+                        local id = info.itemID
+                        local nm = nameOf(info, id)
+                        if id == DRU.SHARD or nm == "Soul Shard" then
+                            s = s + (plain(info.stackCount, 1) or 1)
+                        elseif DRU.HS_IDS[id] or (nm and nm:find("Healthstone")) then
+                            hs, icon = id, plain(info.iconFileID, nil)
+                        end
+                    end
+                end
+            end
+        end
+        shards, hsID = s, hs
+        if icon then DRU.icons.Healthstone = icon end
+        return shards, hsID
+    end
+    local function hsReady()
+        local _, id = DRU.bags()
+        if not id then return false end
+        local getCD = C_Container and C_Container.GetItemCooldown
+        if getCD then
+            local ok, _, d = pcall(getCD, id)
+            if ok and not secret(d) and d and d > 1.5 then return false end
+        end
+        return true
+    end
+    function DRU.havePet()
+        local e = UnitExists("pet")
+        if secret(e) then return true end
+        if not e then return false end
+        local d = UnitIsDead("pet")
+        if secret(d) then return true end
+        return not d
+    end
+    local function trivial()
+        local ok, t = pcall(UnitIsTrivial or function() return false end, "target")
+        return ok and plain(t, false) == true
+    end
+    local function demo() return spell["Soul Link"] or DRU.passive["Demonic Brand"] end
+    local function sAndF() return DRU.passive["Shadow and Flame"] end
+    local function bane() return spell["Bane of Agony"] and "Bane of Agony" or (spell["Curse of Agony"] and "Curse of Agony") end
+    local function lives(st, pct) if not ctx.elite then needTargetAbove(st, pct) end end   -- will it live a while?
+    local function fight(st) need(st, ctx.combat and ctx.hostile) end
+
+    -- Nightfall's free Shadow Bolt ("Shadow Trance"): the aura when readable, else
+    -- the game's own button glow on Shadow Bolt.
+    local tranceAt
+    function DRU.tranceUp()
+        local hidden = true
+        if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+            local ok, r = pcall(C_Secrets.ShouldAurasBeSecret)
+            hidden = not ok or secret(r) or r == true
+        end
+        if not hidden and C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName then
+            for _, n in ipairs({ "Shadow Trance", "Nightfall" }) do
+                local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", n, "HELPFUL")
+                if not ok or secret(a) or sectable(a) then hidden = true break end
+                if a then return true end
+            end
+            if not hidden then return false end
+        end
+        return tranceAt ~= nil and GetTime() - tranceAt < 10
+    end
+    local wf = CreateFrame("Frame")
+    pcall(wf.RegisterEvent, wf, "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
+    pcall(wf.RegisterEvent, wf, "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
+    pcall(wf.RegisterUnitEvent, wf, "UNIT_SPELLCAST_SUCCEEDED", "player")
+    pcall(wf.RegisterUnitEvent, wf, "UNIT_PET", "player")
+    wf:SetScript("OnEvent", function(_, event, a1, a2, a3)
+        if CLASS ~= "WARLOCK" then return end
+        if event == "UNIT_PET" then expires.SOULLINK = 0 return end     -- new pet: Soul Link again
+        local id = event == "UNIT_SPELLCAST_SUCCEEDED" and a3 or a1
+        if id == nil or secret(id) then return end
+        local ok, name = pcall(C_Spell.GetSpellName, id)
+        if not ok or type(name) ~= "string" or secret(name) then return end
+        if event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" then
+            if name == "Shadow Bolt" then tranceAt = GetTime() end
+        elseif event == "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" then
+            if name == "Shadow Bolt" then tranceAt = nil end
+        elseif name == "Shadow Bolt" then
+            tranceAt = nil
+        elseif name == "Conflagrate" and not sAndF() and DRU.dotAt.Immolate then
+            DRU.dotAt.Immolate[targetKey()] = nil                        -- it ate your Immolate
+        end
+    end)
+
+    DRU.WARLOCK_ALERTS = {
+        -- DANGER ROW
+        { key = "lowhp", row = 1, label = "LOW HP", danger = true, icon = "Death Coil",
+          test = function(st)
+              need(st, ctx.combat)
+              needLowHealth(st, DB.lowHp)
+              if not st.ok then return end
+              if hsReady() then return "Healthstone", "HEALTHSTONE" end
+              local n = firstKnown({ "Death Coil" }, true)
+              if n then return n, "DEATH COIL" end
+              if spell["Drain Life"] then return "Drain Life", "DRAIN LIFE" end
+          end },
+        { key = "fear", row = 1, label = "FEAR ONE", danger = true, icon = "Fear",
+          test = function(st)
+              -- solo, 2+ mobs on you and getting low: Fear one so you fight one at a time
+              need(st, ctx.combat and ctx.hostile and not ctx.group and (ctx.enemies or 0) >= 2 and spell["Fear"])
+              need(st, usable("Fear"))
+              DRU.needUnitHP(st, "player", 60, true)
+              if not st.ok then return end
+              if (ctx.enemies or 0) >= 3 and spell["Howl of Terror"] and ready("Howl of Terror") == true then
+                  return "Howl of Terror", "HOWL"
+              end
+          end },
+
+        -- NEXT: procs and finishers first, then DoTs, then the filler
+        { key = "trance", row = 2, label = "FREE BOLT", icon = "Shadow Bolt",
+          test = function(st)
+              fight(st); need(st, spell["Shadow Bolt"] and DRU.tranceUp())
+          end },
+        { key = "drainlife", row = 2, label = "DRAIN LIFE", icon = "Drain Life",
+          test = function(st)
+              fight(st); need(st, spell["Drain Life"]); need(st, usable("Drain Life"))
+              DRU.needUnitHP(st, "player", 50, true)
+          end },
+        { key = "drainsoul", row = 2, label = "SOUL SHARD", icon = "Drain Soul",
+          test = function(st)
+              -- dying mob + not enough shards: channel Drain Soul as it dies
+              fight(st); need(st, spell["Drain Soul"] and not trivial())
+              if not st.ok then return end
+              need(st, (DRU.bags()) < (DB.shardGoal or 5))
+              need(st, usable("Drain Soul"))
+              DRU.needUnitHP(st, "target", 25, true)
+              if st.ok then return nil, "SHARD " .. (DRU.bags()) .. "/" .. (DB.shardGoal or 5) end
+          end },
+        { key = "sburn", row = 2, label = "SHADOWBURN", icon = "Shadowburn",
+          test = function(st)
+              fight(st); need(st, spell["Shadowburn"]); need(st, ready("Shadowburn")); need(st, usable("Shadowburn"))
+              -- after Shadow and Flame the shard always comes back: on cooldown vs tough mobs
+              if not (sAndF() and ctx.elite) then DRU.needUnitHP(st, "target", 20, true) end
+          end },
+        { key = "conflag", row = 2, label = "CONFLAGRATE", icon = "Conflagrate",
+          test = function(st)
+              fight(st); need(st, spell["Conflagrate"] and not DRU.dotGone("Immolate", 0))
+              need(st, ready("Conflagrate")); need(st, usable("Conflagrate"))
+              if not st.ok or sAndF() then return end
+              -- before Shadow and Flame it eats Immolate: only near its end or to finish
+              if not DRU.dotGone("Immolate", 0.3) then DRU.needUnitHP(st, "target", 25, true) end
+          end },
+        { key = "brand", row = 2, label = "BRAND", icon = "Searing Pain",
+          test = function(st)
+              -- Demonology: Searing Pain brands your pet's target (10 sec)
+              fight(st); need(st, demo() and spell["Searing Pain"] and DRU.havePet() and timeLeft("BRAND") <= 0)
+              need(st, usable("Searing Pain"))
+              lives(st, 25)
+          end },
+        { key = "corrupt", row = 2, label = "CORRUPTION", icon = "Corruption",
+          test = function(st)
+              fight(st); need(st, spell["Corruption"])
+              DRU.needDot(st, "Corruption", 0.1)
+              need(st, usable("Corruption"))
+              lives(st, 35)
+          end },
+        { key = "bane", row = 2, label = "AGONY", icon = "Bane of Agony",
+          test = function(st)
+              local n = bane()
+              fight(st); need(st, n)
+              if not st.ok then return end
+              DRU.needDot(st, n, 0)                -- strongest ticks at the end: never refresh early
+              need(st, usable(n))
+              lives(st, 50)
+              return n, "AGONY"
+          end },
+        { key = "immolate", row = 2, label = "IMMOLATE", icon = "Immolate",
+          test = function(st)
+              fight(st); need(st, spell["Immolate"])
+              DRU.needDot(st, "Immolate", 0.1)
+              need(st, usable("Immolate"))
+              lives(st, 40)
+          end },
+        { key = "siphon", row = 2, label = "SIPHON LIFE", icon = "Siphon Life",
+          test = function(st)
+              fight(st); need(st, spell["Siphon Life"])
+              DRU.needDot(st, "Siphon Life", 0.1)
+              need(st, usable("Siphon Life"))
+              lives(st, 60)                         -- 30 sec dot: long fights only
+          end },
+        { key = "filler", row = 2, label = "SHADOW BOLT", icon = "Shadow Bolt",
+          test = function(st)
+              -- Incinerate (Destruction 40+), else wand when you have one, else Shadow Bolt
+              local okW, wand = pcall(HasWandEquipped or function() return false end)
+              wand = okW and plain(wand, false) == true
+              local n = spell["Incinerate"] and "Incinerate" or (wand and spell["Shoot"] and "Shoot") or "Shadow Bolt"
+              fight(st); need(st, spell[n])
+              if not st.ok then return end
+              if n == "Shoot" then need(st, IsCurrentSpell(spell.Shoot), true) else need(st, usable(n)) end
+              return n, n == "Shoot" and "WAND" or n:upper()
+          end },
+
+        -- BUFF: upkeep
+        { key = "armor", row = 2, label = "ARMOR", icon = "Demon Skin",
+          test = function(st)
+              local n = firstKnown({ "Fel Armor", "Demon Armor", "Demon Skin" })
+              need(st, n and timeLeft("ARMOR") <= 60 and not IsMounted())
+              if not st.ok then return end
+              if ctx.combat then need(st, usable(n)) end
+              return n, "ARMOR"
+          end },
+        { key = "pet", row = 2, label = "SUMMON PET", icon = "Summon Imp",
+          test = function(st)
+              need(st, spell["Summon Imp"] and not IsMounted() and not DRU.havePet())
+              need(st, timeLeft("SACRIFICE") <= 0)  -- sacrificed on purpose: no nagging
+              if not st.ok then return end
+              -- Voidwalker tanks for you (Icy Veins solo pick); Imp needs no shard
+              local n = ((DRU.bags()) > 0 and spell["Summon Voidwalker"]) and "Summon Voidwalker" or "Summon Imp"
+              return n, "PET"
+          end },
+        { key = "soullink", row = 2, label = "SOUL LINK", icon = "Soul Link",
+          test = function(st)
+              need(st, spell["Soul Link"] and DRU.havePet() and timeLeft("SOULLINK") <= 0 and not IsMounted())
+              need(st, usable("Soul Link"))
+          end },
+        { key = "curse", row = 2, label = "CURSE", icon = "Curse of the Elements",
+          test = function(st)
+              -- elites / bosses: Elements (more magic damage), or Weakness if that's all you have
+              local n = firstKnown({ "Curse of the Elements", "Curse of Weakness" })
+              fight(st); need(st, n and ctx.elite)
+              if not st.ok then return end
+              need(st, DRU.dotGone("Curse of the Elements", 0.1) and DRU.dotGone("Curse of Weakness", 0.1))
+              need(st, usable(n))
+              return n, "CURSE"
+          end },
+        { key = "mkstone", row = 2, label = "HEALTHSTONE", icon = "Create Healthstone",
+          test = function(st)
+              need(st, not ctx.combat and spell["Create Healthstone"] and not IsMounted())
+              if not st.ok then return end
+              local s, hs = DRU.bags()
+              need(st, s > 0 and not hs)
+              return nil, "MAKE STONE"
+          end },
+
+        -- EXTRA
+        { key = "lifetap", row = 2, label = "LIFE TAP", icon = "Life Tap",
+          test = function(st)
+              need(st, spell["Life Tap"] and (ctx.combat or ctx.hostile) and not IsMounted())
+              need(st, usable("Life Tap"))
+              needRage(st, 40, true)                        -- mana under 40%
+              DRU.needUnitHP(st, "player", 60, false)       -- ...and health is fine
+          end },
+        { key = "funnel", row = 2, label = "HEAL PET", icon = "Health Funnel",
+          test = function(st)
+              need(st, ctx.combat and spell["Health Funnel"] and DRU.havePet())
+              need(st, usable("Health Funnel"))
+              DRU.needUnitHP(st, "pet", 30, true)
+          end },
+        { key = "rof", row = 2, label = "RAIN OF FIRE", icon = "Rain of Fire",
+          test = function(st)
+              fight(st); need(st, ctx.group and (ctx.enemies or 0) >= 3 and spell["Rain of Fire"])
+              need(st, usable("Rain of Fire"))
+          end },
+        { key = "lowmana", row = 2, label = "LOW MANA", icon = "Life Tap",
+          test = function(st)
+              need(st, ctx.combat)
+              needRage(st, DB.lowMana, true)
+          end },
+    }
+end
+
+local CLASS_ALERTS = { WARRIOR = WARRIOR_ALERTS, PALADIN = PALADIN_ALERTS, DRUID = DRUID_ALERTS,
+    WARLOCK = DRU.WARLOCK_ALERTS }
 
 -- Big-icon mode: every alert of a spot sits in one place, stacked. First in the list
 -- is on top, so you only ever see the most important lit one. Order: Icy Veins
@@ -1018,6 +1351,13 @@ local SPOT = {
                    "hurricane", "moonfire", "insect", "wrath" },
         buff   = { "rejuv", "motw", "thorns", "ffire", "roar" },
         extra  = { "shift", "enrage", "maul", "innervate", "grasp", "lowmana" },
+    },
+    WARLOCK = {   -- spells you don't know yet never light, so one list covers all three specs
+        danger = { "lowhp", "fear" },
+        next   = { "trance", "drainlife", "drainsoul", "sburn", "conflag", "brand",
+                   "corrupt", "bane", "immolate", "siphon", "filler" },
+        buff   = { "armor", "pet", "soullink", "curse", "mkstone" },
+        extra  = { "lifetap", "funnel", "rof", "lowmana" },
     },
 }
 local SPOT_SIZE = { danger = 64, next = 64, buff = 44, extra = 64 }   -- big, easy to see
@@ -1419,6 +1759,7 @@ local CLASS_CDS = {
     PALADIN = { "Templar's Bulwark", "Divine Protection", "Divine Shield", "Lay on Hands",
         "Blessing of Protection", "Blessing of Freedom" },
     DRUID = { "Barkskin", "Frenzied Regeneration", "Innervate", "Tranquility", "Challenging Roar", "Dash" },
+    WARLOCK = { "Death Coil", "Howl of Terror", "Shadow Ward", "Amplify Curse", "Fel Domination", "Soulshatter" },
 }
 for _, list in pairs(CLASS_CDS) do
     for _, n in ipairs(DRU.RACIAL_CDS or {}) do list[#list + 1] = n end
@@ -1688,7 +2029,7 @@ local function setIcon(a, name, label)
     if a.iconName ~= name then
         a.iconName = name
         local id = spell[name]
-        local tex = id and C_Spell.GetSpellTexture(id)
+        local tex = id and C_Spell.GetSpellTexture(id) or DRU.icons[name]
         a.c.icon:SetTexture(tex or FALLBACK_ICON[a.key] or DEFAULT_ICON)
     end
     setText(a.c.text, label or a.label)
@@ -2227,6 +2568,8 @@ local function updateContext()
         ctx.form = DRU.FORM[id or 0] or "caster"
         ctx.stealth = plain(IsStealthed and IsStealthed(), false) and true or false
         DRU.anyRange = ctx.form ~= "bear" and ctx.form ~= "cat"
+    elseif CLASS == "WARLOCK" then
+        DRU.anyRange = true           -- caster: count every mob fighting you, at any range
     end
     ctx.enemies, ctx.loose = scanEnemies()
 end
@@ -2942,7 +3285,7 @@ do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
     end
     local function update()
         if InCombatLockdown() then return end          -- secure button: only change it out of combat
-        if not DB or DB.stoneNag == false or CLASS == "DRUID" or UnitIsDeadOrGhost("player") then hide() return end
+        if not DB or DB.stoneNag == false or CLASS == "DRUID" or CLASS == "WARLOCK" or UnitIsDeadOrGhost("player") then hide() return end
         local kind = weaponKind()
         if not kind or stoned() ~= false then hide() return end
         local id, icon = findStone(kind)
@@ -3175,7 +3518,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         local _, class = UnitClass("player")
         if not CLASS_ALERTS[class] then main:Hide(); return end
         CLASS, ALERTS, CD_SPELLS = class, CLASS_ALERTS[class], CLASS_CDS[class]
-        POWER = class == "PALADIN" and MANA or RAGE
+        POWER = (class == "PALADIN" or class == "WARLOCK") and MANA or RAGE
         if class == "DRUID" then POWER = plain(UnitPowerType("player"), MANA) or MANA end
         if POWER == MANA then rageBar:SetStatusBarColor(0.15, 0.4, 1) end
         DBagsAlertsState.alerts = ALERTS
@@ -3225,7 +3568,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end
         say("%s loaded. /pa for settings.",
             CLASS == "PALADIN" and (DB.tank and "Paladin (tank)" or "Paladin (damage)")
-            or CLASS == "DRUID" and "Druid" or "Warrior")
+            or CLASS == "DRUID" and "Druid" or CLASS == "WARLOCK" and "Warlock" or "Warrior")
         return
     end
     alertsDirty = true                 -- every event below can change what should light up
@@ -3314,6 +3657,27 @@ local PLAIN = {
     lowmana = { "Low mana", "Under your Low mana setting." },
     bless = { "Blessing", "Blessing missing." },
     aura = { "Aura", "No aura active." },
+    -- warlock
+    fear = { "Fear", "Solo, 2+ mobs, health low." },
+    trance = { "Free Shadow Bolt", "Nightfall proc." },
+    drainlife = { "Drain Life", "Health under half." },
+    drainsoul = { "Drain Soul", "Dying mob, shards low." },
+    sburn = { "Shadowburn", "Finish a mob." },
+    conflag = { "Conflagrate", "Immolate is on." },
+    brand = { "Searing Pain", "Brand your pet's target." },
+    corrupt = { "Corruption", "Missing on target." },
+    bane = { "Bane of Agony", "Missing. Never early." },
+    immolate = { "Immolate", "Missing on target." },
+    siphon = { "Siphon Life", "Long fights." },
+    filler = { "Filler", "Shadow Bolt, wand or Incinerate." },
+    armor = { "Demon Armor", "Buff missing." },
+    pet = { "Summon pet", "No pet out." },
+    soullink = { "Soul Link", "Not active." },
+    curse = { "Curse", "Elites only." },
+    mkstone = { "Make Healthstone", "None in bags." },
+    lifetap = { "Life Tap", "Mana low, health fine." },
+    funnel = { "Health Funnel", "Pet health low." },
+    rof = { "Rain of Fire", "Group, 3+ mobs." },
 }
 
 ---------------------------------------------------------------------------
@@ -3429,6 +3793,35 @@ local CLASS_MACROS = { WARRIOR = WARRIOR_MACROS, PALADIN = PALADIN_MACROS, DRUID
     { "PD Mark", "#showtooltip Mark of the Wild\n/cast [@mouseover,help,nodead][@player] Mark of the Wild", "Mark of the Wild on mouseover friend, or you." },
     { "PD Thorns", "#showtooltip Thorns\n/cast [@mouseover,help,nodead][@player] Thorns", "Thorns on mouseover friend (tank), or you." },
     { "PD Innervate", "#showtooltip Innervate\n/cast [@mouseover,help,nodead][@player] Innervate", "Innervate on mouseover healer, or you." },
+},
+-- Warlock: main nukes send your pet in too; DoTs, curses and Fear work on the mob
+-- under your mouse (spread DoTs without changing target).
+WARLOCK = {
+    { "PK Bolt", "#showtooltip Shadow Bolt\n/petattack\n/cast Shadow Bolt", "Shadow Bolt + pet attacks." },
+    { "PK Immolate", "#showtooltip Immolate\n/petattack\n/cast Immolate", "Immolate + pet attacks." },
+    { "PK Searing", "#showtooltip Searing Pain\n/petattack\n/cast Searing Pain", "Searing Pain + pet attacks." },
+    { "PK Conflag", "#showtooltip Conflagrate\n/petattack\n/cast Conflagrate", "Conflagrate + pet attacks." },
+    { "PK Corruption", "#showtooltip Corruption\n/cast [@mouseover,harm,nodead][] Corruption", "Mouseover Corruption." },
+    { "PK Agony", function()
+          local n = spell["Bane of Agony"] and "Bane of Agony" or "Curse of Agony"
+          return "#showtooltip " .. n .. "\n/cast [@mouseover,harm,nodead][] " .. n
+      end, "Mouseover Bane of Agony." },
+    { "PK Siphon", "#showtooltip Siphon Life\n/cast [@mouseover,harm,nodead][] Siphon Life", "Mouseover Siphon Life." },
+    { "PK Curse", function()
+          local n = spell["Curse of the Elements"] and "Curse of the Elements" or "Curse of Weakness"
+          return "#showtooltip " .. n .. "\n/cast [@mouseover,harm,nodead][] " .. n
+      end, "Mouseover Curse of the Elements (Weakness before you have it)." },
+    { "PK Fear", "#showtooltip Fear\n/cast [@mouseover,harm,nodead][] Fear", "Mouseover Fear." },
+    { "PK Drain Life", "#showtooltip Drain Life\n/cast Drain Life", "Drain Life." },
+    { "PK Drain Soul", "#showtooltip Drain Soul\n/cast Drain Soul", "Drain Soul (shards)." },
+    { "PK Life Tap", "#showtooltip Life Tap\n/cast Life Tap", "Life Tap." },
+    { "PK Healthstone", "#showtooltip\n/use Major Healthstone\n/use Greater Healthstone\n/use Healthstone\n"
+          .. "/use Lesser Healthstone\n/use Minor Healthstone", "Eat your Healthstone (any size)." },
+    { "PK Make Stone", "#showtooltip Create Healthstone\n/cast Create Healthstone", "Make a Healthstone." },
+    { "PK Funnel", "#showtooltip Health Funnel\n/cast Health Funnel", "Heal your pet." },
+    { "PK Wand", "#showtooltip Shoot\n/cast !Shoot", "Wand. Pressing it again never stops it." },
+    { "PK Pet", "#showtooltip\n/petattack [@mouseover,harm,nodead][]", "Pet attacks mouseover mob, or your target." },
+    { "PK Pet Back", "/petfollow", "Pet comes back to you." },
 } }
 
 makeMacros = function()
@@ -3674,11 +4067,19 @@ local function buildSettings()
             function(v) DB.lowMana = v; layout() end))
         mana:SetPoint("TOPLEFT", 20, y)
         y = y - 30
-        local tank = add(makeCheck(w, "Tank mode",
-            "On: Righteous Fury, Seal of Fury, Sanctuary. Off: Righteousness, Might.",
-            function() return DB.tank end, function(v) DB.tank = v end))
-        tank:SetPoint("TOPLEFT", 16, y)
-        y = y - 26
+        if CLASS == "WARLOCK" then
+            y = y - 10
+            local sh = add(makeSlider(w, "Soul Shards to keep", 1, 20, 1, "%d", function() return DB.shardGoal or 5 end,
+                function(v) DB.shardGoal = v end))
+            sh:SetPoint("TOPLEFT", 20, y)
+            y = y - 30
+        else
+            local tank = add(makeCheck(w, "Tank mode",
+                "On: Righteous Fury, Seal of Fury, Sanctuary. Off: Righteousness, Might.",
+                function() return DB.tank end, function(v) DB.tank = v end))
+            tank:SetPoint("TOPLEFT", 16, y)
+            y = y - 26
+        end
     end
     local snd = add(makeCheck(w, "Sound on danger alerts", "Raid warning sound.",
         function() return DB.sound end, function(v) DB.sound = v end))

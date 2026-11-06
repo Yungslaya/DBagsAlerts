@@ -1,11 +1,12 @@
 # DBagsAlerts (work in progress)
 
-Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Paladin and Druid** (Bear, Cat, Balance and Restoration). This was **ProtAlerts**.
+Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Paladin, Druid** (Bear, Cat, Balance and Restoration) **and Warlock** (Affliction, Demonology, Destruction). This was **ProtAlerts**.
 
 > **WIP:** it's being built and tested while leveling. Expect changes and rough edges.
 
 ## What's new
 
+- **1.0.2:** **Warlock added:** DoTs (Corruption, Bane of Agony, Immolate, Siphon Life), free Shadow Bolt, Life Tap, Drain Soul for shards, pet, Demon Armor, Healthstone, Fear. 18 "PK" macros. /reload.
 - **1.0.1:** Racials: your race's combat racials go on the cooldown row. Elune's Light, Blood Fury and Berserking light up on tough fights, and War Stomp stops casts. /reload.
 - **1.0.0:** Renamed from ProtAlerts to DBagsAlerts. **Druid added:** the alerts follow your form (Bear, Cat, caster), and the bar shows rage, energy plus combo points, or mana. Your old ProtAlerts settings carry over, and old ProtAlerts turns itself off. Full WoW restart.
 - **0.9.13:** Weapon stone button: click to sharpen (blades) or weight (maces) your weapon; grey NO STONE when you have none (can turn off). /reload.
@@ -18,6 +19,7 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 - Big icons for what matters right now: danger (low HP, loose mobs, taunt, stop a cast), next button, buffs and debuffs to refresh.
 - **Druid:** Bear (Primal Bite, Lacerate/Swipe, Maul, Demo Roar, Faerie Fire), Cat (Ravage from Prowl, Rip, Rake, Claw/Shred, Shifting Power), caster (Moonfire, Insect Swarm, Wrath, Hurricane), Mark of the Wild + Thorns, Rejuvenation before a pull, Innervate. From the Icy Veins WoW Forever druid guides.
+- **Warlock:** Corruption, Bane of Agony (never early), Immolate, Siphon Life on mobs that will live; free Shadow Bolt (Nightfall); Conflagrate, Shadowburn, Searing Pain brand; Drain Life when low; Drain Soul on a dying mob when shards are low; Life Tap when mana is low and health is fine; pet out (unless Demonic Sacrifice), Demon Armor, Soul Link, curse on elites, Healthstone (eat it when low, make one when you have none). From the Icy Veins WoW Forever warlock guides.
 - Health, power, threat and swing timer bars.
 - Emergency cooldown row with proc glow.
 - Target frame with cast bar. Right-click it for the normal menu.

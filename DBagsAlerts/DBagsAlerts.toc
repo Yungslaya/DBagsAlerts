@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: |cffff7d0aDBags|r Alerts
-## Notes: Alerts, bars and helpers for Warrior, Paladin and Druid (all forms). Was ProtAlerts.
+## Notes: Alerts, bars and helpers for Warrior, Paladin, Druid (all forms) and Warlock. Was ProtAlerts.
 ## Author: Yungslaya
-## Version: 1.0.1
+## Version: 1.0.2
 ## SavedVariables: DBagsAlertsDB
 
 DBagsAlerts.lua
