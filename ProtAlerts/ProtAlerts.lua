@@ -57,6 +57,8 @@ local DEFAULTS = {
     buffNag = true,      -- missing Battle Shout reminder, also out of combat
     stanceNag = true,    -- flashing "DEFENSIVE" in combat when you are in another stance
     foodNag = true,      -- "EAT" button when Well Fed (+5% XP in Forever) is missing and you carry food
+    stoneNag = true,     -- weapon stone button when your main hand has no stone on it
+    stoneNeed = true,    -- ...and a grey "no stone" icon when you have none
     range = true,        -- melee range ring around the big icon
     lowMana = 20,        -- paladin: mana % for the LOW MANA warning
     dumpTank = 90,       -- warrior: spend line while you are getting hit a lot
@@ -2495,6 +2497,172 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
     end)
 end
 
+do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
+    -- Main hand has no stone on it (sharpening stone for blades, weightstone for
+    -- blunt)? Out of combat a button shows: click = use the stone on your main hand
+    -- (a normal 2-line macro: /use stone, /use 16). No stone in your bags: a grey
+    -- "NO STONE" icon instead (can be turned off). Hidden in combat, mounted, dead.
+    local SHARP = { [0] = true, [1] = true, [6] = true, [7] = true, [8] = true, [9] = true, [15] = true, [13] = true }
+    local BLUNT = { [4] = true, [5] = true, [10] = true, [13] = true }
+    local b = CreateFrame("Button", "ProtAlertsStoneButton", UIParent, "SecureActionButtonTemplate")
+    b:SetSize(44, 44)
+    b:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, -144)
+    b:RegisterForClicks("AnyUp", "AnyDown")
+    b:Hide()
+    b.icon = b:CreateTexture(nil, "ARTWORK")
+    b.icon:SetAllPoints(); b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    addBorder(b, 0, 0, 0, 1, 1)
+    b.gold = goldFrame(b, 4)
+    b.glow = b:CreateTexture(nil, "OVERLAY", nil, 7)
+    b.glow:SetTexture(MEDIA .. "ProcGlow.tga"); b.glow:SetBlendMode("ADD")
+    b.glow:SetVertexColor(0.55, 0.8, 1); b.glow:SetPoint("CENTER")
+    b.glow:SetSize(44 / 0.64, 44 / 0.64)
+    local ga = b:CreateAnimationGroup()
+    ga:SetLooping("BOUNCE")
+    local fa = ga:CreateAnimation("Alpha")
+    fa:SetFromAlpha(1); fa:SetToAlpha(0.6); fa:SetDuration(0.7)
+    ga:Play()
+    b.text = b:CreateFontString(nil, "OVERLAY")
+    styleText(b.text, 13, 0.6, 0.85, 1)
+    b.text:SetPoint("TOP", b, "BOTTOM", 0, -3)
+    b:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        if self.itemID then
+            pcall(GameTooltip.SetItemByID, GameTooltip, self.itemID)
+            GameTooltip:AddLine("Click: put it on your main hand weapon.", 0.6, 0.85, 1)
+        else
+            GameTooltip:SetText(self.need or "Weapon stone", 1, 0.82, 0.2)
+            GameTooltip:AddLine("No stone in your bags. Blacksmiths make them; trade goods vendors and the Auction House sell them.", 1, 1, 1, true)
+            GameTooltip:AddLine("Turn this off: /pa > Show if I have none.", 0.7, 0.7, 0.7, true)
+        end
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    ProtAlertsState.stoneButton = b
+
+    -- "sharp", "blunt" or nil for your main hand weapon
+    local function weaponKind()
+        local okI, id = pcall(GetInventoryItemID, "player", 16)
+        if not okI or not id or secret(id) then return nil end
+        local getI = C_Item and C_Item.GetItemInfoInstant or GetItemInfoInstant
+        if not getI then return nil end
+        local ok, _, _, _, _, _, classID, subID = pcall(getI, id)
+        if not ok or classID ~= 2 then return nil end      -- 2 = weapon
+        if SHARP[subID] and BLUNT[subID] then return "both" end
+        if SHARP[subID] then return "sharp" end
+        if BLUNT[subID] then return "blunt" end
+        return nil
+    end
+    -- stone on the main hand? true / false / nil (can't tell)
+    local function stoned()
+        if not GetWeaponEnchantInfo then return nil end
+        local ok, has, ms = pcall(GetWeaponEnchantInfo)
+        if not ok or secret(has) then return nil end
+        if not has then return false end
+        if not secret(ms) and type(ms) == "number" and ms < 60000 then return false end   -- under a minute left
+        return true
+    end
+    local function stoneKind(name)
+        if type(name) ~= "string" or secret(name) then return nil end
+        if name:find("Sharpening Stone", 1, true) then return "sharp" end
+        if name:find("Weightstone", 1, true) then return "blunt" end
+        return nil
+    end
+    local function itemName(id)
+        local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+        if not getInfo then return nil end
+        local ok, name, _, _, _, lvl = pcall(getInfo, id)
+        if ok then return name, (type(lvl) == "number" and lvl or 0) end
+    end
+    -- best stone for this weapon in your bags (highest required level you can use)
+    local function findStone(kind)
+        if not (C_Container and C_Container.GetContainerNumSlots and C_Container.GetContainerItemInfo) then return nil end
+        local myLevel = plain(UnitLevel("player"), 1) or 1
+        local best, bestLvl, bestIcon
+        for bag = 0, 4 do
+            local okN, n = pcall(C_Container.GetContainerNumSlots, bag)
+            for slot = 1, (okN and type(n) == "number" and n or 0) do
+                local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+                if ok and type(info) == "table" and not sectable(info) and info.itemID then
+                    local name, lvl = itemName(info.itemID)
+                    local k = stoneKind(name or info.itemName)
+                    if k and (kind == "both" or k == kind) and (lvl or 0) <= myLevel
+                       and (not bestLvl or lvl > bestLvl) then
+                        best, bestLvl, bestIcon = info.itemID, lvl, info.iconFileID
+                    end
+                end
+            end
+        end
+        return best, bestIcon
+    end
+
+    local driven = false
+    local function hide()
+        if driven and UnregisterStateDriver then UnregisterStateDriver(b, "visibility") end
+        driven = false
+        b:Hide()
+    end
+    local function show()
+        b.gold:SetShown(classic())
+        if not driven and RegisterStateDriver then
+            RegisterStateDriver(b, "visibility", "[combat][mounted][dead] hide; show")
+            driven = true
+        elseif not RegisterStateDriver then
+            b:Show()
+        end
+    end
+    local function update()
+        if InCombatLockdown() then return end          -- secure button: only change it out of combat
+        if not DB or DB.stoneNag == false or UnitIsDeadOrGhost("player") then hide() return end
+        local kind = weaponKind()
+        if not kind or stoned() ~= false then hide() return end
+        local id, icon = findStone(kind)
+        if id then
+            if b.itemID ~= id then
+                b.itemID = id
+                b:SetAttribute("type", "macro")
+                b:SetAttribute("macrotext", "/use item:" .. id .. "\n/use 16")
+                b.icon:SetTexture(icon or (C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(id)) or DEFAULT_ICON)
+                b.icon:SetDesaturated(false)
+                b.text:SetText(kind == "blunt" and "WEIGHT" or "SHARPEN")
+                b.text:SetTextColor(0.6, 0.85, 1)
+                b.glow:Show()
+            end
+            show()
+        elseif DB.stoneNeed ~= false then
+            if b.itemID or not b.need then
+                b.itemID = nil
+                b:SetAttribute("type", nil)
+                b.icon:SetTexture(kind == "blunt" and "Interface\\Icons\\INV_Stone_WeightStone_01"
+                                  or "Interface\\Icons\\INV_Stone_SharpeningStone_01")
+                b.icon:SetDesaturated(true)
+                b.text:SetText("NO STONE")
+                b.text:SetTextColor(0.6, 0.6, 0.6)
+                b.glow:Hide()
+            end
+            b.need = kind == "blunt" and "Weightstone" or "Sharpening Stone"
+            show()
+        else
+            hide()
+        end
+    end
+    ProtAlertsState.stoneUpdate = update
+
+    local ev = CreateFrame("Frame")
+    for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "BAG_UPDATE_DELAYED", "PLAYER_REGEN_ENABLED",
+                         "PLAYER_EQUIPMENT_CHANGED", "UNIT_INVENTORY_CHANGED" }) do
+        pcall(ev.RegisterEvent, ev, e)
+    end
+    local due = 0
+    ev:SetScript("OnEvent", function() due = 0 end)
+    ev:SetScript("OnUpdate", function(_, e)
+        due = due - e
+        if due > 0 then return end
+        due = 3                                          -- also every 3 s (stone wearing off)
+        pcall(update)
+    end)
+end
+
 do   -- click buttons (own block: Lua's 200 top-level locals limit)
     -- Blizzard's secure unit buttons over our frames: right-click = the normal WoW
     -- menu (invite, whisper, trade...), left-click = target, mouseover = tooltip.
@@ -3003,7 +3171,7 @@ end
 
 local function buildSettings()
     local w = CreateFrame("Frame", "ProtAlertsSettings", UIParent)
-    w:SetSize(360, 640)
+    w:SetSize(360, 662)
     w:SetPoint("CENTER")
     w:SetFrameStrata("DIALOG")
     w:SetMovable(true); w:EnableMouse(true); w:SetClampedToScreen(true)
@@ -3080,11 +3248,17 @@ local function buildSettings()
     local fnag = add(makeCheck(w, "Eat reminder", "Shows an EAT button when you have no Well Fed (+5% XP) but carry food that gives it. Click it to eat.",
         function() return DB.foodNag ~= false end, function(v) DB.foodNag = v end))
     fnag:SetPoint("TOPLEFT", 16, -268)
+    local stn = add(makeCheck(w, "Weapon stone", "Button to put a sharpening stone or weightstone on your weapon when it has none.",
+        function() return DB.stoneNag ~= false end, function(v) DB.stoneNag = v end))
+    stn:SetPoint("TOPLEFT", 180, -268)
+    local stn2 = add(makeCheck(w, "Show if I have none", "Grey NO STONE icon when your bags have no stone for your weapon.",
+        function() return DB.stoneNeed ~= false end, function(v) DB.stoneNeed = v end))
+    stn2:SetPoint("TOPLEFT", 16, -290)
     local test = makeButton(w, "Preview", 200, function() testUntil = GetTime() + 8 end)
-    test:SetPoint("TOPLEFT", 20, -298)
+    test:SetPoint("TOPLEFT", 20, -320)
     if CLASS_MACROS[CLASS] then
         local mk = makeButton(w, "Create macros", 200, makeMacros)
-        mk:SetPoint("TOPLEFT", 20, -326)
+        mk:SetPoint("TOPLEFT", 20, -348)
         mk:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:SetText("Create macros", 1, 0.82, 0.2)
@@ -3096,8 +3270,8 @@ local function buildSettings()
     end
 
     -- WARNINGS
-    heading(w, "Thresholds", -362)
-    local y = -402
+    heading(w, "Thresholds", -384)
+    local y = -424
     local hp = add(makeSlider(w, "Low health", 10, 80, 5, "%d%%", function() return DB.lowHp end,
         function(v) DB.lowHp = v end))
     hp:SetPoint("TOPLEFT", 20, y)

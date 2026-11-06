@@ -6,6 +6,7 @@ Tank helper for **WoW: Forever** (Interface 16001). Protection Warrior and Palad
 
 ## What's new
 
+- **0.9.13:** Weapon stone button: click to sharpen (blades) or weight (maces) your weapon; grey NO STONE when you have none (can turn off). /reload.
 - **0.9.12:** EAT button fix: food is re-checked when WoW hadn't loaded it yet; new /pa food check. /reload.
 - **0.9.11:** Demoralizing Shout now shows early in every fight, not only on packs and elites. /reload.
 - **0.9.10:** Aggro dots only run while you are in combat. /reload.
