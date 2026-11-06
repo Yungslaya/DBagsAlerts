@@ -258,6 +258,47 @@ do
     PCAST = nil; FIRE("UNIT_SPELLCAST_STOP", "player"); TICK()
     assert(cb._shown == false, "cast bar stays after stop")
 end
+-- Shared floating layout across all four classes.
+do
+    DBagsAlertsDB.stack=true; DBagsAlertsDB.casts=true
+    SlashCmdList.DBAGSALERTS("newlook"); ADVANCE(1); TICK()
+    local function hud()
+        local h=DBagsAlertsState.casterHUD
+        assert(h.frameless and h.width==300 and h.class==MODE_CLASS, "shared layout missing")
+        for _,a in ipairs(DBagsAlertsState.alerts) do
+            if a.hudSpot=="next" then assert(a.root._w==60, "wrong action size")
+            elseif a.hudSpot then assert(a.root._w==28, "wrong helper size") end
+        end
+        return h
+    end
+    local function names()
+        local s={}
+        for _,f in ipairs(DBagsAlertsState.dotTiles) do s[#s+1]=f.name end
+        return table.concat(s,",")
+    end
+    local h=hud()
+    if MODE_CLASS=="WARRIOR" then
+        assert(h.melee and h.power==1 and names()=="Rend", "warrior layout/resources")
+    elseif MODE_CLASS=="PALADIN" then
+        assert(h.melee and h.power==0 and names()=="", "paladin layout/resources")
+    elseif MODE_CLASS=="DRUID" then
+        for _,v in ipairs({{1,3,"cat","Rake,Rip,Faerie Fire (Feral)",true},
+                           {5,1,"bear","Faerie Fire (Feral)",true},
+                           {3,0,"travel","",false},
+                           {0,0,"caster","Moonfire,Insect Swarm",false}}) do
+            FORM_ID,PTYPE=v[1],v[2]
+            FIRE("UPDATE_SHAPESHIFT_FORM"); FIRE("UNIT_POWER_FREQUENT","player"); ADVANCE(1); TICK()
+            h=hud()
+            assert(h.form==v[3] and h.power==v[2] and h.melee==v[5],"form/resource not rebuilt")
+            assert(names()==v[4], "wrong druid timer list: "..names())
+            print("FORM "..v[3].." power="..v[2].." timers="..names().." PASS")
+        end
+    end
+    local frame=h.frame
+    SlashCmdList.DBAGSALERTS("oldlook"); assert(frame._shown==false,"oldlook failed")
+    SlashCmdList.DBAGSALERTS("newlook"); assert(frame._shown==true,"newlook failed")
+    print("FLOW "..MODE_CLASS.." layout, resources, old/new switch PASS")
+end
 -- WARLOCKCHECK
 if MODE_CLASS == "WARLOCK" then
     local function lit()

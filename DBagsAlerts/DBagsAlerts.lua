@@ -1534,7 +1534,7 @@ local CLASSIC_TEX = "Interface\\TargetingFrame\\UI-StatusBar"
 local EDGE = { edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 12,
                insets = { left = 3, right = 3, top = 3, bottom = 3 } }
 local GOLD = { 0.86, 0.72, 0.42 }
--- New warlock look (DRU.lux) is always flat: thin black lines, no gold frames (Luxthos UI style)
+-- The shared floating layout is flat; the previous layout remains available with /pa oldlook.
 local function classic() return not DRU.lux and (not DB or DB.style ~= "clean") end
 local function goldFrame(parent, pad)
     local f = CreateFrame("Frame", nil, parent, BackdropTemplateMixin and "BackdropTemplate" or nil)
@@ -1933,8 +1933,13 @@ end
 local function layout()
     local width = BAR_W + 12
     local y = 0
-    DRU.caster = CLASS == "WARLOCK"
-    DRU.lux = DRU.caster and DB.lux ~= false      -- new warlock look; /pa oldlook switches back
+    if CLASS == "DRUID" then
+        local id = plain(GetShapeshiftFormID and GetShapeshiftFormID(), nil)
+        ctx.form = DRU.FORM[id or 0] or "caster"
+        DRU.layoutForm = ctx.form
+    end
+    DRU.caster = CLASS == "WARLOCK" or (CLASS == "DRUID" and ctx.form ~= "bear" and ctx.form ~= "cat")
+    DRU.lux = DB.lux ~= false and DB.stack ~= false and SPOT[CLASS] ~= nil
     for _, a in ipairs(ALERTS) do if not a.root then makeSlot(a) end end
     if DRU.lux and DRU.layoutCaster then DRU.layoutCaster(); return end
     if DRU.hideCaster then DRU.hideCaster() end
@@ -3075,7 +3080,7 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
     DBagsAlertsState.pips = pips
 end
 
-do   -- Warlock HUD: floating cues and bars, no enclosing panel.
+do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
     local W, PAD, NEXT = 300, 10, 60
     local deck = CreateFrame("Frame", nil, main)
     deck:SetFrameLevel(main:GetFrameLevel())
@@ -3084,12 +3089,23 @@ do   -- Warlock HUD: floating cues and bars, no enclosing panel.
     shardText:SetPoint("TOPRIGHT", -PAD, -85) -- repositioned beside utility after layout
     local dots, used, dotY, castY, utilityY = {}, {}, 0, 0, 0
     local function dotList()
+        local names
+        if CLASS == "WARRIOR" then names = {"Rend"}
+        elseif CLASS == "PALADIN" then names = {} -- upkeep stays in the small buff cue
+        elseif CLASS == "DRUID" then
+            if ctx.form == "cat" then names = {"Rake", "Rip", "Faerie Fire (Feral)"}
+            elseif ctx.form == "bear" then names = {"Faerie Fire (Feral)"}
+            elseif ctx.form == "travel" then names = {}
+            else names = {"Moonfire", "Insect Swarm", "Faerie Fire"} end
+        else names = {"Corruption", "Bane of Agony", "Curse of Agony", "Immolate", "Siphon Life"} end
         local list = {}
-        for _, n in ipairs({"Corruption", "Bane of Agony", "Curse of Agony", "Immolate", "Siphon Life"}) do
+        for _, n in ipairs(names) do
             if spell[n] and not (n == "Curse of Agony" and spell["Bane of Agony"]) then list[#list + 1] = n end
         end
-        local curse = firstKnown({"Curse of the Elements", "Curse of Weakness"})
-        if curse then list[#list + 1] = curse end
+        if CLASS == "WARLOCK" then
+            local curse = firstKnown({"Curse of the Elements", "Curse of Weakness"})
+            if curse then list[#list + 1] = curse end
+        end
         return list
     end
     local function tile(i)
@@ -3111,7 +3127,7 @@ do   -- Warlock HUD: floating cues and bars, no enclosing panel.
     local function dotLeft(name, now, key)
         -- Own-cast history is readable. Do not scan secret aura fields every tick.
         local t = DRU.dotAt[name]
-        local at = t and t[key]
+        local at = name == "Rend" and rendAt[key] or (t and t[key])
         local length = durationOf(name)
         if at then return math.max(0, length - (now - at)), length end
         return nil, length
@@ -3128,7 +3144,7 @@ do   -- Warlock HUD: floating cues and bars, no enclosing panel.
             colorBorder(a.c.edge, a.danger and 1 or 0, a.danger and 0.15 or 0, a.danger and 0.15 or 0, a.danger and 1 or 0)
         end
         for _, f in pairs(cdIcons) do f.glow:SetAlpha(1) end
-        panel:Show(); healthBar:SetHeight(28)
+        panel:Show(); healthBar:SetHeight(28); threatBar:SetHeight(10); swingBar:SetHeight(10)
         healthBar.left:SetText(""); rageBar.left:SetText("")
         styleText(healthBar.text, 18, 1, 1, 1); styleText(rageBar.text, 14, 1, 1, 1)
         tf.pw:Show(); tf.tot:Show()
@@ -3152,7 +3168,7 @@ do   -- Warlock HUD: floating cues and bars, no enclosing panel.
             if rawget(a.c, "glowF") then a.c.glowF:Hide() end
             if rawget(a.c, "gold") then a.c.gold:Hide() end
         end
-        for spot, keys in pairs(SPOT.WARLOCK) do
+        for spot, keys in pairs(SPOT[CLASS]) do
             local p = pos[spot]
             for i, key in ipairs(keys) do
                 local a = byKey[key]
@@ -3199,13 +3215,27 @@ do   -- Warlock HUD: floating cues and bars, no enclosing panel.
         rageBar:SetHeight(18); rageBar:SetWidth(blockW)
         rageBar:ClearAllPoints(); rageBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
         rageBar:SetStatusBarTexture(BAR_TEX); rageBar.frame:Hide(); rageBar.tick:Hide()
+        if POWER == RAGE then rageBar:SetStatusBarColor(0.85, 0.12, 0.12)
+        elseif POWER == DRU.ENERGY then rageBar:SetStatusBarColor(1, 0.85, 0.1)
+        else rageBar:SetStatusBarColor(0.2, 0.42, 0.78) end
         rageBar.left:SetText("")
         rageBar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.5)
         styleText(rageBar.text, 14, 1, 1, 1)
         y = y + 24
+        -- Melee keeps useful timing/threat as quiet 3 px strips, instead of bulky bars.
+        if not DRU.caster then
+            threatBar:ClearAllPoints(); threatBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
+            threatBar:SetSize(blockW, 3); threatBar.frame:Hide(); threatBar:Show()
+            swingBar:ClearAllPoints(); swingBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -(y + 5))
+            swingBar:SetSize(blockW, 3); swingBar.frame:Hide()
+            y = y + 13
+        end
         castY = y
-        castPlayer.col = {0.48, 0.32, 0.70}
-        castPlayer:SetStatusBarColor(0.48, 0.32, 0.70)
+        local cc = CLASS == "PALADIN" and {0.80, 0.54, 0.62}
+            or CLASS == "DRUID" and {0.68, 0.44, 0.20}
+            or CLASS == "WARRIOR" and {0.67, 0.53, 0.37} or {0.48, 0.32, 0.70}
+        castPlayer.col = cc
+        castPlayer:SetStatusBarColor(cc[1], cc[2], cc[3])
         castPlayer:SetStatusBarTexture(BAR_TEX); castPlayer.frame:Hide()
         castPlayer:SetHeight(26); castPlayer:SetWidth(blockW - 27)
         castPlayer.icon:SetSize(26, 26)
@@ -3228,6 +3258,7 @@ do   -- Warlock HUD: floating cues and bars, no enclosing panel.
             end
         end
         if n > 0 then y = y + math.ceil(n / 6) * 31 end
+        if CLASS ~= "WARLOCK" then shardText:SetText("") end
         main:SetSize(W, y + 8); main:SetScale(DB.scale)
         main:ClearAllPoints(); main:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
         main:EnableMouse(not DB.locked); main:EnableMouseWheel(not DB.locked); main.bg:SetShown(not DB.locked)
@@ -3244,7 +3275,7 @@ do   -- Warlock HUD: floating cues and bars, no enclosing panel.
         tf.cast:SetSize(160, 20); tf.cast.frame:Hide()
         tDirty.all = true
         DBagsAlertsState.dotTiles = used
-        DBagsAlertsState.casterHUD = {width=W, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck, frameless=true}
+        DBagsAlertsState.casterHUD = {width=W, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck, frameless=true, class=CLASS, form=ctx.form, power=POWER, melee=not DRU.caster}
         if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end
     end
     local elapsed, shardAt = 0, 0
@@ -3257,7 +3288,7 @@ do   -- Warlock HUD: floating cues and bars, no enclosing panel.
         local now = GetTime()
         if now >= shardAt then
             shardAt = now + 0.5
-            if spell["Drain Soul"] then shardText:SetFormattedText("Shards %d/%d", DRU.bags(), DB.shardGoal or 5)
+            if CLASS == "WARLOCK" and spell["Drain Soul"] then shardText:SetFormattedText("Shards %d/%d", DRU.bags(), DB.shardGoal or 5)
             else shardText:SetText("") end
         end
         tf:SetShown(DB.target and ctx.hostile and true or false)
@@ -3440,7 +3471,7 @@ do   -- missing buff reminder (own block: Lua's 200 top-level locals limit)
         local shownKey
         local function check()
             cfg = CLASS and NAG[CLASS]
-            if not cfg or not DB or DB.buffNag == false or not spell[cfg.buff] or UnitIsDeadOrGhost("player") or IsMounted()
+            if DRU.lux or not cfg or not DB or DB.buffNag == false or not spell[cfg.buff] or UnitIsDeadOrGhost("player") or IsMounted()
                or (IsResting() and not ctx.combat) then
                 f:Hide(); shownKey = nil return
             end
@@ -3530,7 +3561,12 @@ do   -- stance reminder (own block: Lua's 200 top-level locals limit)
                 if GetTime() - offSince >= 2 then
                     if not f:IsShown() then
                         f.icon:SetTexture(C_Spell.GetSpellTexture(spell["Defensive Stance"]) or DEFAULT_ICON)
-                        f.gold:SetShown(classic())
+                        f.gold:SetShown(classic()); f.glow:SetShown(not DRU.lux)
+                        f:SetSize(DRU.lux and 40 or 64, DRU.lux and 40 or 64)
+                        styleText(f.text, DRU.lux and 12 or 22, 1, 0.3, 0.25)
+                        f:ClearAllPoints()
+                        if DRU.lux then f:SetPoint("TOPLEFT", main, "TOPRIGHT", 2, -146)
+                        else f:SetPoint("CENTER", UIParent, "CENTER", 0, 190) end
                         f:Show(); ga:Play()
                     end
                     return
@@ -3687,7 +3723,7 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
             b:SetAttribute("item", "item:" .. id)
             b.icon:SetTexture(icon or (C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(id)) or DEFAULT_ICON)
         end
-        b.gold:SetShown(classic())
+        b.gold:SetShown(classic()); b.glow:SetAlpha(DRU.lux and 0 or 1)
         if not driven and RegisterStateDriver then
             RegisterStateDriver(b, "visibility", "[combat][mounted][dead] hide; show")
             driven = true
@@ -3818,7 +3854,7 @@ do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
         b:Hide()
     end
     local function show()
-        b.gold:SetShown(classic())
+        b.gold:SetShown(classic()); b.glow:SetAlpha(DRU.lux and 0 or 1)
         if not driven and RegisterStateDriver then
             RegisterStateDriver(b, "visibility", "[combat][mounted][dead] hide; show")
             driven = true
@@ -4048,8 +4084,11 @@ end)
 DRU.refreshPower = function()
     if CLASS ~= "DRUID" then return end
     local p = plain(UnitPowerType("player"), POWER)
-    if type(p) ~= "number" or p == POWER then return end
-    POWER = p
+    local id = plain(GetShapeshiftFormID and GetShapeshiftFormID(), nil)
+    local form = DRU.FORM[id or 0] or "caster"
+    local powerChanged = type(p) == "number" and p ~= POWER
+    if not powerChanged and form == DRU.layoutForm then return end
+    if powerChanged then POWER = p end
     barsDirty.power = true
     pcall(layout)
 end
@@ -4691,7 +4730,7 @@ SlashCmdList.DBAGSALERTS = function(msg)
     elseif cmd == "oldlook" or cmd == "newlook" then
         DB.lux = cmd == "newlook"
         layout()
-        say(DB.lux and "new warlock look on. /pa oldlook to go back." or "old warlock look on. /pa newlook for the new one.")
+        say(DB.lux and "floating layout on. /pa oldlook to go back." or "previous layout on. /pa newlook for the floating one.")
     elseif cmd == "test" then
         testUntil = GetTime() + 8; say("preview on.")
     elseif cmd == "scale" and tonumber(rest) then
