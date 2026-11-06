@@ -1872,6 +1872,13 @@ local function layoutStack()
         extra  = { pad + 2 * (M + g), rowY, M },
     }
     -- no empty background boxes: a frame only shows around an icon that is lit
+    -- (new warlock look: dark empty squares keep the row's shape, like a cooldown bar)
+    if DRU.lux then
+        for _, spot in ipairs({ "danger", "next", "extra" }) do
+            local p = pos[spot]
+            slotBack(spot, p[1], p[2], p[3])
+        end
+    end
     local base = main:GetFrameLevel() + 5
     for spot, keys in pairs(sp) do
         local p = pos[spot]
@@ -2016,6 +2023,7 @@ local function layout()
         end
         y = y + cs
     end
+    if DRU.lux and DRU.castBottom then y = DRU.castBottom(x, y + 4) end
     -- threat + swing go under the buttons: when they hide, nothing empty is left in the middle
     threatBar:ClearAllPoints(); threatBar:SetPoint("TOPLEFT", main, "TOPLEFT", x, -(y + gb))
     swingBar:ClearAllPoints(); swingBar:SetPoint("TOPLEFT", threatBar, "BOTTOMLEFT", 0, -gb)
@@ -2978,7 +2986,7 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
             return y
         end
         if DRU.lux then
-            -- new look, step 2: shard pips, then a 30 px cast bar (icon inside the column)
+            -- new look, step 2: shard pips (the cast bar goes to the bottom: DRU.castBottom)
             fontSize(rageBar.text, 15)
             if spell["Drain Soul"] then
                 pipN = math.max(3, math.min(10, DB.shardGoal or 5))
@@ -3002,17 +3010,9 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
                 pips:Show()
                 y = y + 12
             end
-            local h = 30
-            cb.col = { FEL[1], FEL[2], FEL[3] }
-            cb:SetStatusBarColor(FEL[1], FEL[2], FEL[3])
-            cb:SetHeight(h); cb.icon:SetSize(h, h)
-            fontSize(cb.name, 15); fontSize(cb.left, 16)
-            y = y + 3
-            cb:ClearAllPoints(); cb:SetWidth(blockW - h - 1)
-            cb:SetPoint("TOPLEFT", main, "TOPLEFT", x + h + 1, -y)
             idle:Hide()
             shown = true
-            return y + h + 3
+            return y + 2
         end
         -- 1) cast bar: full width under your mana, purple, icon on the left
         local h, ih = 24, 24
@@ -3088,6 +3088,20 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
             end
         end)
     end)
+    -- new look, step 3: cast bar at the very bottom, under the cooldowns, so nothing
+    -- leaves a hole in the middle while you're not casting
+    DRU.castBottom = function(x, y)
+        local cb = castPlayer
+        local h = 30
+        cb.col = { FEL[1], FEL[2], FEL[3] }
+        cb:SetStatusBarColor(FEL[1], FEL[2], FEL[3])
+        cb:SetHeight(h); cb.icon:SetSize(h, h)
+        fontSize(cb.name, 15); fontSize(cb.left, 16)
+        cb:ClearAllPoints(); cb:SetWidth(blockW - h - 1)
+        cb:SetPoint("TOPLEFT", main, "TOPLEFT", x + h + 1, -y)
+        idle:Hide()
+        return y + h + 3
+    end
     DBagsAlertsState.dotTiles = used
     DBagsAlertsState.pips = pips
 end
