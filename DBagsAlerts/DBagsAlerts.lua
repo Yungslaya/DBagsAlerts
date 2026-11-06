@@ -1160,6 +1160,7 @@ do
               local n = firstKnown({ "Death Coil" }, true)
               if n then return n, "DEATH COIL" end
               if spell["Drain Life"] then return "Drain Life", "DRAIN LIFE" end
+              need(st, false) -- no learned emergency spell: no placeholder icon
           end },
         { key = "fear", row = 1, label = "FEAR ONE", danger = true, icon = "Fear",
           test = function(st)
@@ -1320,7 +1321,7 @@ do
           end },
         { key = "lowmana", row = 2, label = "LOW MANA", icon = "Life Tap",
           test = function(st)
-              need(st, ctx.combat)
+              need(st, ctx.combat and spell["Life Tap"])
               needRage(st, DB.lowMana, true)
           end },
     }
@@ -1838,7 +1839,7 @@ end
 local function applyStyle()
     local c = classic()
     for _, bar in ipairs(BARS) do
-        local tex = (c or DRU.lux) and CLASSIC_TEX or BAR_TEX     -- new warlock look: Blizzard bar texture
+        local tex = c and CLASSIC_TEX or BAR_TEX     -- new warlock look: Blizzard bar texture
         bar:SetStatusBarTexture(tex)
         bar:SetStatusBarColor(bar.col[1], bar.col[2], bar.col[3])
         bar.bg:SetTexture(tex)
@@ -1935,6 +1936,8 @@ local function layout()
     DRU.caster = CLASS == "WARLOCK"
     DRU.lux = DRU.caster and DB.lux ~= false      -- new warlock look; /pa oldlook switches back
     for _, a in ipairs(ALERTS) do if not a.root then makeSlot(a) end end
+    if DRU.lux and DRU.layoutCaster then DRU.layoutCaster(); return end
+    if DRU.hideCaster then DRU.hideCaster() end
     ring:Hide()
     for _, f in pairs(slotBG) do f:Hide() end
     if DB.stack ~= false and SPOT[CLASS] then
@@ -2055,9 +2058,9 @@ local function setIcon(a, name, label)
         a.iconName = name
         local id = spell[name]
         local tex = id and C_Spell.GetSpellTexture(id) or DRU.icons[name]
-        a.c.icon:SetTexture(tex or FALLBACK_ICON[a.key] or DEFAULT_ICON)
+        a.c.icon:SetTexture(tex or (CLASS == "WARLOCK" and "Interface\\Icons\\INV_Misc_QuestionMark") or FALLBACK_ICON[a.key] or DEFAULT_ICON)
     end
-    setText(a.c.text, label or a.label)
+    setText(a.c.text, (DRU.lux and a.hudSpot == "next") and (a.key == "trance" and "Free Shadow Bolt" or name) or (label or a.label))
 end
 
 local function safeAlpha(f, v)
@@ -2219,7 +2222,7 @@ end
 
 -- Rage bar: red normally, gold once you are past the "spend" line.
 local function colorRage()
-    if POWER == MANA then rageBar:SetStatusBarColor(0.2, 0.45, 1) return end
+    if POWER == MANA then rageBar:SetStatusBarColor(0.2, DRU.lux and 0.42 or 0.45, DRU.lux and 0.78 or 1) return end
     if POWER == DRU.ENERGY then rageBar:SetStatusBarColor(1, 0.85, 0.1) return end   -- energy: yellow
     local line = spendLine()
     local r, m = UnitPower("player", RAGE), UnitPowerMax("player", RAGE)
@@ -2608,7 +2611,9 @@ local function update()
     wipe(glowSet)
     for _, a in ipairs(ALERTS) do
         if a.root and not DB.off[a.key] and a.inSpot ~= false then
-            if testing then
+            if testing and CLASS == "WARLOCK" and not (spell[a.icon] or DRU.icons[a.icon]) then
+                a.root:SetAlpha(0); a.rootA = 0
+            elseif testing then
                 setIcon(a); a.root:SetAlpha(1); a.rootA = 1
                 a.gA = a.gA or {}
                 for i = 1, 4 do a.gates[i]:SetAlpha(1); a.gA[i] = 1 end
@@ -2746,14 +2751,14 @@ tf:Hide()
 local tDirty = { all = true }
 
 local function refreshCast(cb, unit, isTarget)
-    if not DB.casts then cb:Hide() return end
-    local name, _, tex, _, _, _, _, notInt = UnitCastingInfo(unit)
+    if not DB.casts then cb:Hide(); if not isTarget and DRU.clearCastClock then DRU.clearCastClock() end; return end
+    local name, _, tex, startMS, endMS, _, _, notInt = UnitCastingInfo(unit)
     local channel = false
     if not name then
-        name, _, tex, _, _, _, notInt = UnitChannelInfo(unit)
+        name, _, tex, startMS, endMS, _, notInt = UnitChannelInfo(unit)
         channel = name and true or false
     end
-    if not name then cb:Hide() return end
+    if not name then cb:Hide(); if not isTarget and DRU.clearCastClock then DRU.clearCastClock() end; return end
     local dur
     if channel then dur = UnitChannelDuration and UnitChannelDuration(unit)
     else dur = UnitCastingDuration and UnitCastingDuration(unit) end
@@ -2764,135 +2769,61 @@ local function refreshCast(cb, unit, isTarget)
     pcall(cb.icon.SetTexture, cb.icon, tex)
     if isTarget then boolAlpha(cb.lock, notInt, 1, 0) else cb.lock:SetAlpha(0) end
     cb:Show()
-    if not isTarget and DRU.slideStart then DRU.slideStart(channel) end
+    if not isTarget and DRU.castClock then DRU.castClock(dur, channel, startMS, endMS) end
 end
 
-do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level locals limit)
-    -- WoW lets you PRESS your next spell a little before this cast ends (the spell
-    -- queue window, 400 ms by default): the game holds it and fires it the moment
-    -- this cast is done. That end part is shaded blue ("NEXT"); once the cast reaches
-    -- it the bar turns blue. Moving still cancels the cast: in Forever (modern engine)
-    -- you must stand still until the bar is full - this zone is for pressing, not moving.
+do   -- authoritative cast display: duration object drives both fill and timer.
     local cb = castPlayer
-    -- queue zone: the last part of the bar, shaded blue, with a bright edge where it starts
-    cb.zone = cb.top:CreateTexture(nil, "ARTWORK")
-    cb.zone:SetColorTexture(0.3, 0.7, 1, 1)
-    cb.zone:Hide()
-    cb.zoneText = cb.top:CreateFontString(nil, "OVERLAY")
-    styleText(cb.zoneText, 10, 0.75, 0.88, 1)
-    cb.zoneText:SetText("NEXT"); cb.zoneText:Hide()
-    -- safe zone (how Quartz / Pulsar Cast Bars do slidecasting): your real network delay,
-    -- measured each cast from pressing the spell (UNIT_SPELLCAST_SENT) to the server
-    -- starting it (UNIT_SPELLCAST_START). The server finishes the cast that much before
-    -- your bar does, so ONLY this last bit is safe to move in. Green = go.
-    cb.safe = cb.top:CreateTexture(nil, "ARTWORK", nil, 3)
-    cb.safe:SetColorTexture(0.25, 1, 0.35, 1)
-    cb.safe:Hide()
-    cb.safeText = cb.top:CreateFontString(nil, "OVERLAY")
-    styleText(cb.safeText, 10, 0.45, 1, 0.5)
-    cb.safeText:SetText("MOVE"); cb.safeText:Hide()
-    cb.slide = cb.top:CreateTexture(nil, "OVERLAY", nil, 6)
-    cb.slide:SetColorTexture(1, 1, 1, 0.9)
-    cb.slide:SetWidth(2)
-    cb.slide:Hide()
-    -- spark riding the front of the fill (follows the game's own timer: no math needed)
-    cb.spark = cb.top:CreateTexture(nil, "OVERLAY", nil, 7)
-    cb.spark:SetTexture("Interface\\CastingBar\\UI-CastingBar-Spark")
-    cb.spark:SetBlendMode("ADD")
-    cb.spark:SetSize(20, 44)
-    local fill = cb.GetStatusBarTexture and cb:GetStatusBarTexture()
-    if fill then cb.spark:SetPoint("CENTER", fill, "RIGHT", 0, 0) else cb.spark:Hide() end
-    cb.left = cb.top:CreateFontString(nil, "OVERLAY")        -- seconds left, right side
-    styleText(cb.left, 14, 1, 1, 1)
-    cb.left:SetPoint("RIGHT", -5, 0)
-    cb.name:SetPoint("RIGHT", -40, 0)
-    local function baseColor() local c = cb.col; cb:SetStatusBarColor(c[1], c[2], c[3]) end
-    local endAt, slideAt, safeAt, green   -- plain GetTime() values for this cast, or nil
-    local sentAt, lag                     -- when you pressed the spell; measured delay (sec)
-    local function netLag()               -- fallback: the game's own latency number
-        local ok, _, _, home, world = pcall(GetNetStats or function() end)
-        local ms = ok and plain(world, nil) or nil
-        if not ms or ms <= 0 then ms = ok and plain(home, nil) or nil end
-        return (type(ms) == "number" and ms > 0) and ms / 1000 or 0.1
+    cb.left = cb.top:CreateFontString(nil, "OVERLAY")
+    styleText(cb.left, 15, 1, 1, 1)
+    cb.left:SetPoint("RIGHT", -7, 0)
+    cb.name:SetPoint("RIGHT", -49, 0)
+    local mark = cb.top:CreateTexture(nil, "ARTWORK")
+    mark:SetColorTexture(0.45, 0.67, 1, 0.85); mark:Hide()
+    cb.queueMark = mark
+    local dur, finish, queueAt, channel, elapsed = nil, nil, nil, false, 0
+    local function reset()
+        dur, finish, queueAt = nil, nil, nil
+        mark:Hide(); cb.left:SetText("")
+        local c = cb.col; cb:SetStatusBarColor(c[1], c[2], c[3])
     end
-    local function window()
+    DRU.castClock = function(d, ch, startMS, endMS)
+        reset()
+        dur, channel = d, ch
+        -- The queue marker means "press next" only. Latency does not prove that
+        -- moving early is safe. Hidden cast times are never guessed from spell data.
+        if secret(startMS) or secret(endMS) then return end
+        if type(startMS) ~= "number" or type(endMS) ~= "number" or endMS <= startMS then return end
+        finish = endMS / 1000
+        if ch or DB.slide == false then return end
         local ok, v = pcall(GetCVar or function() end, "SpellQueueWindow")
-        v = ok and tonumber(plain(v, nil)) or 400
-        return math.max(0, math.min(400, v)) / 1000       -- the game caps it at 400 ms
-    end
-    -- cast length in seconds: the cast's own times when readable, else the spell's cast time
-    local fresh, keepEnd, startID = true, nil, nil   -- fresh = a new cast started (not a pushback update)
-    local function castTimes()
-        local _, _, _, s, e, _, _, _, id = UnitCastingInfo("player")
-        s, e = plain(s, nil), plain(e, nil)
-        if type(s) == "number" and type(e) == "number" and e > s then return e / 1000, (e - s) / 1000 end
-        id = plain(id, nil) or startID     -- locked: the spell from our own cast-start event
-        if id and C_Spell.GetSpellInfo then
-            local ok, info = pcall(C_Spell.GetSpellInfo, id)
-            local ct = ok and type(info) == "table" and not sectable(info) and plain(info.castTime, nil)
-            if type(ct) == "number" and ct > 0 then
-                if keepEnd then return keepEnd, ct / 1000 end    -- pushback, times locked: keep what we had
-                return GetTime() + ct / 1000, ct / 1000
-            end
-        end
-    end
-    DRU.slideStart = function(channel)
-        keepEnd = (not fresh) and endAt or nil
-        fresh = false
-        endAt, slideAt, safeAt, green = nil, nil, nil, nil
-        baseColor()
-        cb.slide:Hide(); cb.zone:Hide(); cb.zoneText:Hide(); cb.safe:Hide(); cb.safeText:Hide(); cb.left:SetText("")
-        if channel or DB.slide == false then return end
-        local e, len = castTimes()
-        if not e then return end
-        local w = math.min(window(), len)
-        local sz = math.min(lag or netLag(), 0.4, len)       -- real safe-to-move part
-        endAt, slideAt, safeAt = e, e - w, e - sz
+        v = ok and plain(v, nil) or nil
+        local ms = tonumber(v) or 400
+        local length = (endMS - startMS) / 1000
+        local w = math.min(math.max(ms / 1000, 0), length)
+        queueAt = finish - w
         local width = cb:GetWidth()
-        if type(width) == "number" and not secret(width) and width > 0 then
-            local x = width * (1 - w / len)
-            -- a thin strip along the bottom edge: blue = press next, green = safe to move.
-            -- No labels (they piled up); the whole bar also turns blue, then green.
-            cb.zone:ClearAllPoints()
-            cb.zone:SetPoint("BOTTOMLEFT", cb, "BOTTOMLEFT", x, 0); cb.zone:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
-            cb.zone:SetHeight(5)
-            cb.zone:Show()
-            local sx = width * (1 - sz / len)
-            cb.safe:ClearAllPoints()
-            cb.safe:SetPoint("BOTTOMLEFT", cb, "BOTTOMLEFT", sx, 0); cb.safe:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
-            cb.safe:SetHeight(5)
-            cb.safe:Show()
+        if type(width) == "number" and not secret(width) and width > 0 and w > 0 then
+            mark:ClearAllPoints(); mark:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
+            mark:SetSize(width * w / length, 2); mark:Show()
         end
     end
-    local drv = CreateFrame("Frame")
-    pcall(drv.RegisterUnitEvent, drv, "UNIT_SPELLCAST_START", "player")
-    pcall(drv.RegisterUnitEvent, drv, "UNIT_SPELLCAST_SENT", "player")
-    drv:SetScript("OnEvent", function(_, event, _, _, id)
-        if event == "UNIT_SPELLCAST_SENT" then sentAt = GetTime() return end
-        fresh = true
-        startID = (id ~= nil and not secret(id)) and id or nil
-        -- delay for THIS cast; ignore silly values (no SENT seen, or a very old one)
-        local d = sentAt and GetTime() - sentAt
-        lag = (d and d > 0 and d < 1) and d or nil
-        sentAt = nil
-    end)
-    drv:SetScript("OnUpdate", function()
-        if not endAt then return end
-        if not cb:IsShown() then
-            endAt = nil; cb.slide:Hide(); cb.zone:Hide(); cb.zoneText:Hide(); cb.safe:Hide(); cb.safeText:Hide()
-            return
+    DRU.clearCastClock = reset
+    local driver = CreateFrame("Frame")
+    driver:SetScript("OnUpdate", function(_, dt)
+        if not dur then return end
+        if not cb:IsShown() then reset(); return end
+        elapsed = elapsed + dt
+        if elapsed < 0.05 then return end
+        elapsed = 0
+        if dur.GetRemainingDuration then
+            -- Secrets may go straight to Blizzard's text renderer, never to Lua math.
+            local ok, remaining = pcall(dur.GetRemainingDuration, dur)
+            if ok then pcall(cb.left.SetFormattedText, cb.left, "%.1f", remaining) end
+        elseif finish then
+            cb.left:SetFormattedText("%.1f", math.max(0, finish - GetTime()))
         end
-        local now = GetTime()
-        local left = endAt - now
-        cb.left:SetFormattedText("%.1f", left > 0 and left or 0)
-        -- blue = press your next spell now; green = safe to move now
-        local g = (now >= safeAt and "move") or (now >= slideAt and "next") or "cast"
-        if g ~= green then
-            green = g
-            if g == "move" then cb:SetStatusBarColor(0.2, 0.9, 0.3)
-            elseif g == "next" then cb:SetStatusBarColor(0.3, 0.75, 1)
-            else baseColor() end
-        end
+        -- No full-bar colour changes: the spell's identity stays consistent.
     end)
     DBagsAlertsState.castPlayer = cb
 end
@@ -3136,8 +3067,229 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
         idle:Hide()
         return y + h + 3
     end
+    DRU.hideOldCaster = function()
+        shown = false; idle:Hide(); pips:Hide()
+        for _, f in ipairs(tiles) do f:Hide() end
+    end
     DBagsAlertsState.dotTiles = used
     DBagsAlertsState.pips = pips
+end
+
+do   -- Warlock HUD: one action, quiet secondary cues, fixed readable rows.
+    local W, PAD, NEXT = 300, 10, 60
+    local deck = CreateFrame("Frame", nil, main)
+    deck:SetFrameLevel(main:GetFrameLevel())
+    deck.bg = deck:CreateTexture(nil, "BACKGROUND")
+    deck.bg:SetAllPoints(); deck.bg:SetColorTexture(0.025, 0.027, 0.04, 0.88)
+    addBorder(deck, 0.12, 0.12, 0.16, 1, 1)
+    local line = deck:CreateTexture(nil, "ARTWORK")
+    line:SetPoint("TOPLEFT"); line:SetPoint("TOPRIGHT"); line:SetHeight(2)
+    line:SetColorTexture(0.48, 0.32, 0.72, 1)
+    local idle = deck:CreateFontString(nil, "OVERLAY")
+    styleText(idle, 16, 0.58, 0.59, 0.66)
+    idle:SetPoint("TOPLEFT", 82, -47); idle:SetText("Choose a target")
+    local shardText = deck:CreateFontString(nil, "OVERLAY")
+    styleText(shardText, 13, 0.76, 0.68, 0.92)
+    shardText:SetPoint("TOPRIGHT", -PAD, -85)
+    local castIdle = deck:CreateTexture(nil, "ARTWORK")
+    castIdle:SetColorTexture(0.07, 0.065, 0.09, 1)
+    local dots, used, dotY, castY, utilityY = {}, {}, 0, 0, 0
+    local function dotList()
+        local list = {}
+        for _, n in ipairs({"Corruption", "Bane of Agony", "Curse of Agony", "Immolate", "Siphon Life"}) do
+            if spell[n] and not (n == "Curse of Agony" and spell["Bane of Agony"]) then list[#list + 1] = n end
+        end
+        local curse = firstKnown({"Curse of the Elements", "Curse of Weakness"})
+        if curse then list[#list + 1] = curse end
+        return list
+    end
+    local function tile(i)
+        if dots[i] then return dots[i] end
+        local f = CreateFrame("Frame", nil, main)
+        f.icon = f:CreateTexture(nil, "ARTWORK"); f.icon:SetAllPoints()
+        f.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        f.shade = f:CreateTexture(nil, "OVERLAY"); f.shade:SetAllPoints(); f.shade:SetColorTexture(0, 0, 0, 0.48)
+        f.top = CreateFrame("Frame", nil, f); f.top:SetAllPoints(); f.top:SetFrameLevel(f:GetFrameLevel() + 2)
+        f.num = f.top:CreateFontString(nil, "OVERLAY"); styleText(f.num, 17, 1, 1, 1)
+        f.num:SetPoint("CENTER", 0, 1)
+        f.bar = CreateFrame("StatusBar", nil, f.top)
+        f.bar:SetPoint("BOTTOMLEFT"); f.bar:SetPoint("BOTTOMRIGHT"); f.bar:SetHeight(3)
+        f.bar:SetStatusBarTexture(BAR_TEX); f.bar:SetMinMaxValues(0, 1)
+        f.edge = addBorder(f.top, 0.12, 0.12, 0.16, 1, 1)
+        dots[i] = f
+        return f
+    end
+    local function dotLeft(name, now, key)
+        -- Own-cast history is readable. Do not scan secret aura fields every tick.
+        local t = DRU.dotAt[name]
+        local at = t and t[key]
+        local length = durationOf(name)
+        if at then return math.max(0, length - (now - at)), length end
+        return nil, length
+    end
+    DRU.hideCaster = function()
+        deck:Hide()
+        for _, f in ipairs(dots) do f:Hide() end
+        for _, a in ipairs(ALERTS or {}) do
+            a.hudSpot = nil
+            a.c.plate:ClearAllPoints(); a.c.plate:SetPoint("TOP", a.root, "BOTTOM", 0, -2)
+            a.c.text:ClearAllPoints(); a.c.text:SetPoint("CENTER", a.c.plate, "CENTER", 0, 0)
+            a.c.text:SetJustifyH("CENTER"); a.c.text:SetWordWrap(true)
+            styleText(a.c.text, a.row == 1 and 11 or 9, 1, 0.85, 0.25)
+            colorBorder(a.c.edge, a.danger and 1 or 0, a.danger and 0.15 or 0, a.danger and 0.15 or 0, a.danger and 1 or 0)
+        end
+        for _, f in pairs(cdIcons) do f.glow:SetAlpha(1) end
+        panel:Show(); healthBar:SetHeight(28)
+        healthBar.left:SetText(""); rageBar.left:SetText("")
+        styleText(healthBar.text, 18, 1, 1, 1); styleText(rageBar.text, 14, 1, 1, 1)
+        tf.pw:Show(); tf.tot:Show()
+    end
+    DRU.layoutCaster = function()
+        DRU.hideOldCaster()
+        deck:Show()
+        blockW = W - 2 * PAD
+        main:SetSize(W, 260)
+        deck:ClearAllPoints(); deck:SetAllPoints()
+        ring:Hide(); advice:Hide(); threatBar:Hide(); swingBar:Hide(); panel:Hide()
+        for _, f in pairs(slotBG) do f:Hide() end
+        for _, f in pairs(cdIcons) do f:Hide() end
+        applyStyle()
+        -- Main spell has room for its name; secondary cues are 30 px, with no glow art.
+        local pos = { next = {PAD, -42, NEXT}, danger = {82, -74, 28},
+                      extra = {116, -74, 28}, buff = {150, -74, 28} }
+        local byKey = {}
+        for _, a in ipairs(ALERTS) do
+            a.root:Hide(); a.inSpot = false; byKey[a.key] = a
+            if rawget(a.c, "glowF") then a.c.glowF:Hide() end
+            if rawget(a.c, "gold") then a.c.gold:Hide() end
+        end
+        for spot, keys in pairs(SPOT.WARLOCK) do
+            local p = pos[spot]
+            for i, key in ipairs(keys) do
+                local a = byKey[key]
+                if a then
+                    a.hudSpot, a.inSpot = spot, true
+                    a.root:ClearAllPoints(); a.root:SetSize(p[3], p[3])
+                    a.root:SetPoint("TOPLEFT", main, "TOPLEFT", p[1], p[2])
+                    setLevels(a, main:GetFrameLevel() + 10 + (#keys - i + 1) * 8)
+                    a.c.text:Hide(); a.c.plate:Hide()
+                    if spot == "next" then
+                        -- Opaque name backing prevents text from lower priorities bleeding through.
+                        a.c.plate:ClearAllPoints(); a.c.plate:SetPoint("TOPLEFT", a.root, "TOPRIGHT", 12, 0)
+                        a.c.plate:SetSize(208, 27); a.c.plate:SetColorTexture(0.025, 0.027, 0.04, 1)
+                        a.c.plate:Show()
+                        a.c.text:ClearAllPoints(); a.c.text:SetPoint("TOPLEFT", a.root, "TOPRIGHT", 12, -3)
+                        a.c.text:SetWidth(208); a.c.text:SetJustifyH("LEFT"); a.c.text:SetWordWrap(false)
+                        styleText(a.c.text, 18, 0.94, 0.93, 0.98); a.c.text:Show()
+                    end
+                    colorBorder(a.c.edge, spot == "danger" and 0.95 or 0.45, spot == "danger" and 0.23 or 0.32, spot == "danger" and 0.2 or 0.66, 1)
+                    if not DB.off[key] then a.root:Show() end
+                end
+            end
+        end
+        -- No empty spell squares: the panel supplies a steady footprint.
+        for _, f in ipairs(dots) do f:Hide() end
+        wipe(used)
+        local list = dotList()
+        local y = 112
+        dotY = y
+        for i, name in ipairs(list) do
+            local f = tile(i); f.name = name
+            f:SetSize(40, 40); f:ClearAllPoints()
+            f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + (i - 1) * 46, -y)
+            f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name])); f:Show()
+            used[#used + 1] = f
+        end
+        if #list > 0 then y = y + 47 end
+        healthBar:SetHeight(14); healthBar:SetWidth(blockW)
+        healthBar:ClearAllPoints(); healthBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
+        healthBar:SetStatusBarTexture(BAR_TEX); healthBar:SetStatusBarColor(0.19, 0.55, 0.38)
+        healthBar.frame:Hide(); styleText(healthBar.text, 12, 1, 1, 1)
+        healthBar.left:SetText("HP"); styleText(healthBar.left, 10, 0.8, 0.87, 0.83)
+        y = y + 17
+        rageBar:SetHeight(18); rageBar:SetWidth(blockW)
+        rageBar:ClearAllPoints(); rageBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
+        rageBar:SetStatusBarTexture(BAR_TEX); rageBar.frame:Hide(); rageBar.tick:Hide()
+        rageBar.left:SetText("MANA"); styleText(rageBar.left, 10, 0.78, 0.84, 0.94)
+        styleText(rageBar.text, 14, 1, 1, 1)
+        y = y + 24
+        castY = y
+        castIdle:ClearAllPoints(); castIdle:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
+        castIdle:SetSize(blockW, 26); castIdle:SetShown(DB.casts and true or false)
+        castPlayer.col = {0.48, 0.32, 0.70}
+        castPlayer:SetStatusBarColor(0.48, 0.32, 0.70)
+        castPlayer:SetStatusBarTexture(BAR_TEX); castPlayer.frame:Hide()
+        castPlayer:SetHeight(26); castPlayer:SetWidth(blockW - 27)
+        castPlayer.icon:SetSize(26, 26)
+        castPlayer:ClearAllPoints(); castPlayer:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + 27, -y)
+        styleText(castPlayer.name, 14, 1, 1, 1); styleText(castPlayer.left, 14, 1, 1, 1)
+        if DB.casts then y = y + 32 end
+        utilityY = y
+        local n = 0
+        if not DB.off.cooldowns then
+            for _, name in ipairs(CD_SPELLS) do
+                if spell[name] then
+                    local f = cdIcons[name] or makeCD(name); cdIcons[name] = f
+                    f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
+                    f:ClearAllPoints(); f:SetSize(26, 26)
+                    f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + (n % 9) * 31, -(y + math.floor(n / 9) * 31))
+                    f.glow:SetSize(26, 26); f.glow:SetAlpha(0) -- no duplicate glowing suggestions
+                    f:Show(); n = n + 1
+                end
+            end
+        end
+        if n > 0 then y = y + math.ceil(n / 9) * 31 end
+        main:SetSize(W, y + 8); main:SetScale(DB.scale)
+        main:ClearAllPoints(); main:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
+        main:EnableMouse(not DB.locked); main:EnableMouseWheel(not DB.locked); main.bg:SetShown(not DB.locked)
+        -- Target is a compact header attached to the same column.
+        tf:ClearAllPoints(); tf:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -8)
+        tf:SetSize(blockW, 30)
+        tf.name:ClearAllPoints(); tf.name:SetPoint("TOPLEFT"); tf.name:SetWidth(blockW - 34); styleText(tf.name, 14, 0.9, 0.9, 0.94)
+        tf.level:ClearAllPoints(); tf.level:SetPoint("TOPRIGHT"); styleText(tf.level, 12, 0.8, 0.77, 0.63)
+        tf.hp:ClearAllPoints(); tf.hp:SetPoint("TOPLEFT", tf, "TOPLEFT", 0, -19)
+        tf.hp:SetSize(blockW, 9); styleText(tf.hp.text, 10, 1, 1, 1)
+        tf.hp:SetStatusBarTexture(BAR_TEX); tf.hp.frame:Hide()
+        tf.pw:Hide(); tf.tot:Hide()
+        tf.cast:ClearAllPoints(); tf.cast:SetPoint("TOPLEFT", tf, "TOPRIGHT", 12, -19)
+        tf.cast:SetSize(160, 20); tf.cast.frame:Hide()
+        tDirty.all = true
+        DBagsAlertsState.dotTiles = used
+        DBagsAlertsState.casterHUD = {width=W, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck}
+        if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end
+    end
+    local elapsed, shardAt = 0, 0
+    local driver = CreateFrame("Frame")
+    driver:SetScript("OnUpdate", function(_, dt)
+        if not DRU.lux or not DB then return end
+        elapsed = elapsed + dt
+        if elapsed < 0.1 then return end
+        elapsed = 0
+        local now = GetTime()
+        if now >= shardAt then
+            shardAt = now + 0.5
+            if spell["Drain Soul"] then shardText:SetFormattedText("Shards %d/%d", DRU.bags(), DB.shardGoal or 5)
+            else shardText:SetText("") end
+        end
+        idle:SetShown(not ctx.hostile)
+        local key = ctx.hostile and targetKey()
+        for _, f in ipairs(used) do
+            local left, length
+            if ctx.hostile then left, length = dotLeft(f.name, now, key) end
+            if left and left > 0 then
+                f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
+                f.num:SetFormattedText("%d", math.ceil(left))
+                f.bar:SetValue(length > 0 and left / length or 0)
+                local soon = left <= 3
+                f.num:SetTextColor(1, soon and 0.73 or 1, soon and 0.28 or 1)
+                f.bar:SetStatusBarColor(soon and 0.95 or 0.55, soon and 0.62 or 0.38, soon and 0.20 or 0.78)
+            else
+                f.shade:SetAlpha(1); f.icon:SetDesaturated(true)
+                f:SetAlpha(ctx.hostile and 0.8 or 0.35)
+                f.num:SetText(""); f.bar:SetValue(0)
+            end
+        end
+    end)
 end
 
 local REACTION = { [1] = { 0.85, 0.1, 0.1 }, [2] = { 0.85, 0.1, 0.1 }, [3] = { 0.85, 0.35, 0.1 },
@@ -4398,7 +4550,7 @@ local function buildSettings()
     local tfc = add(makeCheck(w, "Target frame", "Target name, health, and who it's hitting.",
         function() return DB.target end, function(v) DB.target = v; relayout() end))
     tfc:SetPoint("TOPLEFT", 16, -180)
-    local cbc = add(makeCheck(w, "Cast bars", "Your cast bar and your target's. Blue end on yours: press your next spell. Green tip: safe to move (your real lag, like Quartz).",
+    local cbc = add(makeCheck(w, "Cast bars", "Your cast and your target's cast. Thin blue end mark: queue the next spell. Move after the cast finishes.",
         function() return DB.casts end, function(v) DB.casts = v; relayout() end))
     cbc:SetPoint("TOPLEFT", 180, -180)
     local hb = add(makeCheck(w, "Hide Blizzard frames", "Hides the normal player, target and cast frames. Uncheck + /reload to get them back.",
