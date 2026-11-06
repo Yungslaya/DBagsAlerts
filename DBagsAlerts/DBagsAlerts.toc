@@ -2,7 +2,7 @@
 ## Title: |cffff7d0aDBags|r Alerts
 ## Notes: Alerts, bars and helpers for Warrior, Paladin and Druid (all forms). Was ProtAlerts.
 ## Author: Yungslaya
-## Version: 1.0.0
+## Version: 1.0.1
 ## SavedVariables: DBagsAlertsDB
 
 DBagsAlerts.lua

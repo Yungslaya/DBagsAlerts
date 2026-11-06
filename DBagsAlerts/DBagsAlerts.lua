@@ -1022,6 +1022,38 @@ local SPOT = {
 }
 local SPOT_SIZE = { danger = 64, next = 64, buff = 44, extra = 64 }   -- big, easy to see
 
+-- Racials (Wowhead WoW Forever race pages, Nov 2026). Every class gets them; an alert
+-- or a cooldown icon only shows when your character really has that racial.
+do
+    -- Damage racials: worth it on tough fights (elite, 2+ mobs, or getting hit hard).
+    local BURST = { "Elune's Light", "Blood Fury", "Berserking" }
+    local racial = { key = "racial", row = 2, label = "RACIAL", icon = "Berserking",
+      test = function(st)
+          local n = firstKnown(BURST)
+          local tough = ctx.elite or (ctx.enemies or 0) >= 2 or (tankingHard and tankingHard())
+          need(st, n and ctx.combat and ctx.hostile and tough)
+          if not st.ok then return end
+          need(st, ready(n)); need(st, usable(n))
+          return n, n:upper()
+      end }
+    -- Tauren: War Stomp stops a cast when your normal interrupt isn't ready.
+    local stomp = { key = "stomp", row = 1, label = "WAR STOMP", danger = true, icon = "War Stomp",
+      test = function(st)
+          need(st, spell["War Stomp"] and ctx.combat and ctx.hostile and (ctx.enemies or 0) >= 1)
+          if not st.ok then return end
+          need(st, ready("War Stomp")); need(st, usable("War Stomp"))
+          castingTarget(st)
+      end }
+    for _, list in pairs(CLASS_ALERTS) do list[#list + 1] = racial; list[#list + 1] = stomp end
+    for _, sp in pairs(SPOT) do
+        table.insert(sp.danger, "stomp")       -- under the class interrupt
+        table.insert(sp.extra, 1, "racial")    -- off the global cooldown: first in its spot
+    end
+    -- cooldown row: every combat racial (only the ones you know get an icon)
+    DRU.RACIAL_CDS = { "Elune's Light", "Shadowmeld", "Blood Fury", "Berserking", "Stoneform", "War Stomp",
+        "Will of the Forsaken", "Will to Survive", "Escape Artist", "Shatter Curse" }
+end
+
 ---------------------------------------------------------------------------
 -- UI
 ---------------------------------------------------------------------------
@@ -1388,6 +1420,9 @@ local CLASS_CDS = {
         "Blessing of Protection", "Blessing of Freedom" },
     DRUID = { "Barkskin", "Frenzied Regeneration", "Innervate", "Tranquility", "Challenging Roar", "Dash" },
 }
+for _, list in pairs(CLASS_CDS) do
+    for _, n in ipairs(DRU.RACIAL_CDS or {}) do list[#list + 1] = n end
+end
 local CD_SIZE = 40
 local cdIcons = {}
 local function makeCD(name)
