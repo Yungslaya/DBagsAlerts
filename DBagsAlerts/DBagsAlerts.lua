@@ -1703,7 +1703,7 @@ local swingTextAt, swingQAt, swingShown, swingQueued, swingMax = 0, 0, nil, nil,
 local function updateSwing()
     local now = GetTime()
     local left = swing.start + swing.dur - now
-    local show = (not DB.off.swing and (left > 0 or (ctx.combat and ctx.hostile))) and true or false
+    local show = (not DB.off.swing and not DRU.caster and (left > 0 or (ctx.combat and ctx.hostile))) and true or false
     if show ~= swingShown then swingShown = show; swingBar:SetShown(show) end
     if not show then return end
     if left > 0 and swing.dur > 0 then
@@ -1979,9 +1979,13 @@ local function layout()
         -- health stays classic green (easy to read), not class color
     end
     y = y + 28 + gb + 18 + (DB.advice and 18 or 0)
+    -- Caster look (warlock): cast bar right under mana, then one row of DoT timers +
+    -- cooldowns. No threat / swing bars (the aggro dots on nameplates cover threat).
+    DRU.caster = CLASS == "WARLOCK"
+    local known = {}
+    if DRU.casterLayout then y = DRU.casterLayout(x, y, gb) end
     -- Important buttons: one centered row right under health + rage (only ones you know)
     for _, f in pairs(cdIcons) do f:Hide() end
-    local known = {}
     if not DB.off.cooldowns then
         for _, name in ipairs(CD_SPELLS) do
             if spell[name] then
@@ -2008,7 +2012,13 @@ local function layout()
     -- threat + swing go under the buttons: when they hide, nothing empty is left in the middle
     threatBar:ClearAllPoints(); threatBar:SetPoint("TOPLEFT", main, "TOPLEFT", x, -(y + gb))
     swingBar:ClearAllPoints(); swingBar:SetPoint("TOPLEFT", threatBar, "BOTTOMLEFT", 0, -gb)
-    y = y + gb + 10 + gb + 10 + (classic() and 8 or 3)
+    if DRU.caster then
+        threatBar:Hide(); swingBar:Hide()
+        y = y + (classic() and 8 or 3)
+    else
+        threatBar:Show()
+        y = y + gb + 10 + gb + 10 + (classic() and 8 or 3)
+    end
     panel:ClearAllPoints()
     panel:SetPoint("TOPLEFT", main, "TOPLEFT", x, -top)
     panel:SetSize(blockW, y - top)
@@ -2267,7 +2277,7 @@ end
 
 local function updateThreat()
     -- Threat on your target. Always shown so the panel never jumps; dim without a target.
-    threatBar:SetAlpha(ctx.hostile and 1 or 0)        -- no enemy target: nothing to show
+    threatBar:SetAlpha((ctx.hostile and not DRU.caster) and 1 or 0)   -- no enemy target: nothing to show
     if ctx.hostile then
         local isTanking, _, scaled = UnitDetailedThreatSituation("player", "target")
         if scaled then
@@ -2747,15 +2757,27 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
     -- queue window, 400 ms by default). The white line marks that point; once the
     -- cast passes it the bar turns green: you can start the next one (or move).
     local cb = castPlayer
-    cb.slide = cb.top:CreateTexture(nil, "OVERLAY", nil, 7)
-    cb.slide:SetColorTexture(1, 1, 1, 0.95)
-    cb.slide:SetWidth(3)
-    cb.slide:SetPoint("TOP", cb, "TOPLEFT", 0, 0); cb.slide:SetPoint("BOTTOM", cb, "BOTTOMLEFT", 0, 0)
+    -- slidecast zone: the last part of the bar, shaded red (like Quartz' latency box),
+    -- with a bright edge where it starts
+    cb.zone = cb.top:CreateTexture(nil, "ARTWORK")
+    cb.zone:SetColorTexture(0.95, 0.15, 0.15, 0.4)
+    cb.zone:Hide()
+    cb.slide = cb.top:CreateTexture(nil, "OVERLAY", nil, 6)
+    cb.slide:SetColorTexture(1, 1, 1, 0.9)
+    cb.slide:SetWidth(2)
     cb.slide:Hide()
+    -- spark riding the front of the fill (follows the game's own timer: no math needed)
+    cb.spark = cb.top:CreateTexture(nil, "OVERLAY", nil, 7)
+    cb.spark:SetTexture("Interface\\CastingBar\\UI-CastingBar-Spark")
+    cb.spark:SetBlendMode("ADD")
+    cb.spark:SetSize(20, 44)
+    local fill = cb.GetStatusBarTexture and cb:GetStatusBarTexture()
+    if fill then cb.spark:SetPoint("CENTER", fill, "RIGHT", 0, 0) else cb.spark:Hide() end
     cb.left = cb.top:CreateFontString(nil, "OVERLAY")        -- seconds left, right side
     styleText(cb.left, 14, 1, 1, 1)
     cb.left:SetPoint("RIGHT", -5, 0)
     cb.name:SetPoint("RIGHT", -40, 0)
+    local function baseColor() local c = cb.col; cb:SetStatusBarColor(c[1], c[2], c[3]) end
     local endAt, slideAt, green           -- plain GetTime() values for this cast, or nil
     local function window()
         local ok, v = pcall(GetCVar or function() end, "SpellQueueWindow")
@@ -2782,8 +2804,8 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
         keepEnd = (not fresh) and endAt or nil
         fresh = false
         endAt, slideAt, green = nil, nil, nil
-        cb:SetStatusBarColor(1, 0.7, 0.1)
-        cb.slide:Hide(); cb.left:SetText("")
+        baseColor()
+        cb.slide:Hide(); cb.zone:Hide(); cb.left:SetText("")
         if channel or DB.slide == false then return end
         local e, len = castTimes()
         if not e then return end
@@ -2791,10 +2813,12 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
         endAt, slideAt = e, e - w
         local width = cb:GetWidth()
         if type(width) == "number" and not secret(width) and width > 0 then
-            cb.slide:ClearAllPoints()
             local x = width * (1 - w / len)
+            cb.slide:ClearAllPoints()
             cb.slide:SetPoint("TOP", cb, "TOPLEFT", x, 0); cb.slide:SetPoint("BOTTOM", cb, "BOTTOMLEFT", x, 0)
-            cb.slide:Show()
+            cb.zone:ClearAllPoints()
+            cb.zone:SetPoint("TOPLEFT", cb, "TOPLEFT", x, 0); cb.zone:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
+            cb.slide:Show(); cb.zone:Show()
         end
     end
     local drv = CreateFrame("Frame")
@@ -2805,17 +2829,155 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
     end)
     drv:SetScript("OnUpdate", function()
         if not endAt then return end
-        if not cb:IsShown() then endAt = nil; cb.slide:Hide() return end
+        if not cb:IsShown() then endAt = nil; cb.slide:Hide(); cb.zone:Hide() return end
         local now = GetTime()
         local left = endAt - now
         cb.left:SetFormattedText("%.1f", left > 0 and left or 0)
         local g = now >= slideAt
         if g ~= green then
             green = g
-            if g then cb:SetStatusBarColor(0.2, 0.85, 0.2) else cb:SetStatusBarColor(1, 0.7, 0.1) end
+            if g then cb:SetStatusBarColor(0.2, 0.9, 0.3) else baseColor() end
         end
     end)
     DBagsAlertsState.castPlayer = cb
+end
+
+do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
+    -- Like a caster WeakAura: one tile per DoT you know. Bright with a big countdown
+    -- and a draining bar while it's on your target; dark and faded when it's missing;
+    -- red numbers in the last 3 seconds. Times come from your own casts (and the real
+    -- debuff when the game shares it), so they work in combat.
+    local SHADOW = { 0.62, 0.32, 1 }            -- warlock purple
+    local TILE_H = 6                            -- timer bar under each tile
+    local idle = makeBar(0.1, 0.1, 0.1, 24, "")  -- empty slot when you're not casting
+    idle.text:Hide(); idle:SetMinMaxValues(0, 1); idle:SetValue(0); idle:Hide()
+    local tiles, used = {}, {}
+    local function tile(i)
+        if tiles[i] then return tiles[i] end
+        local f = CreateFrame("Frame", nil, main)
+        f.icon = f:CreateTexture(nil, "ARTWORK")
+        f.icon:SetPoint("TOPLEFT"); f.icon:SetPoint("TOPRIGHT")
+        f.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        f.shade = f:CreateTexture(nil, "ARTWORK", nil, 2)     -- darkens the icon while missing
+        f.shade:SetAllPoints(f.icon); f.shade:SetColorTexture(0, 0, 0, 0.6)
+        f.bar = CreateFrame("StatusBar", nil, f)
+        f.bar:SetPoint("BOTTOMLEFT"); f.bar:SetPoint("BOTTOMRIGHT"); f.bar:SetHeight(TILE_H)
+        f.bar:SetStatusBarTexture(BAR_TEX); f.bar:SetStatusBarColor(SHADOW[1], SHADOW[2], SHADOW[3])
+        f.bar:SetMinMaxValues(0, 1); f.bar:SetValue(0)
+        f.bar.bg = f.bar:CreateTexture(nil, "BACKGROUND")
+        f.bar.bg:SetAllPoints(); f.bar.bg:SetColorTexture(0.05, 0.05, 0.06, 0.9)
+        f.top = CreateFrame("Frame", nil, f)
+        f.top:SetAllPoints(f.icon); f.top:SetFrameLevel(f:GetFrameLevel() + 3)
+        f.num = f.top:CreateFontString(nil, "OVERLAY")
+        f.num:SetFont(FONT, 20, "THICKOUTLINE"); f.num:SetPoint("CENTER", 0, 0)
+        addBorder(f, 0, 0, 0, 1, 1)
+        f.gold = goldFrame(f, 4)
+        tiles[i] = f
+        return f
+    end
+    -- which DoTs you know, in rotation order
+    local function dotList()
+        local list = {}
+        for _, n in ipairs({ "Corruption", "Bane of Agony", "Curse of Agony", "Immolate", "Siphon Life" }) do
+            if spell[n] and not (n == "Curse of Agony" and spell["Bane of Agony"]) then list[#list + 1] = n end
+        end
+        local curse = spell["Curse of the Elements"] and "Curse of the Elements" or (spell["Curse of Weakness"] and "Curse of Weakness")
+        if curse then list[#list + 1] = curse end
+        return list
+    end
+    -- seconds left on your DoT on the target (nil = not on it / unknown)
+    local function left(name)
+        local real, aura = targetDebuff(name)
+        local now = GetTime()
+        if real == "on" then
+            local exp = aura and plain(aura.expirationTime, nil)
+            if exp and exp > 0 then return exp - now, plain(aura.duration, nil) or durationOf(name) end
+        elseif real == "off" then
+            local t = DRU.dotAt[name]; local at = t and t[targetKey()]
+            if not (at and now - at <= 1) then return nil end        -- just cast: still landing
+        end
+        local t = DRU.dotAt[name]
+        local at = t and t[targetKey()]
+        local d = durationOf(name)
+        if at and now - at < d then return d - (now - at), d end
+    end
+    local shown = false
+    DRU.casterLayout = function(x, y, gb)
+        local cb = castPlayer
+        for _, f in ipairs(tiles) do f:Hide() end
+        wipe(used)
+        if not DRU.caster then
+            idle:Hide(); shown = false
+            cb.col = { 1, 0.7, 0.1 }
+            cb:SetHeight(22); cb.icon:SetSize(22, 22)
+            return y
+        end
+        -- 1) cast bar: full width under your mana, purple, icon on the left
+        local h, ih = 24, 24
+        cb.col = { SHADOW[1], SHADOW[2], SHADOW[3] }
+        cb:SetStatusBarColor(SHADOW[1], SHADOW[2], SHADOW[3])
+        cb:SetHeight(h); cb.icon:SetSize(ih, ih)
+        y = y + gb + 2
+        cb:ClearAllPoints(); cb:SetWidth(blockW - ih - 1)
+        cb:SetPoint("TOPLEFT", main, "TOPLEFT", x + ih + 1, -y)
+        idle:ClearAllPoints(); idle:SetWidth(blockW - ih - 1)
+        idle:SetPoint("TOPLEFT", main, "TOPLEFT", x + ih + 1, -y)
+        idle:SetFrameLevel(math.max(0, cb:GetFrameLevel() - 2))
+        idle.frame:SetShown(classic()); idle:SetShown(DB.casts and true or false)
+        y = y + h + gb + 4
+        -- 2) DoT tiles, one row, centered, as big as fits (max 44)
+        local list = dotList()
+        local n, g = #list, classic() and 8 or 3
+        if n > 0 then
+            local s = math.min(44, math.floor((blockW - (n - 1) * g) / n))
+            local cx = x + (blockW - (n * s + (n - 1) * g)) / 2
+            y = y + (classic() and 3 or 0)
+            for i, name in ipairs(list) do
+                local f = tile(i)
+                f.name = name
+                f:SetSize(s, s + TILE_H + 1)
+                f.icon:SetHeight(s)
+                f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]) or DEFAULT_ICON)
+                f.gold:SetShown(classic())
+                f:ClearAllPoints(); f:SetPoint("TOPLEFT", main, "TOPLEFT", cx + (i - 1) * (s + g), -y)
+                f:Show()
+                used[#used + 1] = f
+            end
+            y = y + s + TILE_H + 1 + (classic() and 6 or 2)
+        end
+        shown = true
+        return y
+    end
+    -- update the tiles 10x a second
+    local t = 0
+    local drv = CreateFrame("Frame")
+    drv:SetScript("OnUpdate", function(_, e)
+        t = t + e
+        if t < 0.1 or not shown then return end
+        t = 0
+        pcall(function()
+            local fight = ctx.hostile
+            for _, f in ipairs(used) do
+                local l, d
+                if fight then
+                    l, d = left(f.name)
+                    -- a curse tile counts either of your curses
+                    if not l and f.name == "Curse of the Elements" then l, d = left("Curse of Weakness") end
+                end
+                if l and l > 0 then
+                    f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
+                    f.bar:SetValue(d and d > 0 and l / d or 0)
+                    f.num:SetFormattedText(l >= 10 and "%d" or "%.1f", l)
+                    if l <= 3 then f.num:SetTextColor(1, 0.25, 0.25); f.bar:SetStatusBarColor(1, 0.25, 0.25)
+                    else f.num:SetTextColor(1, 1, 1); f.bar:SetStatusBarColor(SHADOW[1], SHADOW[2], SHADOW[3]) end
+                else
+                    f.shade:SetAlpha(1); f.icon:SetDesaturated(true); f:SetAlpha(fight and 1 or 0.5)
+                    f.bar:SetValue(0); f.num:SetText("")
+                end
+            end
+        end)
+    end)
+    DBagsAlertsState.dotTiles = used
 end
 
 local REACTION = { [1] = { 0.85, 0.1, 0.1 }, [2] = { 0.85, 0.1, 0.1 }, [3] = { 0.85, 0.35, 0.1 },
@@ -2883,10 +3045,12 @@ end
 -- Place your cast bar under the bars, and the target frame to the right of the block.
 layoutExtras = function(width, x, y)
     local gb = classic() and 9 or 1           -- room for the gold frames in Classic style
-    castPlayer:ClearAllPoints()
-    castPlayer:SetWidth(blockW - 23)
-    castPlayer:SetPoint("TOPLEFT", main, "TOPLEFT", x + 23, -(y + gb + 2))
-    y = y + 22 + gb + 6
+    if not DRU.caster then                    -- caster look: the cast bar sits under your mana instead
+        castPlayer:ClearAllPoints()
+        castPlayer:SetWidth(blockW - 23)
+        castPlayer:SetPoint("TOPLEFT", main, "TOPLEFT", x + 23, -(y + gb + 2))
+        y = y + 22 + gb + 6
+    end
     local rowTop = (DB.stack ~= false and SPOT[CLASS]) and (SPOT_SIZE.buff + (classic() and 15 or 2)) or 0
     tf:ClearAllPoints()
     tf:SetPoint("TOPLEFT", main, "TOPLEFT", width + 22, -rowTop)
