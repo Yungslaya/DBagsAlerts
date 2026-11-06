@@ -2776,7 +2776,7 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
     local cb = castPlayer
     -- queue zone: the last part of the bar, shaded blue, with a bright edge where it starts
     cb.zone = cb.top:CreateTexture(nil, "ARTWORK")
-    cb.zone:SetColorTexture(0.25, 0.55, 1, 0.45)
+    cb.zone:SetColorTexture(0.3, 0.7, 1, 1)
     cb.zone:Hide()
     cb.zoneText = cb.top:CreateFontString(nil, "OVERLAY")
     styleText(cb.zoneText, 10, 0.75, 0.88, 1)
@@ -2785,8 +2785,8 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
     -- measured each cast from pressing the spell (UNIT_SPELLCAST_SENT) to the server
     -- starting it (UNIT_SPELLCAST_START). The server finishes the cast that much before
     -- your bar does, so ONLY this last bit is safe to move in. Green = go.
-    cb.safe = cb.top:CreateTexture(nil, "ARTWORK", nil, 2)
-    cb.safe:SetColorTexture(0.2, 1, 0.3, 0.6)
+    cb.safe = cb.top:CreateTexture(nil, "ARTWORK", nil, 3)
+    cb.safe:SetColorTexture(0.25, 1, 0.35, 1)
     cb.safe:Hide()
     cb.safeText = cb.top:CreateFontString(nil, "OVERLAY")
     styleText(cb.safeText, 10, 0.45, 1, 0.5)
@@ -2851,19 +2851,17 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
         local width = cb:GetWidth()
         if type(width) == "number" and not secret(width) and width > 0 then
             local x = width * (1 - w / len)
-            cb.slide:ClearAllPoints()
-            cb.slide:SetPoint("TOP", cb, "TOPLEFT", x, 0); cb.slide:SetPoint("BOTTOM", cb, "BOTTOMLEFT", x, 0)
+            -- a thin strip along the bottom edge: blue = press next, green = safe to move.
+            -- No labels (they piled up); the whole bar also turns blue, then green.
             cb.zone:ClearAllPoints()
-            cb.zone:SetPoint("TOPLEFT", cb, "TOPLEFT", x, 0); cb.zone:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
-            cb.slide:Show(); cb.zone:Show()
-            cb.zoneText:ClearAllPoints(); cb.zoneText:SetPoint("BOTTOMLEFT", cb.zone, "TOPLEFT", 1, 1)
-            cb.zoneText:Show()
+            cb.zone:SetPoint("BOTTOMLEFT", cb, "BOTTOMLEFT", x, 0); cb.zone:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
+            cb.zone:SetHeight(5)
+            cb.zone:Show()
             local sx = width * (1 - sz / len)
             cb.safe:ClearAllPoints()
-            cb.safe:SetPoint("TOPLEFT", cb, "TOPLEFT", sx, 0); cb.safe:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
+            cb.safe:SetPoint("BOTTOMLEFT", cb, "BOTTOMLEFT", sx, 0); cb.safe:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
+            cb.safe:SetHeight(5)
             cb.safe:Show()
-            cb.safeText:ClearAllPoints(); cb.safeText:SetPoint("BOTTOMRIGHT", cb, "TOPRIGHT", 0, 1)
-            cb.safeText:Show()
         end
     end
     local drv = CreateFrame("Frame")
