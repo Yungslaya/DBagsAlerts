@@ -3075,24 +3075,13 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
     DBagsAlertsState.pips = pips
 end
 
-do   -- Warlock HUD: one action, quiet secondary cues, fixed readable rows.
+do   -- Warlock HUD: floating cues and bars, no enclosing panel.
     local W, PAD, NEXT = 300, 10, 60
     local deck = CreateFrame("Frame", nil, main)
     deck:SetFrameLevel(main:GetFrameLevel())
-    deck.bg = deck:CreateTexture(nil, "BACKGROUND")
-    deck.bg:SetAllPoints(); deck.bg:SetColorTexture(0.025, 0.027, 0.04, 0.88)
-    addBorder(deck, 0.12, 0.12, 0.16, 1, 1)
-    local line = deck:CreateTexture(nil, "ARTWORK")
-    line:SetPoint("TOPLEFT"); line:SetPoint("TOPRIGHT"); line:SetHeight(2)
-    line:SetColorTexture(0.48, 0.32, 0.72, 1)
-    local idle = deck:CreateFontString(nil, "OVERLAY")
-    styleText(idle, 16, 0.58, 0.59, 0.66)
-    idle:SetPoint("TOPLEFT", 82, -47); idle:SetText("Choose a target")
     local shardText = deck:CreateFontString(nil, "OVERLAY")
     styleText(shardText, 13, 0.76, 0.68, 0.92)
-    shardText:SetPoint("TOPRIGHT", -PAD, -85)
-    local castIdle = deck:CreateTexture(nil, "ARTWORK")
-    castIdle:SetColorTexture(0.07, 0.065, 0.09, 1)
+    shardText:SetPoint("TOPRIGHT", -PAD, -85) -- repositioned beside utility after layout
     local dots, used, dotY, castY, utilityY = {}, {}, 0, 0, 0
     local function dotList()
         local list = {}
@@ -3154,9 +3143,9 @@ do   -- Warlock HUD: one action, quiet secondary cues, fixed readable rows.
         for _, f in pairs(slotBG) do f:Hide() end
         for _, f in pairs(cdIcons) do f:Hide() end
         applyStyle()
-        -- Main spell has room for its name; secondary cues are 30 px, with no glow art.
-        local pos = { next = {PAD, -42, NEXT}, danger = {82, -74, 28},
-                      extra = {116, -74, 28}, buff = {150, -74, 28} }
+        -- Put action cues beside the resource strip, leaving the world open above it.
+        local pos = { next = {PAD - NEXT - 10, -42, NEXT}, danger = {W + 2, -42, 28},
+                      extra = {W + 2, -76, 28}, buff = {W + 2, -110, 28} }
         local byKey = {}
         for _, a in ipairs(ALERTS) do
             a.root:Hide(); a.inSpot = false; byKey[a.key] = a
@@ -3173,25 +3162,24 @@ do   -- Warlock HUD: one action, quiet secondary cues, fixed readable rows.
                     a.root:SetPoint("TOPLEFT", main, "TOPLEFT", p[1], p[2])
                     setLevels(a, main:GetFrameLevel() + 10 + (#keys - i + 1) * 8)
                     a.c.text:Hide(); a.c.plate:Hide()
-                    if spot == "next" then
-                        -- Opaque name backing prevents text from lower priorities bleeding through.
-                        a.c.plate:ClearAllPoints(); a.c.plate:SetPoint("TOPLEFT", a.root, "TOPRIGHT", 12, 0)
-                        a.c.plate:SetSize(208, 27); a.c.plate:SetColorTexture(0.025, 0.027, 0.04, 1)
+                    if spot == "next" and DB.names then
+                        a.c.plate:ClearAllPoints(); a.c.plate:SetPoint("TOP", a.root, "BOTTOM", 0, -3)
+                        a.c.plate:SetSize(78, 28); a.c.plate:SetColorTexture(0, 0, 0, 0.7)
                         a.c.plate:Show()
-                        a.c.text:ClearAllPoints(); a.c.text:SetPoint("TOPLEFT", a.root, "TOPRIGHT", 12, -3)
-                        a.c.text:SetWidth(208); a.c.text:SetJustifyH("LEFT"); a.c.text:SetWordWrap(false)
-                        styleText(a.c.text, 18, 0.94, 0.93, 0.98); a.c.text:Show()
+                        a.c.text:ClearAllPoints(); a.c.text:SetPoint("CENTER", a.c.plate, "CENTER")
+                        a.c.text:SetWidth(76); a.c.text:SetJustifyH("CENTER"); a.c.text:SetWordWrap(true)
+                        styleText(a.c.text, 12, 0.94, 0.93, 0.98); a.c.text:Show()
                     end
                     colorBorder(a.c.edge, spot == "danger" and 0.95 or 0.45, spot == "danger" and 0.23 or 0.32, spot == "danger" and 0.2 or 0.66, 1)
                     if not DB.off[key] then a.root:Show() end
                 end
             end
         end
-        -- No empty spell squares: the panel supplies a steady footprint.
+        -- The anchor is invisible. Missing alerts leave the game view clear.
         for _, f in ipairs(dots) do f:Hide() end
         wipe(used)
         local list = dotList()
-        local y = 112
+        local y = 42
         dotY = y
         for i, name in ipairs(list) do
             local f = tile(i); f.name = name
@@ -3205,17 +3193,17 @@ do   -- Warlock HUD: one action, quiet secondary cues, fixed readable rows.
         healthBar:ClearAllPoints(); healthBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
         healthBar:SetStatusBarTexture(BAR_TEX); healthBar:SetStatusBarColor(0.19, 0.55, 0.38)
         healthBar.frame:Hide(); styleText(healthBar.text, 12, 1, 1, 1)
-        healthBar.left:SetText("HP"); styleText(healthBar.left, 10, 0.8, 0.87, 0.83)
+        healthBar.left:SetText("")
+        healthBar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.5)
         y = y + 17
         rageBar:SetHeight(18); rageBar:SetWidth(blockW)
         rageBar:ClearAllPoints(); rageBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
         rageBar:SetStatusBarTexture(BAR_TEX); rageBar.frame:Hide(); rageBar.tick:Hide()
-        rageBar.left:SetText("MANA"); styleText(rageBar.left, 10, 0.78, 0.84, 0.94)
+        rageBar.left:SetText("")
+        rageBar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.5)
         styleText(rageBar.text, 14, 1, 1, 1)
         y = y + 24
         castY = y
-        castIdle:ClearAllPoints(); castIdle:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
-        castIdle:SetSize(blockW, 26); castIdle:SetShown(DB.casts and true or false)
         castPlayer.col = {0.48, 0.32, 0.70}
         castPlayer:SetStatusBarColor(0.48, 0.32, 0.70)
         castPlayer:SetStatusBarTexture(BAR_TEX); castPlayer.frame:Hide()
@@ -3225,6 +3213,7 @@ do   -- Warlock HUD: one action, quiet secondary cues, fixed readable rows.
         styleText(castPlayer.name, 14, 1, 1, 1); styleText(castPlayer.left, 14, 1, 1, 1)
         if DB.casts then y = y + 32 end
         utilityY = y
+        shardText:ClearAllPoints(); shardText:SetPoint("TOPRIGHT", main, "TOPRIGHT", -PAD, -(y + 6))
         local n = 0
         if not DB.off.cooldowns then
             for _, name in ipairs(CD_SPELLS) do
@@ -3232,13 +3221,13 @@ do   -- Warlock HUD: one action, quiet secondary cues, fixed readable rows.
                     local f = cdIcons[name] or makeCD(name); cdIcons[name] = f
                     f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
                     f:ClearAllPoints(); f:SetSize(26, 26)
-                    f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + (n % 9) * 31, -(y + math.floor(n / 9) * 31))
+                    f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + (n % 6) * 31, -(y + math.floor(n / 6) * 31))
                     f.glow:SetSize(26, 26); f.glow:SetAlpha(0) -- no duplicate glowing suggestions
                     f:Show(); n = n + 1
                 end
             end
         end
-        if n > 0 then y = y + math.ceil(n / 9) * 31 end
+        if n > 0 then y = y + math.ceil(n / 6) * 31 end
         main:SetSize(W, y + 8); main:SetScale(DB.scale)
         main:ClearAllPoints(); main:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
         main:EnableMouse(not DB.locked); main:EnableMouseWheel(not DB.locked); main.bg:SetShown(not DB.locked)
@@ -3255,7 +3244,7 @@ do   -- Warlock HUD: one action, quiet secondary cues, fixed readable rows.
         tf.cast:SetSize(160, 20); tf.cast.frame:Hide()
         tDirty.all = true
         DBagsAlertsState.dotTiles = used
-        DBagsAlertsState.casterHUD = {width=W, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck}
+        DBagsAlertsState.casterHUD = {width=W, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck, frameless=true}
         if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end
     end
     local elapsed, shardAt = 0, 0
@@ -3271,9 +3260,10 @@ do   -- Warlock HUD: one action, quiet secondary cues, fixed readable rows.
             if spell["Drain Soul"] then shardText:SetFormattedText("Shards %d/%d", DRU.bags(), DB.shardGoal or 5)
             else shardText:SetText("") end
         end
-        idle:SetShown(not ctx.hostile)
+        tf:SetShown(DB.target and ctx.hostile and true or false)
         local key = ctx.hostile and targetKey()
         for _, f in ipairs(used) do
+            f:SetShown(ctx.hostile and true or false)
             local left, length
             if ctx.hostile then left, length = dotLeft(f.name, now, key) end
             if left and left > 0 then

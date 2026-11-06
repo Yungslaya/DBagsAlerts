@@ -283,7 +283,7 @@ if MODE_CLASS == "WARLOCK" then
     do
         local cb = DBagsAlertsState.castPlayer
         local h = DBagsAlertsState.casterHUD
-        assert(h.width == 300 and h.dotY == 112, "caster layout mismatch")
+        assert(h.width == 300 and h.dotY == 42 and h.frameless, "caster layout mismatch")
         assert(cb._h == 26 and cb._w == 253, "cast bar size mismatch")
         assert(h.castY < h.utilityY, "cast bar separated by utility icons")
         for _, a in ipairs(DBagsAlertsState.alerts) do
@@ -294,7 +294,7 @@ if MODE_CLASS == "WARLOCK" then
         assert(h.frame._shown == false, "new HUD still visible in oldlook")
         SlashCmdList.DBAGSALERTS("newlook")
         assert(h.frame._shown == true, "new HUD not restored")
-        print("HUD: 300px, one 60px action, 28px helpers, 26px cast, old/new toggle PASS")
+        print("HUD: 300px, frameless, side action cue, 28px helpers, 26px cast, old/new toggle PASS")
     end
     PET = false; step()
     print("warlock fight, no pet: " .. lit())
@@ -315,6 +315,7 @@ if MODE_CLASS == "WARLOCK" then
     print("warlock 2 shards + healthstone: " .. lit())
     MODE.combat = false; MODE.target = false; BAG = { { itemID = 6265, iconFileID = 6265 } }; ADVANCE(2); step()
     print("warlock out of combat, 1 shard, no stone: " .. lit())
+    for _, f in ipairs(DBagsAlertsState.dotTiles) do assert(f._shown == false, "idle dot ghosts") end
     MODE.combat = true; MODE.target = true; SOLO = true; ADVANCE(1); step()
     print("warlock solo, 2 mobs on you, 30% hp: " .. lit())
     SOLO = false
