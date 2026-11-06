@@ -6,7 +6,7 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 ## What's new
 
-- **1.0.2:** **Warlock added:** DoTs (Corruption, Bane of Agony, Immolate, Siphon Life), free Shadow Bolt, Life Tap, Drain Soul for shards, pet, Demon Armor, Healthstone, Fear. 18 "PK" macros. Warlock gets a **caster look**: purple cast bar right under your mana (seconds left; the blue NEXT zone at the end is where you can press your next spell early. Moving still cancels: stand still until the bar is full) and a row of DoT timers with big countdowns. No swing or threat bar for warlocks. /reload.
+- **1.0.2:** **Warlock added:** DoTs (Corruption, Bane of Agony, Immolate, Siphon Life), free Shadow Bolt, Life Tap, Drain Soul for shards, pet, Demon Armor, Healthstone, Fear. 18 "PK" macros. Warlock gets a **new look** (ideas from Luxthos UI, made our own): flat 224 px column, three big alert icons, a row of DoT timers (big countdown, red edge when one is missing), soul shard pips, a 30 px fel-purple cast bar (blue NEXT zone = press your next spell early; moving still cancels). `/pa oldlook` switches back. /reload.
 - **1.0.1:** Racials: your race's combat racials go on the cooldown row. Elune's Light, Blood Fury and Berserking light up on tough fights, and War Stomp stops casts. /reload.
 - **1.0.0:** Renamed from ProtAlerts to DBagsAlerts. **Druid added:** the alerts follow your form (Bear, Cat, caster), and the bar shows rage, energy plus combo points, or mana. Your old ProtAlerts settings carry over, and old ProtAlerts turns itself off. Full WoW restart.
 - **0.9.13:** Weapon stone button: click to sharpen (blades) or weight (maces) your weapon; grey NO STONE when you have none (can turn off). /reload.

@@ -1533,7 +1533,8 @@ local CLASSIC_TEX = "Interface\\TargetingFrame\\UI-StatusBar"
 local EDGE = { edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 12,
                insets = { left = 3, right = 3, top = 3, bottom = 3 } }
 local GOLD = { 0.86, 0.72, 0.42 }
-local function classic() return not DB or DB.style ~= "clean" end
+-- New warlock look (DRU.lux) is always flat: thin black lines, no gold frames (Luxthos UI style)
+local function classic() return not DRU.lux and (not DB or DB.style ~= "clean") end
 local function goldFrame(parent, pad)
     local f = CreateFrame("Frame", nil, parent, BackdropTemplateMixin and "BackdropTemplate" or nil)
     f:SetPoint("TOPLEFT", -pad, pad); f:SetPoint("BOTTOMRIGHT", pad, -pad)
@@ -1837,7 +1838,7 @@ end
 local function applyStyle()
     local c = classic()
     for _, bar in ipairs(BARS) do
-        local tex = c and CLASSIC_TEX or BAR_TEX
+        local tex = (c or DRU.lux) and CLASSIC_TEX or BAR_TEX     -- new warlock look: Blizzard bar texture
         bar:SetStatusBarTexture(tex)
         bar:SetStatusBarColor(bar.col[1], bar.col[2], bar.col[3])
         bar.bg:SetTexture(tex)
@@ -1861,10 +1862,11 @@ local function layoutStack()
     -- clean style: icons share 1px lines. Classic style: gold frames need a little room.
     local g = classic() and 10 or 1
     local pad = classic() and 5 or 0
+    if DRU.lux then M = 74 end     -- new warlock look: three big icons fill the 224 px column
     local W = M * 3 + 2 * g + 2 * pad
     local rowY = -(pad + B + g)
     local pos = {
-        buff   = { pad, -pad, B },
+        buff   = { DRU.lux and (W - B) / 2 or pad, -pad, B },
         danger = { pad, rowY, M },
         next   = { pad + M + g, rowY, M },
         extra  = { pad + 2 * (M + g), rowY, M },
@@ -1923,6 +1925,8 @@ end
 local function layout()
     local width = BAR_W + 12
     local y = 0
+    DRU.caster = CLASS == "WARLOCK"
+    DRU.lux = DRU.caster and DB.lux ~= false      -- new warlock look; /pa oldlook switches back
     for _, a in ipairs(ALERTS) do if not a.root then makeSlot(a) end end
     ring:Hide()
     for _, f in pairs(slotBG) do f:Hide() end
@@ -1956,6 +1960,10 @@ local function layout()
     local x = (width - blockW) / 2
     local top = y
     y = y + (classic() and 6 or 1)
+    -- new warlock look: DoT timer row right under the big icons (like a cooldown row)
+    if DRU.lux and DRU.dotRow then y = DRU.dotRow(x, y) end
+    local rh = DRU.lux and 20 or 18             -- mana bar height
+    rageBar:SetHeight(rh)
     for _, b in ipairs({ healthBar, rageBar, threatBar, swingBar }) do b:SetWidth(blockW) end
     advice:SetWidth(blockW)
     healthBar:ClearAllPoints(); healthBar:SetPoint("TOPLEFT", main, "TOPLEFT", x, -y)
@@ -1978,10 +1986,9 @@ local function layout()
             or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[CLASS])
         -- health stays classic green (easy to read), not class color
     end
-    y = y + 28 + gb + 18 + (DB.advice and 18 or 0)
+    y = y + 28 + gb + rh + (DB.advice and 18 or 0)
     -- Caster look (warlock): cast bar right under mana, then one row of DoT timers +
     -- cooldowns. No threat / swing bars (the aggro dots on nameplates cover threat).
-    DRU.caster = CLASS == "WARLOCK"
     local known = {}
     if DRU.casterLayout then y = DRU.casterLayout(x, y, gb) end
     -- Important buttons: one centered row right under health + rage (only ones you know)
@@ -1996,8 +2003,8 @@ local function layout()
         end
     end
     if #known > 0 then
-        local n, cg = #known, 2
-        local cs = math.min(44, math.floor((blockW - (n - 1) * cg) / n))
+        local n, cg = #known, DRU.lux and 1 or 2
+        local cs = math.min(DRU.lux and 36 or 44, math.floor((blockW - (n - 1) * cg) / n))
         local cx = (width - (n * cs + (n - 1) * cg)) / 2
         y = y + (classic() and 7 or 3)
         for i, f in ipairs(known) do
@@ -2854,6 +2861,7 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
     -- red numbers in the last 3 seconds. Times come from your own casts (and the real
     -- debuff when the game shares it), so they work in combat.
     local SHADOW = { 0.62, 0.32, 1 }            -- warlock purple
+    local FEL = { 0.58, 0.38, 1 }               -- soul shard purple (Luxthos' shard colour)
     local TILE_H = 6                            -- timer bar under each tile
     local idle = makeBar(0.1, 0.1, 0.1, 24, "")  -- empty slot when you're not casting
     idle.text:Hide(); idle:SetMinMaxValues(0, 1); idle:SetValue(0); idle:Hide()
@@ -2878,6 +2886,16 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
         f.num:SetFont(FONT, 20, "THICKOUTLINE"); f.num:SetPoint("CENTER", 0, 0)
         addBorder(f, 0, 0, 0, 1, 1)
         f.gold = goldFrame(f, 4)
+        -- new look: a red edge that pulses when this DoT is missing in a fight
+        local ef = CreateFrame("Frame", nil, f.top)
+        ef:SetAllPoints(f.icon)
+        f.warn = addBorder(ef, 1, 0.2, 0.2, 1, 2)
+        local ag = ef:CreateAnimationGroup()
+        ag:SetLooping("BOUNCE")
+        local fa = ag:CreateAnimation("Alpha")
+        fa:SetFromAlpha(1); fa:SetToAlpha(0.25); fa:SetDuration(0.5)
+        ag:Play()
+        f.warnF = ef; ef:Hide()
         tiles[i] = f
         return f
     end
@@ -2908,15 +2926,93 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
         if at and now - at < d then return d - (now - at), d end
     end
     local shown = false
-    DRU.casterLayout = function(x, y, gb)
-        local cb = castPlayer
+    -- soul shard pips (new look): one pip per shard you want to keep
+    local pips = CreateFrame("Frame", nil, main)
+    pips.p = {}
+    pips.more = pips:CreateFontString(nil, "OVERLAY")
+    pips.more:SetFont(FONT, 13, "OUTLINE"); pips.more:SetPoint("LEFT", pips, "RIGHT", 4, 0)
+    pips:Hide()
+    local pipN = 0
+    local function fontSize(fs, size)
+        local f, _, fl = fs:GetFont()
+        pcall(fs.SetFont, fs, f or FONT, size, fl)
+    end
+    -- new look, step 1: DoT row right under the big icons, edge to edge
+    DRU.dotRow = function(x, y)
         for _, f in ipairs(tiles) do f:Hide() end
         wipe(used)
+        local list = dotList()
+        local n = #list
+        if n == 0 then return y end
+        local s = math.min(56, math.floor((blockW - (n - 1)) / n))
+        local cx = x + (blockW - (n * s + (n - 1))) / 2
+        y = y + 3
+        for i, name in ipairs(list) do
+            local f = tile(i)
+            f.name = name
+            f:SetSize(s, s)
+            f.icon:SetHeight(s)
+            f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]) or DEFAULT_ICON)
+            f.gold:SetShown(false)
+            f.bar:SetHeight(5)                          -- thin timer bar inside the icon
+            pcall(f.num.SetFont, f.num, FONT, 22, "THICKOUTLINE")
+            f.warnF:Hide()
+            f:ClearAllPoints(); f:SetPoint("TOPLEFT", main, "TOPLEFT", cx + (i - 1) * (s + 1), -y)
+            f:Show()
+            used[#used + 1] = f
+        end
+        shown = true
+        return y + s + 4
+    end
+    DRU.casterLayout = function(x, y, gb)
+        local cb = castPlayer
+        pips:Hide()
+        if not DRU.lux then
+            for _, f in ipairs(tiles) do f:Hide() end
+            wipe(used)
+        end
         if not DRU.caster then
             idle:Hide(); shown = false
             cb.col = { 1, 0.7, 0.1 }
             cb:SetHeight(22); cb.icon:SetSize(22, 22)
             return y
+        end
+        if DRU.lux then
+            -- new look, step 2: shard pips, then a 30 px cast bar (icon inside the column)
+            fontSize(rageBar.text, 15)
+            if spell["Drain Soul"] then
+                pipN = math.max(3, math.min(10, DB.shardGoal or 5))
+                local pw = (blockW - (pipN - 1)) / pipN
+                pips:ClearAllPoints(); pips:SetSize(blockW, 10)
+                pips:SetPoint("TOPLEFT", main, "TOPLEFT", x, -(y + 1))
+                for i = 1, 10 do
+                    local p = pips.p[i]
+                    if not p then
+                        p = CreateFrame("Frame", nil, pips)
+                        p.bg = p:CreateTexture(nil, "BACKGROUND"); p.bg:SetAllPoints(); p.bg:SetColorTexture(0.08, 0.08, 0.1, 0.8)
+                        p.fill = p:CreateTexture(nil, "ARTWORK"); p.fill:SetAllPoints()
+                        p.fill:SetTexture(CLASSIC_TEX); p.fill:SetVertexColor(FEL[1], FEL[2], FEL[3])
+                        addBorder(p, 0, 0, 0, 1, 1)
+                        pips.p[i] = p
+                    end
+                    p:SetShown(i <= pipN)
+                    p:ClearAllPoints(); p:SetSize(pw, 10)
+                    p:SetPoint("TOPLEFT", pips, "TOPLEFT", (i - 1) * (pw + 1), 0)
+                end
+                pips:Show()
+                y = y + 12
+            end
+            local h = 30
+            cb.col = { FEL[1], FEL[2], FEL[3] }
+            cb:SetStatusBarColor(FEL[1], FEL[2], FEL[3])
+            cb:SetHeight(h); cb.icon:SetSize(h, h)
+            fontSize(cb.name, 15); fontSize(cb.left, 16)
+            y = y + 3
+            cb:ClearAllPoints(); cb:SetWidth(blockW - h - 1)
+            cb:SetPoint("TOPLEFT", main, "TOPLEFT", x + h + 1, -y)
+            idle:Hide()
+            shown = true
+            return y + h + 3
         end
         -- 1) cast bar: full width under your mana, purple, icon on the left
         local h, ih = 24, 24
@@ -2942,7 +3038,8 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
                 local f = tile(i)
                 f.name = name
                 f:SetSize(s, s + TILE_H + 1)
-                f.icon:SetHeight(s)
+                f.icon:SetHeight(s); f.bar:SetHeight(TILE_H); f.warnF:Hide()
+                pcall(f.num.SetFont, f.num, FONT, 20, "THICKOUTLINE")
                 f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]) or DEFAULT_ICON)
                 f.gold:SetShown(classic())
                 f:ClearAllPoints(); f:SetPoint("TOPLEFT", main, "TOPLEFT", cx + (i - 1) * (s + g), -y)
@@ -2962,6 +3059,11 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
         if t < 0.1 or not shown then return end
         t = 0
         pcall(function()
+            if pips:IsShown() then
+                local have = DRU.bags()
+                for i = 1, pipN do pips.p[i].fill:SetShown(i <= have) end
+                pips.more:SetText(have > pipN and ("+" .. (have - pipN)) or "")
+            end
             local fight = ctx.hostile
             for _, f in ipairs(used) do
                 local l, d
@@ -2971,6 +3073,7 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
                     if not l and f.name == "Curse of the Elements" then l, d = left("Curse of Weakness") end
                 end
                 if l and l > 0 then
+                    f.warnF:Hide()
                     f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
                     f.bar:SetValue(d and d > 0 and l / d or 0)
                     f.num:SetFormattedText(l >= 10 and "%d" or "%.1f", l)
@@ -2979,11 +3082,14 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
                 else
                     f.shade:SetAlpha(1); f.icon:SetDesaturated(true); f:SetAlpha(fight and 1 or 0.5)
                     f.bar:SetValue(0); f.num:SetText("")
+                    -- new look: missing in a fight = pulsing red edge (put it back on)
+                    f.warnF:SetShown(DRU.lux and fight and ctx.combat and true or false)
                 end
             end
         end)
     end)
     DBagsAlertsState.dotTiles = used
+    DBagsAlertsState.pips = pips
 end
 
 local REACTION = { [1] = { 0.85, 0.1, 0.1 }, [2] = { 0.85, 0.1, 0.1 }, [3] = { 0.85, 0.35, 0.1 },
@@ -4392,6 +4498,10 @@ SlashCmdList.DBAGSALERTS = function(msg)
         say(DB.locked and "locked." or "unlocked. Drag to move, scroll to resize.")
     elseif cmd == "macros" or cmd == "macro" then
         makeMacros()
+    elseif cmd == "oldlook" or cmd == "newlook" then
+        DB.lux = cmd == "newlook"
+        layout()
+        say(DB.lux and "new warlock look on. /pa oldlook to go back." or "old warlock look on. /pa newlook for the new one.")
     elseif cmd == "test" then
         testUntil = GetTime() + 8; say("preview on.")
     elseif cmd == "scale" and tonumber(rest) then
