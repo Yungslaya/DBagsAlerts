@@ -1,4 +1,4 @@
--- ProtAlerts: Protection Warrior alerts for WoW Forever.
+-- DBagsAlerts: Protection Warrior alerts for WoW Forever.
 --
 -- DISPLAY ONLY. This addon never casts, targets or presses anything. It lights
 -- an icon when something important is ready or needed; you press the button.
@@ -25,13 +25,25 @@ local IsCurrentSpell = (C_Spell and C_Spell.IsCurrentSpell) or _G.IsCurrentSpell
 
 local RAGE = (Enum and Enum.PowerType and Enum.PowerType.Rage) or 1
 local MANA = (Enum and Enum.PowerType and Enum.PowerType.Mana) or 0
-local POWER = RAGE        -- set at login: rage for warriors, mana for paladins
-local CLASS               -- "WARRIOR" or "PALADIN"
+local POWER = RAGE        -- rage (warrior), mana (paladin), druid: follows your form
+local CLASS               -- "WARRIOR", "PALADIN" or "DRUID"
+-- Druid bits live in one table (Lua allows only 200 top-level locals)
+local DRU = {
+    ENERGY = (Enum and Enum.PowerType and Enum.PowerType.Energy) or 3,
+    COMBO = (Enum and Enum.PowerType and Enum.PowerType.ComboPoints) or 4,
+    dotAt = {},          -- dot name -> target key -> time we cast it
+    anyRange = false,    -- caster form: count mobs at any range, not only melee
+    DOTS = { ["Moonfire"] = true, ["Insect Swarm"] = true, ["Rake"] = true, ["Rip"] = true,
+             ["Faerie Fire"] = true, ["Faerie Fire (Feral)"] = true },
+    -- GetShapeshiftFormID -> what we call it (moonkin / tree count as caster)
+    FORM = { [1] = "cat", [5] = "bear", [8] = "bear", [3] = "travel", [4] = "travel",
+             [27] = "travel", [29] = "travel", [2] = "caster", [31] = "caster", [36] = "caster" },
+}
 local ALERTS, CD_SPELLS   -- picked at login from the class tables below
 local spendLine           -- function, defined with the advice code below
 local tankingHard         -- function, defined with the advice code below
 local DB
-local function say(fmt, ...) print("|cffc79c6eProtAlerts|r: " .. string.format(fmt, ...)) end
+local function say(fmt, ...) print("|cffff7d0aDBags|r|cffc79c6eAlerts|r: " .. string.format(fmt, ...)) end
 
 local DEFAULTS = {
     point = { "CENTER", "CENTER", 0, -170 },
@@ -76,6 +88,12 @@ for _, b in ipairs({ "Blessing of Sanctuary", "Blessing of Kings", "Blessing of 
     DEFAULT_DURATION[b] = 300; DEFAULT_DURATION["Greater " .. b] = 900
 end
 
+for k, v in pairs({ ["Moonfire"] = 12, ["Insect Swarm"] = 12, ["Rake"] = 9, ["Rip"] = 12,
+    ["Faerie Fire"] = 40, ["Faerie Fire (Feral)"] = 40, ["Demoralizing Roar"] = 30, ["Thorns"] = 600,
+    ["Mark of the Wild"] = 1800, ["Gift of the Wild"] = 3600, ["Rejuvenation"] = 12 }) do
+    DEFAULT_DURATION[k] = v
+end
+
 -- Buffs we follow by our own casts. A group means "any one of these counts"
 -- (one seal at a time, one blessing on you, one aura).
 local GROUPS = {
@@ -86,6 +104,10 @@ local GROUPS = {
     ["Righteous Fury"] = { "Righteous Fury" },
     ["Holy Shield"] = { "Holy Shield" },
     ["Consecration"] = { "Consecration" },
+    MOTW = { "Mark of the Wild", "Gift of the Wild" },
+    ["Thorns"] = { "Thorns" },
+    ["Rejuvenation"] = { "Rejuvenation" },
+    ["Demoralizing Roar"] = { "Demoralizing Roar" },
     SEAL = { "Seal of Fury", "Seal of Righteousness", "Seal of Command", "Seal of the Crusader",
              "Seal of Wisdom", "Seal of Light", "Seal of Justice" },
     BLESSING = { "Blessing of Sanctuary", "Blessing of Kings", "Blessing of Might", "Blessing of Wisdom",
@@ -101,6 +123,7 @@ local PERMANENT = { AURA = true }       -- auras last until changed
 local READ = {
     WARRIOR = { "Battle Shout", "Shield Block" },
     PALADIN = { "Righteous Fury", "SEAL", "BLESSING", "AURA", "Holy Shield" },
+    DRUID = { "MOTW", "Thorns", "Rejuvenation" },
 }
 
 ---------------------------------------------------------------------------
@@ -294,6 +317,11 @@ local function onCast(spellID)
         local k = targetKey()
         rendAt[k] = now
         lastDebuff = { name = name, at = now, key = k }
+    elseif DRU.DOTS[name] then
+        local k = targetKey()
+        DRU.dotAt[name] = DRU.dotAt[name] or {}
+        DRU.dotAt[name][k] = now
+        lastDebuff = { name = name, at = now, key = k }
     end
 end
 
@@ -309,6 +337,8 @@ local function onTargetCombat(action)
         rendAt[ld.key] = nil
     elseif ld.name == "Sunder Armor" and sunder[ld.key] then
         sunder[ld.key].n = math.max(0, sunder[ld.key].n - 1)
+    elseif DRU.dotAt[ld.name] then
+        DRU.dotAt[ld.name][ld.key] = nil
     end
     lastDebuff = nil
 end
@@ -359,6 +389,43 @@ local function readAll()
     for _, key in ipairs(READ[CLASS] or {}) do readBuff(key) end
 end
 
+-- any power type >= pct% (or < pct% with below); secret values go through a curve
+function DRU.needPower(st, ptype, pct, below)
+    if not st.ok then return end
+    local r, m = UnitPower("player", ptype), UnitPowerMax("player", ptype)
+    if not secret(r) and not secret(m) then
+        local frac = (m and m > 0) and r / m or 0
+        if below then need(st, frac < pct / 100) else need(st, frac >= pct / 100) end
+        return
+    end
+    local cv = UnitPowerPercent and stepCurve("pw" .. ptype .. "_" .. pct .. tostring(below), below, pct / 100)
+    if not cv then return end
+    local ok, a = pcall(UnitPowerPercent, "player", ptype, false, cv)
+    if ok then needAlpha(st, a) end
+end
+-- at least n combo points (cat form)
+function DRU.needCP(st, n)
+    if not st.ok then return end
+    local c = UnitPower("player", DRU.COMBO)
+    if not secret(c) then need(st, (c or 0) >= n) return end
+    DRU.needPower(st, DRU.COMBO, n / 5 * 100 - 1, false)
+end
+-- our dot needs (re)applying: the real debuff when the game shares it, else our cast
+-- timer. refresh = part of the duration left when it's worth refreshing (0 = let it end).
+function DRU.needDot(st, name, refresh)
+    if not st.ok then return end
+    local t = DRU.dotAt[name]
+    local at = t and t[targetKey()]
+    local real, aura = targetDebuff(name)
+    local d = durationOf(name)
+    local now = GetTime()
+    if real == "on" then
+        local exp = aura and plain(aura.expirationTime, nil)
+        need(st, exp and exp > 0 and exp - now <= d * refresh)
+    elseif real == "off" then need(st, not at or now - at > 1)   -- 1s: it lands just after the cast
+    else need(st, not at or now - at > d * (1 - refresh)) end
+end
+
 ---------------------------------------------------------------------------
 -- Rage gain per hit (only while rage is readable)
 ---------------------------------------------------------------------------
@@ -395,6 +462,8 @@ scanEnemiesNow = function()
     local ok, plates = pcall(C_NamePlate.GetNamePlates)
     if not ok or type(plates) ~= "table" or sectable(plates) then return nil, nil end
     local melee = spell["Sunder Armor"] or spell["Heroic Strike"] or spell["Holy Strike"] or spell["Crusader Strike"]
+        or spell["Claw"] or spell["Maul"]
+    if DRU.anyRange then melee = nil end
     local grouped = IsInGroup()
     -- your group, without you (for "is this mob hitting a friend?")
     local mates = scanMates
@@ -453,7 +522,7 @@ end
 -- Alerts. Order inside a row = priority (left = most important).
 ---------------------------------------------------------------------------
 local ctx = {}
-ProtAlertsState = { ctx = ctx }   -- read-only peek for /pa debug and testing
+DBagsAlertsState = { ctx = ctx }   -- read-only peek for /pa debug and testing
 
 local WARRIOR_ALERTS = {
     -- DANGER ROW
@@ -724,7 +793,208 @@ local PALADIN_ALERTS = {
       end },
 }
 
-local CLASS_ALERTS = { WARRIOR = WARRIOR_ALERTS, PALADIN = PALADIN_ALERTS }
+-- Druid: every alert checks your form, so Bear / Cat / caster each get their own
+-- rotation. Order and rules: Icy Veins WoW Forever Feral, Balance and Restoration
+-- leveling guides (Nov 2026).
+local function inForm(f) return ctx.form == f end
+local function castingTarget(st)
+    local cname, _, _, _, _, _, _, notInt = UnitCastingInfo("target")
+    if not cname then cname, _, _, _, _, _, notInt = UnitChannelInfo("target") end
+    need(st, cname and true or false)
+    need(st, notInt, true)
+end
+local DRUID_ALERTS = {
+    -- DANGER ROW
+    { key = "lowhp", row = 1, label = "LOW HP", danger = true, icon = "Barkskin",
+      test = function(st)
+          need(st, ctx.combat)
+          needLowHealth(st, (inForm("bear") and tankingHard and tankingHard()) and math.max(DB.lowHp, 50) or DB.lowHp)
+          if st.ok then
+              local list = inForm("bear") and { "Frenzied Regeneration", "Barkskin" }
+                  or inForm("cat") and { "Barkskin" } or { "Barkskin", "Regrowth" }
+              local n = firstKnown(list, true)
+              if n then return n, n:upper() end
+          end
+      end },
+    { key = "kick", row = 1, label = "STOP CAST", danger = true, icon = "Bash",
+      test = function(st)
+          local k = firstKnown({ "Bash", "Feral Charge" }, true)
+          need(st, inForm("bear") and k and ctx.combat and ctx.hostile)
+          if not st.ok then return end
+          need(st, usable(k))
+          castingTarget(st)
+          return k, "STOP CAST"
+      end },
+    { key = "taunt", row = 1, label = "GROWL", danger = true, icon = "Growl",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.group and ctx.hostile and spell["Growl"])
+          need(st, ready("Growl")); need(st, usable("Growl"))
+          if not st.ok then return end
+          local isTanking = UnitDetailedThreatSituation("player", "target")
+          need(st, isTanking, true)
+      end },
+    { key = "loose", row = 1, label = "LOOSE", danger = true, icon = "Growl",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.group and (ctx.loose or 0) > 0)
+          if st.ok then return nil, "LOOSE MOBS " .. ctx.loose end
+      end },
+
+    -- CAT: open from Prowl, Rip at 4+ points, keep Rake up, Claw (Shred when behind)
+    { key = "copen", row = 2, label = "OPENER", icon = "Ravage",
+      test = function(st)
+          local n = firstKnown({ "Ravage", "Shred" })
+          need(st, inForm("cat") and ctx.stealth and ctx.hostile and n)
+          if not st.ok then return end
+          need(st, usable(n))
+          return n, n:upper()
+      end },
+    { key = "rip", row = 2, label = "RIP", icon = "Rip",
+      test = function(st)
+          need(st, inForm("cat") and ctx.combat and ctx.hostile and spell["Rip"] and not ctx.bleedImmune)
+          DRU.needCP(st, 4)
+          DRU.needDot(st, "Rip", 0)
+          need(st, usable("Rip"))
+          if not ctx.elite then needTargetAbove(st, 40) end    -- only if the mob will live a while
+      end },
+    { key = "rake", row = 2, label = "RAKE", icon = "Rake",
+      test = function(st)
+          need(st, inForm("cat") and ctx.combat and ctx.hostile and spell["Rake"] and not ctx.bleedImmune)
+          DRU.needDot(st, "Rake", 0)                           -- don't refresh it early
+          need(st, usable("Rake"))
+          if not ctx.elite then needTargetAbove(st, 30) end
+      end },
+    { key = "fbite", row = 2, label = "BITE", icon = "Ferocious Bite",
+      test = function(st)
+          -- 5 points and Rip is already on: spend them so they aren't wasted
+          need(st, inForm("cat") and ctx.combat and ctx.hostile and spell["Ferocious Bite"])
+          DRU.needCP(st, 5)
+          need(st, usable("Ferocious Bite"))
+      end },
+    { key = "cfill", row = 2, label = "CLAW", icon = "Claw",
+      test = function(st)
+          -- Shred needs you behind the mob: only when someone else tanks (in a group)
+          local n = (ctx.group and spell["Shred"]) and "Shred" or (spell["Claw"] and "Claw") or nil
+          need(st, inForm("cat") and ctx.combat and ctx.hostile and n)
+          if not st.ok then return end
+          need(st, usable(n))
+          return n, n:upper()
+      end },
+    { key = "shift", row = 2, label = "SHIFTING POWER", icon = "Shifting Power",
+      test = function(st)
+          need(st, inForm("cat") and ctx.combat and spell["Shifting Power"])
+          need(st, ready("Shifting Power")); need(st, usable("Shifting Power"))
+          DRU.needPower(st, DRU.ENERGY, 50, true)              -- on cooldown below 50 energy
+      end },
+
+    -- BEAR: Primal Bite on cooldown, Lacerate (one mob) / Swipe (packs), Maul for extra rage
+    { key = "primal", row = 2, label = "PRIMAL BITE", icon = "Primal Bite",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.hostile and spell["Primal Bite"])
+          need(st, ready("Primal Bite")); need(st, usable("Primal Bite"))
+      end },
+    { key = "bfill", row = 2, label = "SWIPE", icon = "Swipe",
+      test = function(st)
+          local many = (ctx.enemies or 0) >= 2
+          local n = (not many and spell["Lacerate"]) and "Lacerate" or (spell["Swipe"] and "Swipe") or nil
+          need(st, inForm("bear") and ctx.combat and ctx.hostile and n)
+          if not st.ok then return end
+          need(st, ready(n)); need(st, usable(n))
+          return n, n:upper()
+      end },
+    { key = "maul", row = 2, label = "MAUL", icon = "Maul",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.hostile and spell["Maul"])
+          if not st.ok then return end
+          need(st, IsCurrentSpell(spell["Maul"]), true)        -- not already queued
+          need(st, usable("Maul"))
+          needRage(st, spendLine(), false)                     -- only extra rage
+      end },
+    { key = "enrage", row = 2, label = "ENRAGE", icon = "Enrage",
+      test = function(st)
+          need(st, inForm("bear") and spell["Enrage"] and (ctx.combat or ctx.hostile))
+          need(st, ready("Enrage")); need(st, usable("Enrage"))
+          if st.ok and ctx.combat then needRage(st, 30, true) end
+      end },
+    { key = "roar", row = 2, label = "DEMO ROAR", icon = "Demoralizing Roar",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.hostile and ((ctx.enemies or 0) >= 2 or ctx.elite))
+          need(st, spell["Demoralizing Roar"] and timeLeft("Demoralizing Roar") <= durationOf("Demoralizing Roar") * 0.3)
+          need(st, usable("Demoralizing Roar"))
+      end },
+    { key = "ffire", row = 2, label = "FAERIE FIRE", icon = "Faerie Fire",
+      test = function(st)
+          local n = spell["Faerie Fire (Feral)"] and "Faerie Fire (Feral)" or "Faerie Fire"
+          need(st, (inForm("bear") or inForm("cat")) and ctx.combat and ctx.hostile and spell[n] and not ctx.stealth)
+          DRU.needDot(st, n, 0.1)
+          need(st, ready(n)); need(st, usable(n))
+          needTargetAbove(st, 30)
+          return n, "FAERIE FIRE"
+      end },
+
+    -- CASTER (Balance / Restoration while leveling): Moonfire + Insect Swarm, Wrath filler
+    { key = "hurricane", row = 2, label = "HURRICANE", icon = "Hurricane",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and ctx.hostile and (ctx.enemies or 0) >= 3 and spell["Hurricane"])
+          need(st, ready("Hurricane")); need(st, usable("Hurricane"))
+      end },
+    { key = "moonfire", row = 2, label = "MOONFIRE", icon = "Moonfire",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and ctx.hostile and spell["Moonfire"])
+          DRU.needDot(st, "Moonfire", 0.3)
+          need(st, usable("Moonfire"))
+          needTargetAbove(st, 25)
+      end },
+    { key = "insect", row = 2, label = "INSECT SWARM", icon = "Insect Swarm",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and ctx.hostile and spell["Insect Swarm"])
+          DRU.needDot(st, "Insect Swarm", 0.3)
+          need(st, ready("Insect Swarm")); need(st, usable("Insect Swarm"))
+          needTargetAbove(st, 25)
+      end },
+    { key = "wrath", row = 2, label = "WRATH", icon = "Wrath",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and ctx.hostile and spell["Wrath"])
+          need(st, usable("Wrath"))
+      end },
+
+    -- UPKEEP: Mark of the Wild + Thorns always, Rejuvenation on yourself before a pull
+    { key = "rejuv", row = 2, label = "REJUV", icon = "Rejuvenation",
+      test = function(st)
+          need(st, inForm("caster") and not ctx.combat and ctx.hostile and spell["Rejuvenation"])
+          need(st, timeLeft("Rejuvenation") <= 0)
+          need(st, usable("Rejuvenation"))
+      end },
+    { key = "motw", row = 2, label = "MARK", icon = "Mark of the Wild",
+      test = function(st)
+          need(st, spell["Mark of the Wild"] and timeLeft("MOTW") <= 60 and not IsMounted())
+          if ctx.combat then need(st, usable("Mark of the Wild")) end
+      end },
+    { key = "thorns", row = 2, label = "THORNS", icon = "Thorns",
+      test = function(st)
+          need(st, spell["Thorns"] and timeLeft("Thorns") <= 30 and not IsMounted())
+          if ctx.combat then need(st, usable("Thorns")) end
+      end },
+
+    -- EXTRA (caster)
+    { key = "innervate", row = 2, label = "INNERVATE", icon = "Innervate",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and spell["Innervate"])
+          need(st, ready("Innervate")); need(st, usable("Innervate"))
+          needRage(st, 40, true)                               -- mana in caster form
+      end },
+    { key = "grasp", row = 2, label = "NATURE'S GRASP", icon = "Nature's Grasp",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and (ctx.enemies or 0) >= 2 and spell["Nature's Grasp"])
+          need(st, ready("Nature's Grasp")); need(st, usable("Nature's Grasp"))
+      end },
+    { key = "lowmana", row = 2, label = "LOW MANA", icon = "Innervate",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat)
+          needRage(st, DB.lowMana, true)
+      end },
+}
+
+local CLASS_ALERTS = { WARRIOR = WARRIOR_ALERTS, PALADIN = PALADIN_ALERTS, DRUID = DRUID_ALERTS }
 
 -- Big-icon mode: every alert of a spot sits in one place, stacked. First in the list
 -- is on top, so you only ever see the most important lit one. Order: Icy Veins
@@ -742,13 +1012,20 @@ local SPOT = {
         buff   = { "rfury", "seal", "bless", "aura" },
         extra  = { "judge", "lowmana" },             -- Judgement is off the global cooldown
     },
+    DRUID = {   -- each key only lights in its own form, so one list covers all three specs
+        danger = { "lowhp", "kick", "taunt", "loose" },
+        next   = { "copen", "rip", "rake", "fbite", "cfill", "primal", "bfill",
+                   "hurricane", "moonfire", "insect", "wrath" },
+        buff   = { "rejuv", "motw", "thorns", "ffire", "roar" },
+        extra  = { "shift", "enrage", "maul", "innervate", "grasp", "lowmana" },
+    },
 }
 local SPOT_SIZE = { danger = 64, next = 64, buff = 44, extra = 64 }   -- big, easy to see
 
 ---------------------------------------------------------------------------
 -- UI
 ---------------------------------------------------------------------------
-local main = CreateFrame("Frame", "ProtAlertsFrame", UIParent)
+local main = CreateFrame("Frame", "DBagsAlertsFrame", UIParent)
 main:SetSize(10, 10)
 main:SetMovable(true)
 main:SetClampedToScreen(true)
@@ -758,7 +1035,7 @@ main:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing()
     local p, _, rp, x, y = self:GetPoint()
     DB.point = { p, rp, x, y }
-    if ProtAlertsState.placeClickers then ProtAlertsState.placeClickers() end
+    if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end
 end)
 main.bg = main:CreateTexture(nil, "BACKGROUND")
 main.bg:SetAllPoints()
@@ -773,7 +1050,7 @@ end)
 -- Look: flat dark bars, thin black borders, outlined text.
 -- Look inspired by EllesmereUI / Naowh: smooth flat bars,
 -- 1px black pixel borders, icons packed edge to edge, no boxes or glows.
-local MEDIA = "Interface\\AddOns\\ProtAlerts\\Media\\"
+local MEDIA = "Interface\\AddOns\\DBagsAlerts\\Media\\"
 local FLAT = "Interface\\Buttons\\WHITE8X8"
 local BAR_TEX = MEDIA .. "Smooth.tga"
 local FONT = "Fonts\\FRIZQT__.TTF"          -- WoW's own font: familiar, easy to read
@@ -1109,6 +1386,7 @@ local CLASS_CDS = {
         "Intimidating Shout", "Berserker Rage" },
     PALADIN = { "Templar's Bulwark", "Divine Protection", "Divine Shield", "Lay on Hands",
         "Blessing of Protection", "Blessing of Freedom" },
+    DRUID = { "Barkskin", "Frenzied Regeneration", "Innervate", "Tranquility", "Challenging Roar", "Dash" },
 }
 local CD_SIZE = 40
 local cdIcons = {}
@@ -1311,6 +1589,7 @@ local function layout()
     local spendAt = POWER == MANA and DB.lowMana or DB.dumpAt
     rageBar.tick:SetSize(2, 18)
     rageBar.tick:ClearAllPoints(); rageBar.tick:SetPoint("CENTER", rageBar, "LEFT", blockW * spendAt / 100, 0)
+    rageBar.tick:SetShown(POWER == MANA or (POWER == RAGE and CLASS ~= "DRUID") or (CLASS == "DRUID" and POWER == RAGE))
     if POWER == MANA then
         setText(advice.low, "Low mana")
         setText(advice.mid, ""); setText(advice.high, "")
@@ -1366,7 +1645,7 @@ local function layout()
     main:EnableMouse(not DB.locked)
     main:EnableMouseWheel(not DB.locked)
     main.bg:SetShown(not DB.locked)
-    if ProtAlertsState.placeClickers then ProtAlertsState.placeClickers() end   -- right-click menus follow
+    if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end   -- right-click menus follow
 end
 
 local function setIcon(a, name, label)
@@ -1498,6 +1777,9 @@ local function updateAdvice()
     local show = ctx.combat or GetTime() < testUntil
     advice:SetAlpha(show and 1 or 0)
     if not show then return end
+    if POWER ~= RAGE and POWER ~= MANA or (CLASS == "DRUID" and POWER == RAGE) then
+        advice:SetAlpha(0) return                     -- rage tips are warrior words
+    end
     if POWER == MANA then
         bandAlpha(advice.low, 0, DB.lowMana)
         return
@@ -1537,6 +1819,7 @@ end
 -- Rage bar: red normally, gold once you are past the "spend" line.
 local function colorRage()
     if POWER == MANA then rageBar:SetStatusBarColor(0.2, 0.45, 1) return end
+    if POWER == DRU.ENERGY then rageBar:SetStatusBarColor(1, 0.85, 0.1) return end   -- energy: yellow
     local line = spendLine()
     local r, m = UnitPower("player", RAGE), UnitPowerMax("player", RAGE)
     if not secret(r) and not secret(m) then
@@ -1597,7 +1880,11 @@ local function updatePower()
     -- Rage (warrior) or mana (paladin)
     pcall(rageBar.SetMinMaxValues, rageBar, 0, UnitPowerMax("player", POWER))
     setBar(rageBar, UnitPower("player", POWER))
-    pcall(rageBar.text.SetFormattedText, rageBar.text, "%d", UnitPower("player", POWER))
+    if POWER == DRU.ENERGY then      -- cat: energy and combo points
+        pcall(rageBar.text.SetFormattedText, rageBar.text, "%d    %d CP", UnitPower("player", POWER), UnitPower("player", DRU.COMBO))
+    else
+        pcall(rageBar.text.SetFormattedText, rageBar.text, "%d", UnitPower("player", POWER))
+    end
     colorRage()
     updateAdvice()
 end
@@ -1756,7 +2043,7 @@ local function newDot()
     return d
 end
 local dot = newDot()              -- the target-frame dot (target without a nameplate)
-ProtAlertsState.dot = dot
+DBagsAlertsState.dot = dot
 
 local threatCurves
 local function statusCurves()
@@ -1830,7 +2117,7 @@ local function plateOK(plate)
 end
 
 local pool, used = {}, {}       -- plate frame -> dot
-ProtAlertsState.dotPool = pool
+DBagsAlertsState.dotPool = pool
 local function plateUnit(p)
     return p.namePlateUnitToken or (p.UnitFrame and p.UnitFrame.unit)
 end
@@ -1875,7 +2162,7 @@ updateRange = function()
         local okT, tp = pcall(C_NamePlate.GetNamePlateForUnit, "target")
         if okT and plateOK(tp) then tplate = tp end
     end
-    local tfr = ProtAlertsState.targetFrame
+    local tfr = DBagsAlertsState.targetFrame
     if on and ctx.hostile and not tplate and tfr and tfr:IsShown()
        and colorDot(dot, "target", true) and pin(dot, tfr, false) then
         return
@@ -1899,6 +2186,13 @@ local function updateContext()
     local ctype = plain(UnitCreatureType("target"), nil)
     ctx.bleedImmune = ctype == "Elemental" or ctype == "Mechanical"
     ctx.ctype = ctype
+    if CLASS == "DRUID" then
+        local okF, id = pcall(GetShapeshiftFormID or function() return nil end)
+        id = okF and plain(id, nil) or nil
+        ctx.form = DRU.FORM[id or 0] or "caster"
+        ctx.stealth = plain(IsStealthed and IsStealthed(), false) and true or false
+        DRU.anyRange = ctx.form ~= "bear" and ctx.form ~= "cat"
+    end
     ctx.enemies, ctx.loose = scanEnemies()
 end
 
@@ -2030,7 +2324,7 @@ end
 local castPlayer = makeCastBar(main, 22)
 
 local tf = CreateFrame("Frame", nil, main)              -- target frame
-ProtAlertsState.targetFrame = tf
+DBagsAlertsState.targetFrame = tf
 tf:SetSize(TARGET_W, 90)
 tf.name = tf:CreateFontString(nil, "OVERLAY")
 styleText(tf.name, 15, 1, 1, 1)
@@ -2108,7 +2402,7 @@ end
 local function updateTarget()
     if not DB.target or not plain(UnitExists("target"), false) then tf:Hide() return end
     tf:Show()
-    if ProtAlertsState.placeClickers then ProtAlertsState.placeClickers() end   -- keep the right-click area on it
+    if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end   -- keep the right-click area on it
     pcall(tf.name.SetText, tf.name, UnitName("target"))
     local lvl = UnitLevel("target")
     local cls = plain(UnitClassification("target"), "normal")
@@ -2187,7 +2481,7 @@ do   -- missing buff reminder (own block: Lua's 200 top-level locals limit)
         f.text = f:CreateFontString(nil, "OVERLAY")
         styleText(f.text, 13, 1, 0.82, 0.2)
         f.text:SetPoint("TOP", f, "BOTTOM", 0, -3)
-        ProtAlertsState.buffNag = f
+        DBagsAlertsState.buffNag = f
 
         -- seconds of buff left: the real aura when the game shows it, else our cast timer
         -- In combat WoW hides auras from addons: then "no aura" does NOT mean "no buff".
@@ -2280,7 +2574,7 @@ do   -- stance reminder (own block: Lua's 200 top-level locals limit)
     ga:SetLooping("BOUNCE")
     local fa = ga:CreateAnimation("Alpha")
     fa:SetFromAlpha(1); fa:SetToAlpha(0.25); fa:SetDuration(0.4)
-    ProtAlertsState.stanceNag = f
+    DBagsAlertsState.stanceNag = f
 
     -- is Defensive Stance the active stance? true / false, or nil when we can't tell
     local function inDefensive()
@@ -2297,7 +2591,7 @@ do   -- stance reminder (own block: Lua's 200 top-level locals limit)
         end
         return nil
     end
-    ProtAlertsState.inDefensive = inDefensive
+    DBagsAlertsState.inDefensive = inDefensive
 
     local offSince
     local t = 0
@@ -2335,7 +2629,7 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
     -- to eat (one click = one use, like an action button). Hidden in combat, on a
     -- mount, when dead, at max level, and while you're already eating.
     local XP_AURA = 1243969
-    local b = CreateFrame("Button", "ProtAlertsEatButton", UIParent, "SecureActionButtonTemplate")
+    local b = CreateFrame("Button", "DBagsAlertsEatButton", UIParent, "SecureActionButtonTemplate")
     b:SetSize(44, 44)
     b:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, -72)
     b:RegisterForClicks("AnyUp", "AnyDown")
@@ -2366,7 +2660,7 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
         GameTooltip:Show()
     end)
     b:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    ProtAlertsState.eatButton = b
+    DBagsAlertsState.eatButton = b
 
     -- true = fed (or eating), false = not, nil = the game hides auras right now
     local function hasAura(name)
@@ -2450,7 +2744,7 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
         driven = false
         b:Hide()
     end
-    -- why the button is hidden, for "/pa food" and "check logs" (saved in ProtAlertsDB)
+    -- why the button is hidden, for "/pa food" and "check logs" (saved in DBagsAlertsDB)
     local function note(why, extra)
         if DB then DB.foodDebug = { why = why, extra = extra, at = date and date("%H:%M:%S") or "" } end
     end
@@ -2480,7 +2774,7 @@ do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
             b:Show()
         end
     end
-    ProtAlertsState.foodUpdate = update
+    DBagsAlertsState.foodUpdate = update
 
     local ev = CreateFrame("Frame")
     for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "BAG_UPDATE_DELAYED", "PLAYER_REGEN_ENABLED", "PLAYER_LEVEL_UP" }) do
@@ -2504,7 +2798,7 @@ do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
     -- "NO STONE" icon instead (can be turned off). Hidden in combat, mounted, dead.
     local SHARP = { [0] = true, [1] = true, [6] = true, [7] = true, [8] = true, [9] = true, [15] = true, [13] = true }
     local BLUNT = { [4] = true, [5] = true, [10] = true, [13] = true }
-    local b = CreateFrame("Button", "ProtAlertsStoneButton", UIParent, "SecureActionButtonTemplate")
+    local b = CreateFrame("Button", "DBagsAlertsStoneButton", UIParent, "SecureActionButtonTemplate")
     b:SetSize(44, 44)
     b:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, -144)
     b:RegisterForClicks("AnyUp", "AnyDown")
@@ -2538,7 +2832,7 @@ do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
         GameTooltip:Show()
     end)
     b:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    ProtAlertsState.stoneButton = b
+    DBagsAlertsState.stoneButton = b
 
     -- "sharp", "blunt" or nil for your main hand weapon
     local function weaponKind()
@@ -2613,7 +2907,7 @@ do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
     end
     local function update()
         if InCombatLockdown() then return end          -- secure button: only change it out of combat
-        if not DB or DB.stoneNag == false or UnitIsDeadOrGhost("player") then hide() return end
+        if not DB or DB.stoneNag == false or CLASS == "DRUID" or UnitIsDeadOrGhost("player") then hide() return end
         local kind = weaponKind()
         if not kind or stoned() ~= false then hide() return end
         local id, icon = findStone(kind)
@@ -2646,7 +2940,7 @@ do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
             hide()
         end
     end
-    ProtAlertsState.stoneUpdate = update
+    DBagsAlertsState.stoneUpdate = update
 
     local ev = CreateFrame("Frame")
     for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "BAG_UPDATE_DELAYED", "PLAYER_REGEN_ENABLED",
@@ -2684,8 +2978,8 @@ do   -- click buttons (own block: Lua's 200 top-level locals limit)
         b:SetScript("OnLeave", function() GameTooltip:Hide() end)
         return b
     end
-    local tClick = makeClicker("target", "ProtAlertsTargetClick")
-    local pClick = makeClicker("player", "ProtAlertsPlayerClick")
+    local tClick = makeClicker("target", "DBagsAlertsTargetClick")
+    local pClick = makeClicker("player", "DBagsAlertsPlayerClick")
     if RegisterUnitWatch then RegisterUnitWatch(tClick) end   -- shows only while you have a target
     local wanted = false
     -- copy a frame's on-screen box onto a click button (positions in UIParent units)
@@ -2708,7 +3002,7 @@ do   -- click buttons (own block: Lua's 200 top-level locals limit)
             tClick:Hide()
         end
     end
-    ProtAlertsState.placeClickers = place
+    DBagsAlertsState.placeClickers = place
     local w = CreateFrame("Frame")
     w:RegisterEvent("PLAYER_REGEN_ENABLED")
     w:SetScript("OnEvent", function() if wanted then place() end end)
@@ -2717,7 +3011,7 @@ end   -- click buttons
 do   -- cursor ring (own block: Lua's 200 top-level locals limit)
     -- A smooth ring in your class color around the mouse. Hidden while you hold
     -- right-click to turn the camera (the cursor is hidden then too).
-    local cr = CreateFrame("Frame", "ProtAlertsCursorRing", UIParent)
+    local cr = CreateFrame("Frame", "DBagsAlertsCursorRing", UIParent)
     cr:SetFrameStrata("TOOLTIP")
     cr:SetSize(48, 48)
     cr:EnableMouse(false)
@@ -2734,7 +3028,7 @@ do   -- cursor ring (own block: Lua's 200 top-level locals limit)
         if cc then cr.t:SetVertexColor(cc.r, cc.g, cc.b, 0.9) else cr.t:SetVertexColor(1, 0.82, 0.2, 0.9) end
         lastX = nil
     end
-    ProtAlertsState.cursorRefresh = refresh
+    DBagsAlertsState.cursorRefresh = refresh
     local drv = CreateFrame("Frame")
     drv:SetScript("OnUpdate", function()
         if not DB then return end
@@ -2829,6 +3123,16 @@ swingDriver:SetScript("OnUpdate", function(_, dt)
     if now - rangeAt >= 0.1 then rangeAt = now; run(updateRange) end   -- range dot keeps up as you move
 end)
 
+-- Druid: power type follows the form (mana / rage / energy)
+DRU.refreshPower = function()
+    if CLASS ~= "DRUID" then return end
+    local p = plain(UnitPowerType("player"), POWER)
+    if type(p) ~= "number" or p == POWER then return end
+    POWER = p
+    barsDirty.power = true
+    pcall(layout)
+end
+
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("PLAYER_LOGIN")
 ev:SetScript("OnEvent", function(self, event, ...)
@@ -2837,10 +3141,20 @@ ev:SetScript("OnEvent", function(self, event, ...)
         if not CLASS_ALERTS[class] then main:Hide(); return end
         CLASS, ALERTS, CD_SPELLS = class, CLASS_ALERTS[class], CLASS_CDS[class]
         POWER = class == "PALADIN" and MANA or RAGE
+        if class == "DRUID" then POWER = plain(UnitPowerType("player"), MANA) or MANA end
         if POWER == MANA then rageBar:SetStatusBarColor(0.15, 0.4, 1) end
-        ProtAlertsState.alerts = ALERTS
-        ProtAlertsDB = ProtAlertsDB or {}
-        DB = ProtAlertsDB
+        DBagsAlertsState.alerts = ALERTS
+        -- Was "ProtAlerts": take its settings once, then turn the old addon off
+        -- (both at once = two of everything on screen).
+        if not DBagsAlertsDB and type(ProtAlertsDB) == "table" then DBagsAlertsDB = CopyTable(ProtAlertsDB) end
+        local A = C_AddOns or {}
+        local loaded = (A.IsAddOnLoaded or IsAddOnLoaded or function() return false end)("ProtAlerts")
+        if loaded then
+            pcall(A.DisableAddOn or DisableAddOn, "ProtAlerts")
+            say("|cffff5555The old ProtAlerts addon is now turned off. Type /reload once.|r")
+        end
+        DBagsAlertsDB = DBagsAlertsDB or {}
+        DB = DBagsAlertsDB
         for k, v in pairs(DEFAULTS) do if DB[k] == nil then DB[k] = type(v) == "table" and CopyTable(v) or v end end
         buildSpells()
         findNearSpell()
@@ -2864,6 +3178,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         reg("PLAYER_TARGET_CHANGED"); reg("PLAYER_REGEN_DISABLED")
         reg("SPELL_UPDATE_COOLDOWN"); reg("SPELL_UPDATE_USABLE")
         reg("NAME_PLATE_UNIT_ADDED"); reg("NAME_PLATE_UNIT_REMOVED")
+        reg("UPDATE_SHAPESHIFT_FORM"); reg("UNIT_DISPLAYPOWER", "player")
         for _, e in ipairs({ "UNIT_SPELLCAST_START", "UNIT_SPELLCAST_STOP", "UNIT_SPELLCAST_INTERRUPTED",
             "UNIT_SPELLCAST_CHANNEL_START", "UNIT_SPELLCAST_CHANNEL_STOP" }) do reg(e, "player", "target") end
         swing.hasEvent = pcall(self.RegisterEvent, self, "PLAYER_SWING")
@@ -2872,15 +3187,18 @@ ev:SetScript("OnEvent", function(self, event, ...)
         readSpeed()
         readAll()
         hideBlizzard()
-        if ProtAlertsState.cursorRefresh then ProtAlertsState.cursorRefresh() end
+        if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end
         say("%s loaded. /pa for settings.",
-            CLASS == "PALADIN" and (DB.tank and "Paladin (tank)" or "Paladin (damage)") or "Warrior")
+            CLASS == "PALADIN" and (DB.tank and "Paladin (tank)" or "Paladin (damage)")
+            or CLASS == "DRUID" and "Druid" or "Warrior")
         return
     end
     alertsDirty = true                 -- every event below can change what should light up
     if event == "SPELLS_CHANGED" or event == "LEARNED_SPELL_IN_SKILL_LINE" then
         -- fires a lot (stance swaps...): rebuild once, half a second after it settles
         spellsDirty, spellsAt = true, GetTime()
+    elseif event == "UPDATE_SHAPESHIFT_FORM" or event == "UNIT_DISPLAYPOWER" then
+        DRU.refreshPower()
     elseif event == "UNIT_HEALTH" or event == "UNIT_MAXHEALTH" then
         local unit = ...
         if unit == "target" then tDirty.hp = true else barsDirty.health = true end
@@ -2898,6 +3216,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         tDirty.all = true
         -- if the game hides mob IDs, all mobs share one memory slot: wipe it for the new mob
         rendAt["?"], sunder["?"], lastDebuff = nil, nil, nil
+        for _, t in pairs(DRU.dotAt) do t["?"] = nil end
     elseif event == "UNIT_THREAT_LIST_UPDATE" or event == "UNIT_THREAT_SITUATION_UPDATE" then
         barsDirty.threat = true
         tDirty.tot = true
@@ -3049,7 +3368,33 @@ local PALADIN_MACROS = {
     { "PP Freedom", "#showtooltip Blessing of Freedom\n/cast [@mouseover,help,nodead][@player] Blessing of Freedom",
       "Blessing of Freedom on mouseover friend, or you." },
 }
-local CLASS_MACROS = { WARRIOR = WARRIOR_MACROS, PALADIN = PALADIN_MACROS }
+-- Druid: forms never cancel by accident (!), attacks start auto-attack, heals and buffs
+-- work on the friend under your mouse (or you).
+local CLASS_MACROS = { WARRIOR = WARRIOR_MACROS, PALADIN = PALADIN_MACROS, DRUID = {
+    { "PD Bear", function()
+          local f = spell["Dire Bear Form"] and "Dire Bear Form" or "Bear Form"
+          return "#showtooltip " .. f .. "\n/cast !" .. f
+      end, "Bear Form. Pressing it again never drops you out." },
+    { "PD Cat", "#showtooltip Cat Form\n/cast !Cat Form", "Cat Form. Pressing it again never drops you out." },
+    { "PD Maul", "#showtooltip Maul\n/startattack\n/cast Maul", "Maul + auto-attack." },
+    { "PD Swipe", "#showtooltip Swipe\n/startattack\n/cast Swipe", "Swipe + auto-attack." },
+    { "PD Growl", "#showtooltip Growl\n/startattack\n/cast [@mouseover,harm,nodead][] Growl", "Mouseover taunt." },
+    { "PD Bash", "#showtooltip Bash\n/startattack\n/cast [@mouseover,harm,nodead][] Bash", "Mouseover Bash (stops casts)." },
+    { "PD Claw", "#showtooltip Claw\n/startattack\n/cast Claw", "Claw + auto-attack." },
+    { "PD Rake", "#showtooltip Rake\n/startattack\n/cast Rake", "Rake + auto-attack." },
+    { "PD Rip", "#showtooltip Rip\n/startattack\n/cast Rip", "Rip + auto-attack." },
+    { "PD Prowl", "#showtooltip Prowl\n/cast [nostealth] Prowl", "Prowl. Pressing it again never drops stealth." },
+    { "PD Opener", function()
+          if spell["Ravage"] then return "#showtooltip\n/startattack\n/cast [stealth] Ravage; Shred" end
+          return "#showtooltip Shred\n/startattack\n/cast Shred"
+      end, "From Prowl: Ravage (Shred before you have it)." },
+    { "PD Rejuv", "#showtooltip Rejuvenation\n/cast [@mouseover,help,nodead][@player] Rejuvenation", "Rejuvenation on mouseover friend, or you." },
+    { "PD Regrowth", "#showtooltip Regrowth\n/cast [@mouseover,help,nodead][@player] Regrowth", "Regrowth on mouseover friend, or you." },
+    { "PD Swiftmend", "#showtooltip Swiftmend\n/cast [@mouseover,help,nodead][@player] Swiftmend", "Swiftmend on mouseover friend, or you." },
+    { "PD Mark", "#showtooltip Mark of the Wild\n/cast [@mouseover,help,nodead][@player] Mark of the Wild", "Mark of the Wild on mouseover friend, or you." },
+    { "PD Thorns", "#showtooltip Thorns\n/cast [@mouseover,help,nodead][@player] Thorns", "Thorns on mouseover friend (tank), or you." },
+    { "PD Innervate", "#showtooltip Innervate\n/cast [@mouseover,help,nodead][@player] Innervate", "Innervate on mouseover healer, or you." },
+} }
 
 makeMacros = function()
     local list = CLASS_MACROS[CLASS]
@@ -3170,7 +3515,7 @@ local function heading(parent, text, y)
 end
 
 local function buildSettings()
-    local w = CreateFrame("Frame", "ProtAlertsSettings", UIParent)
+    local w = CreateFrame("Frame", "DBagsAlertsSettings", UIParent)
     w:SetSize(360, 662)
     w:SetPoint("CENTER")
     w:SetFrameStrata("DIALOG")
@@ -3186,11 +3531,11 @@ local function buildSettings()
     local cc = CLASS and ((C_ClassColor and C_ClassColor.GetClassColor and C_ClassColor.GetClassColor(CLASS))
         or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[CLASS]))
     if cc then accent:SetColorTexture(cc.r, cc.g, cc.b, 1) else accent:SetColorTexture(1, 0.82, 0.2, 1) end
-    if UISpecialFrames then table.insert(UISpecialFrames, "ProtAlertsSettings") end  -- Esc closes it
+    if UISpecialFrames then table.insert(UISpecialFrames, "DBagsAlertsSettings") end  -- Esc closes it
 
     local title = w:CreateFontString(nil, "OVERLAY")
     styleText(title, 18, C(1, 1, 1)); title:SetPoint("TOP", 0, -12)
-    title:SetText("ProtAlerts")
+    title:SetText("DBagsAlerts")
     local sub = w:CreateFontString(nil, "OVERLAY")
     styleText(sub, 10, C(0.7, 0.7, 0.75)); sub:SetPoint("TOP", title, "BOTTOM", 0, -3)
     sub:SetText("")
@@ -3305,7 +3650,7 @@ local function buildSettings()
     snd:SetPoint("TOPLEFT", 16, y)
     y = y - 44
     local crs = add(makeSlider(w, "Cursor ring size", 24, 120, 4, "%d", function() return DB.cursorSize or 48 end,
-        function(v) DB.cursorSize = v; if ProtAlertsState.cursorRefresh then ProtAlertsState.cursorRefresh() end end))
+        function(v) DB.cursorSize = v; if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end end))
     crs:SetPoint("TOPLEFT", 20, y)
     y = y - 34
 
@@ -3352,9 +3697,9 @@ local function desc(v)
     return tostring(v)
 end
 
-SLASH_PROTALERTS1 = "/pa"
-SLASH_PROTALERTS2 = "/protalerts"
-SlashCmdList.PROTALERTS = function(msg)
+SLASH_DBAGSALERTS1 = "/pa"
+SLASH_DBAGSALERTS2 = "/dba"
+SlashCmdList.DBAGSALERTS = function(msg)
     if not DB then say("warriors and paladins only.") return end
     local cmd, rest = (msg or ""):lower():match("^(%S*)%s*(.-)$")
     if cmd == "" or cmd == "settings" or cmd == "options" then
@@ -3392,9 +3737,9 @@ SlashCmdList.PROTALERTS = function(msg)
     elseif cmd == "sound" then
         DB.sound = not DB.sound; say("danger sound %s.", DB.sound and "ON" or "OFF")
     elseif cmd == "reset" then
-        ProtAlertsDB = nil; ReloadUI()
+        DBagsAlertsDB = nil; ReloadUI()
     elseif cmd == "food" then
-        if ProtAlertsState.foodUpdate then pcall(ProtAlertsState.foodUpdate) end
+        if DBagsAlertsState.foodUpdate then pcall(DBagsAlertsState.foodUpdate) end
         local d = DB.foodDebug
         if d then say("eat button: %s %s", tostring(d.why), tostring(d.extra or ""))
         else say("eat button: not checked yet (try out of combat).") end
