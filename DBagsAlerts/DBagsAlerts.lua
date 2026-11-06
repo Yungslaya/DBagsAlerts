@@ -3494,10 +3494,19 @@ do   -- missing buff reminder (own block: Lua's 200 top-level locals limit)
             return math.max(mine, seen)
         end
         local function plainYes(v) return v == true end    -- secret or table -> no
-        local shownKey
+        local shownKey, floatingAnchor
         local function check()
             cfg = CLASS and NAG[CLASS]
-            if DRU.lux or not cfg or not DB or DB.buffNag == false or not spell[cfg.buff] or UnitIsDeadOrGhost("player") or IsMounted()
+            -- Both layouts use this single reminder. Keep it above the helper cues
+            -- in the floating HUD, clear of the Rend timer and next-spell icon.
+            local floating = DRU.lux and true or false
+            if floatingAnchor ~= floating then
+                floatingAnchor = floating
+                f:ClearAllPoints()
+                if floating then f:SetPoint("BOTTOMLEFT", main, "TOPRIGHT", 12, 8)
+                else f:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, 0) end
+            end
+            if not cfg or not DB or DB.buffNag == false or not spell[cfg.buff] or UnitIsDeadOrGhost("player") or IsMounted()
                or (IsResting() and not ctx.combat) then
                 f:Hide(); shownKey = nil return
             end

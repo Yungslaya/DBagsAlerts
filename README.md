@@ -6,7 +6,7 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 ## What's new
 
-- **1.0.3:** Upkeep timer icons glow gold when missing or due for refresh. Rend lights at 30% remaining and stops glowing when reapplied. Other spells keep their existing refresh timing. /reload.
+- **1.0.3:** Upkeep timer icons glow gold when missing or due for refresh. Rend lights at 30% remaining and stops glowing when reapplied. Other spells keep their existing refresh timing. Restored the single Battle Shout reminder above the helper icons in the floating HUD. /reload.
 
 - **1.0.2:** Warlock added. Warrior, Paladin, Druid and Warlock now share the floating HUD with no enclosing panel: next-spell cue beside the bars, small helper alerts, DoT countdowns, health/mana, shard count, and a cast bar that appears while casting. Idle target/DoT clutter stays hidden. Melee keeps slim threat/swing strips. Druid timers and resources follow Bear, Cat, caster and travel forms. Thin blue marker means queue your next spell; there is no guessed "safe to move" cue. Only learned spells show. `/pa oldlook` restores the previous layout. `/reload`.
 - **1.0.1:** Racials: your race's combat racials go on the cooldown row. Elune's Light, Blood Fury and Berserking light up on tough fights, and War Stomp stops casts. /reload.
