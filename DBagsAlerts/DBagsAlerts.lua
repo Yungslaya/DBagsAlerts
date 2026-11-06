@@ -2781,6 +2781,16 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
     cb.zoneText = cb.top:CreateFontString(nil, "OVERLAY")
     styleText(cb.zoneText, 10, 0.75, 0.88, 1)
     cb.zoneText:SetText("NEXT"); cb.zoneText:Hide()
+    -- safe zone (how Quartz / Pulsar Cast Bars do slidecasting): your real network delay,
+    -- measured each cast from pressing the spell (UNIT_SPELLCAST_SENT) to the server
+    -- starting it (UNIT_SPELLCAST_START). The server finishes the cast that much before
+    -- your bar does, so ONLY this last bit is safe to move in. Green = go.
+    cb.safe = cb.top:CreateTexture(nil, "ARTWORK", nil, 2)
+    cb.safe:SetColorTexture(0.2, 1, 0.3, 0.6)
+    cb.safe:Hide()
+    cb.safeText = cb.top:CreateFontString(nil, "OVERLAY")
+    styleText(cb.safeText, 10, 0.45, 1, 0.5)
+    cb.safeText:SetText("MOVE"); cb.safeText:Hide()
     cb.slide = cb.top:CreateTexture(nil, "OVERLAY", nil, 6)
     cb.slide:SetColorTexture(1, 1, 1, 0.9)
     cb.slide:SetWidth(2)
@@ -2797,7 +2807,14 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
     cb.left:SetPoint("RIGHT", -5, 0)
     cb.name:SetPoint("RIGHT", -40, 0)
     local function baseColor() local c = cb.col; cb:SetStatusBarColor(c[1], c[2], c[3]) end
-    local endAt, slideAt, green           -- plain GetTime() values for this cast, or nil
+    local endAt, slideAt, safeAt, green   -- plain GetTime() values for this cast, or nil
+    local sentAt, lag                     -- when you pressed the spell; measured delay (sec)
+    local function netLag()               -- fallback: the game's own latency number
+        local ok, _, _, home, world = pcall(GetNetStats or function() end)
+        local ms = ok and plain(world, nil) or nil
+        if not ms or ms <= 0 then ms = ok and plain(home, nil) or nil end
+        return (type(ms) == "number" and ms > 0) and ms / 1000 or 0.1
+    end
     local function window()
         local ok, v = pcall(GetCVar or function() end, "SpellQueueWindow")
         v = ok and tonumber(plain(v, nil)) or 400
@@ -2822,14 +2839,15 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
     DRU.slideStart = function(channel)
         keepEnd = (not fresh) and endAt or nil
         fresh = false
-        endAt, slideAt, green = nil, nil, nil
+        endAt, slideAt, safeAt, green = nil, nil, nil, nil
         baseColor()
-        cb.slide:Hide(); cb.zone:Hide(); cb.zoneText:Hide(); cb.left:SetText("")
+        cb.slide:Hide(); cb.zone:Hide(); cb.zoneText:Hide(); cb.safe:Hide(); cb.safeText:Hide(); cb.left:SetText("")
         if channel or DB.slide == false then return end
         local e, len = castTimes()
         if not e then return end
         local w = math.min(window(), len)
-        endAt, slideAt = e, e - w
+        local sz = math.min(lag or netLag(), 0.4, len)       -- real safe-to-move part
+        endAt, slideAt, safeAt = e, e - w, e - sz
         local width = cb:GetWidth()
         if type(width) == "number" and not secret(width) and width > 0 then
             local x = width * (1 - w / len)
@@ -2838,26 +2856,44 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
             cb.zone:ClearAllPoints()
             cb.zone:SetPoint("TOPLEFT", cb, "TOPLEFT", x, 0); cb.zone:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
             cb.slide:Show(); cb.zone:Show()
-            cb.zoneText:ClearAllPoints(); cb.zoneText:SetPoint("BOTTOM", cb.zone, "TOP", 0, 1)
+            cb.zoneText:ClearAllPoints(); cb.zoneText:SetPoint("BOTTOMLEFT", cb.zone, "TOPLEFT", 1, 1)
             cb.zoneText:Show()
+            local sx = width * (1 - sz / len)
+            cb.safe:ClearAllPoints()
+            cb.safe:SetPoint("TOPLEFT", cb, "TOPLEFT", sx, 0); cb.safe:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
+            cb.safe:Show()
+            cb.safeText:ClearAllPoints(); cb.safeText:SetPoint("BOTTOMRIGHT", cb, "TOPRIGHT", 0, 1)
+            cb.safeText:Show()
         end
     end
     local drv = CreateFrame("Frame")
     pcall(drv.RegisterUnitEvent, drv, "UNIT_SPELLCAST_START", "player")
-    drv:SetScript("OnEvent", function(_, _, _, _, id)
+    pcall(drv.RegisterUnitEvent, drv, "UNIT_SPELLCAST_SENT", "player")
+    drv:SetScript("OnEvent", function(_, event, _, _, id)
+        if event == "UNIT_SPELLCAST_SENT" then sentAt = GetTime() return end
         fresh = true
         startID = (id ~= nil and not secret(id)) and id or nil
+        -- delay for THIS cast; ignore silly values (no SENT seen, or a very old one)
+        local d = sentAt and GetTime() - sentAt
+        lag = (d and d > 0 and d < 1) and d or nil
+        sentAt = nil
     end)
     drv:SetScript("OnUpdate", function()
         if not endAt then return end
-        if not cb:IsShown() then endAt = nil; cb.slide:Hide(); cb.zone:Hide(); cb.zoneText:Hide() return end
+        if not cb:IsShown() then
+            endAt = nil; cb.slide:Hide(); cb.zone:Hide(); cb.zoneText:Hide(); cb.safe:Hide(); cb.safeText:Hide()
+            return
+        end
         local now = GetTime()
         local left = endAt - now
         cb.left:SetFormattedText("%.1f", left > 0 and left or 0)
-        local g = now >= slideAt
+        -- blue = press your next spell now; green = safe to move now
+        local g = (now >= safeAt and "move") or (now >= slideAt and "next") or "cast"
         if g ~= green then
             green = g
-            if g then cb:SetStatusBarColor(0.3, 0.85, 1) else baseColor() end   -- blue: press your next spell
+            if g == "move" then cb:SetStatusBarColor(0.2, 0.9, 0.3)
+            elseif g == "next" then cb:SetStatusBarColor(0.3, 0.75, 1)
+            else baseColor() end
         end
     end)
     DBagsAlertsState.castPlayer = cb
@@ -4364,7 +4400,7 @@ local function buildSettings()
     local tfc = add(makeCheck(w, "Target frame", "Target name, health, and who it's hitting.",
         function() return DB.target end, function(v) DB.target = v; relayout() end))
     tfc:SetPoint("TOPLEFT", 16, -180)
-    local cbc = add(makeCheck(w, "Cast bars", "Your cast bar and your target's. Blue end on yours: press your next spell there (it fires when the cast ends). Don't move until the bar is full.",
+    local cbc = add(makeCheck(w, "Cast bars", "Your cast bar and your target's. Blue end on yours: press your next spell. Green tip: safe to move (your real lag, like Quartz).",
         function() return DB.casts end, function(v) DB.casts = v; relayout() end))
     cbc:SetPoint("TOPLEFT", 180, -180)
     local hb = add(makeCheck(w, "Hide Blizzard frames", "Hides the normal player, target and cast frames. Uncheck + /reload to get them back.",
