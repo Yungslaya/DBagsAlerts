@@ -2753,15 +2753,19 @@ local function refreshCast(cb, unit, isTarget)
 end
 
 do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level locals limit)
-    -- WoW lets you press your next spell a little before this cast ends (the spell
-    -- queue window, 400 ms by default). The white line marks that point; once the
-    -- cast passes it the bar turns green: you can start the next one (or move).
+    -- WoW lets you PRESS your next spell a little before this cast ends (the spell
+    -- queue window, 400 ms by default): the game holds it and fires it the moment
+    -- this cast is done. That end part is shaded blue ("NEXT"); once the cast reaches
+    -- it the bar turns blue. Moving still cancels the cast: in Forever (modern engine)
+    -- you must stand still until the bar is full - this zone is for pressing, not moving.
     local cb = castPlayer
-    -- slidecast zone: the last part of the bar, shaded red (like Quartz' latency box),
-    -- with a bright edge where it starts
+    -- queue zone: the last part of the bar, shaded blue, with a bright edge where it starts
     cb.zone = cb.top:CreateTexture(nil, "ARTWORK")
-    cb.zone:SetColorTexture(0.95, 0.15, 0.15, 0.4)
+    cb.zone:SetColorTexture(0.25, 0.55, 1, 0.45)
     cb.zone:Hide()
+    cb.zoneText = cb.top:CreateFontString(nil, "OVERLAY")
+    styleText(cb.zoneText, 10, 0.75, 0.88, 1)
+    cb.zoneText:SetText("NEXT"); cb.zoneText:Hide()
     cb.slide = cb.top:CreateTexture(nil, "OVERLAY", nil, 6)
     cb.slide:SetColorTexture(1, 1, 1, 0.9)
     cb.slide:SetWidth(2)
@@ -2805,7 +2809,7 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
         fresh = false
         endAt, slideAt, green = nil, nil, nil
         baseColor()
-        cb.slide:Hide(); cb.zone:Hide(); cb.left:SetText("")
+        cb.slide:Hide(); cb.zone:Hide(); cb.zoneText:Hide(); cb.left:SetText("")
         if channel or DB.slide == false then return end
         local e, len = castTimes()
         if not e then return end
@@ -2819,6 +2823,8 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
             cb.zone:ClearAllPoints()
             cb.zone:SetPoint("TOPLEFT", cb, "TOPLEFT", x, 0); cb.zone:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
             cb.slide:Show(); cb.zone:Show()
+            cb.zoneText:ClearAllPoints(); cb.zoneText:SetPoint("BOTTOM", cb.zone, "TOP", 0, 1)
+            cb.zoneText:Show()
         end
     end
     local drv = CreateFrame("Frame")
@@ -2829,14 +2835,14 @@ do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level loca
     end)
     drv:SetScript("OnUpdate", function()
         if not endAt then return end
-        if not cb:IsShown() then endAt = nil; cb.slide:Hide(); cb.zone:Hide() return end
+        if not cb:IsShown() then endAt = nil; cb.slide:Hide(); cb.zone:Hide(); cb.zoneText:Hide() return end
         local now = GetTime()
         local left = endAt - now
         cb.left:SetFormattedText("%.1f", left > 0 and left or 0)
         local g = now >= slideAt
         if g ~= green then
             green = g
-            if g then cb:SetStatusBarColor(0.2, 0.9, 0.3) else baseColor() end
+            if g then cb:SetStatusBarColor(0.3, 0.85, 1) else baseColor() end   -- blue: press your next spell
         end
     end)
     DBagsAlertsState.castPlayer = cb
@@ -4238,7 +4244,7 @@ local function buildSettings()
     local tfc = add(makeCheck(w, "Target frame", "Target name, health, and who it's hitting.",
         function() return DB.target end, function(v) DB.target = v; relayout() end))
     tfc:SetPoint("TOPLEFT", 16, -180)
-    local cbc = add(makeCheck(w, "Cast bars", "Your cast bar and your target's. White line on yours: from there you can start your next spell (bar turns green).",
+    local cbc = add(makeCheck(w, "Cast bars", "Your cast bar and your target's. Blue end on yours: press your next spell there (it fires when the cast ends). Don't move until the bar is full.",
         function() return DB.casts end, function(v) DB.casts = v; relayout() end))
     cbc:SetPoint("TOPLEFT", 180, -180)
     local hb = add(makeCheck(w, "Hide Blizzard frames", "Hides the normal player, target and cast frames. Uncheck + /reload to get them back.",
