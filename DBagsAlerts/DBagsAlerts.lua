@@ -2739,6 +2739,83 @@ local function refreshCast(cb, unit, isTarget)
     pcall(cb.icon.SetTexture, cb.icon, tex)
     if isTarget then boolAlpha(cb.lock, notInt, 1, 0) else cb.lock:SetAlpha(0) end
     cb:Show()
+    if not isTarget and DRU.slideStart then DRU.slideStart(channel) end
+end
+
+do   -- slidecast line on your own cast bar (own block: Lua's 200 top-level locals limit)
+    -- WoW lets you press your next spell a little before this cast ends (the spell
+    -- queue window, 400 ms by default). The white line marks that point; once the
+    -- cast passes it the bar turns green: you can start the next one (or move).
+    local cb = castPlayer
+    cb.slide = cb.top:CreateTexture(nil, "OVERLAY", nil, 7)
+    cb.slide:SetColorTexture(1, 1, 1, 0.95)
+    cb.slide:SetWidth(3)
+    cb.slide:SetPoint("TOP", cb, "TOPLEFT", 0, 0); cb.slide:SetPoint("BOTTOM", cb, "BOTTOMLEFT", 0, 0)
+    cb.slide:Hide()
+    cb.left = cb.top:CreateFontString(nil, "OVERLAY")        -- seconds left, right side
+    styleText(cb.left, 14, 1, 1, 1)
+    cb.left:SetPoint("RIGHT", -5, 0)
+    cb.name:SetPoint("RIGHT", -40, 0)
+    local endAt, slideAt, green           -- plain GetTime() values for this cast, or nil
+    local function window()
+        local ok, v = pcall(GetCVar or function() end, "SpellQueueWindow")
+        v = ok and tonumber(plain(v, nil)) or 400
+        return math.max(0, math.min(400, v)) / 1000       -- the game caps it at 400 ms
+    end
+    -- cast length in seconds: the cast's own times when readable, else the spell's cast time
+    local fresh, keepEnd, startID = true, nil, nil   -- fresh = a new cast started (not a pushback update)
+    local function castTimes()
+        local _, _, _, s, e, _, _, _, id = UnitCastingInfo("player")
+        s, e = plain(s, nil), plain(e, nil)
+        if type(s) == "number" and type(e) == "number" and e > s then return e / 1000, (e - s) / 1000 end
+        id = plain(id, nil) or startID     -- locked: the spell from our own cast-start event
+        if id and C_Spell.GetSpellInfo then
+            local ok, info = pcall(C_Spell.GetSpellInfo, id)
+            local ct = ok and type(info) == "table" and not sectable(info) and plain(info.castTime, nil)
+            if type(ct) == "number" and ct > 0 then
+                if keepEnd then return keepEnd, ct / 1000 end    -- pushback, times locked: keep what we had
+                return GetTime() + ct / 1000, ct / 1000
+            end
+        end
+    end
+    DRU.slideStart = function(channel)
+        keepEnd = (not fresh) and endAt or nil
+        fresh = false
+        endAt, slideAt, green = nil, nil, nil
+        cb:SetStatusBarColor(1, 0.7, 0.1)
+        cb.slide:Hide(); cb.left:SetText("")
+        if channel or DB.slide == false then return end
+        local e, len = castTimes()
+        if not e then return end
+        local w = math.min(window(), len)
+        endAt, slideAt = e, e - w
+        local width = cb:GetWidth()
+        if type(width) == "number" and not secret(width) and width > 0 then
+            cb.slide:ClearAllPoints()
+            local x = width * (1 - w / len)
+            cb.slide:SetPoint("TOP", cb, "TOPLEFT", x, 0); cb.slide:SetPoint("BOTTOM", cb, "BOTTOMLEFT", x, 0)
+            cb.slide:Show()
+        end
+    end
+    local drv = CreateFrame("Frame")
+    pcall(drv.RegisterUnitEvent, drv, "UNIT_SPELLCAST_START", "player")
+    drv:SetScript("OnEvent", function(_, _, _, _, id)
+        fresh = true
+        startID = (id ~= nil and not secret(id)) and id or nil
+    end)
+    drv:SetScript("OnUpdate", function()
+        if not endAt then return end
+        if not cb:IsShown() then endAt = nil; cb.slide:Hide() return end
+        local now = GetTime()
+        local left = endAt - now
+        cb.left:SetFormattedText("%.1f", left > 0 and left or 0)
+        local g = now >= slideAt
+        if g ~= green then
+            green = g
+            if g then cb:SetStatusBarColor(0.2, 0.85, 0.2) else cb:SetStatusBarColor(1, 0.7, 0.1) end
+        end
+    end)
+    DBagsAlertsState.castPlayer = cb
 end
 
 local REACTION = { [1] = { 0.85, 0.1, 0.1 }, [2] = { 0.85, 0.1, 0.1 }, [3] = { 0.85, 0.35, 0.1 },
@@ -3997,7 +4074,7 @@ local function buildSettings()
     local tfc = add(makeCheck(w, "Target frame", "Target name, health, and who it's hitting.",
         function() return DB.target end, function(v) DB.target = v; relayout() end))
     tfc:SetPoint("TOPLEFT", 16, -180)
-    local cbc = add(makeCheck(w, "Cast bars", "Your cast bar and your target's.",
+    local cbc = add(makeCheck(w, "Cast bars", "Your cast bar and your target's. White line on yours: from there you can start your next spell (bar turns green).",
         function() return DB.casts end, function(v) DB.casts = v; relayout() end))
     cbc:SetPoint("TOPLEFT", 180, -180)
     local hb = add(makeCheck(w, "Hide Blizzard frames", "Hides the normal player, target and cast frames. Uncheck + /reload to get them back.",
