@@ -607,9 +607,11 @@ local WARRIOR_ALERTS = {
     -- ACTION ROW
     { key = "block", row = 2, label = "SHIELD BLOCK", icon = "Shield Block",
       test = function(st)
-          -- Icy Veins: on cooldown against melee (it's off the global cooldown)
+          -- Off the GCD: a separate cue, not a replacement for your next attack.
           need(st, ctx.combat and ctx.hostile)
+          need(st, UnitIsUnit("targettarget", "player"))
           need(st, ready("Shield Block")); need(st, usable("Shield Block"))
+          if DRU.lux then return nil, "BLOCK" end
       end },
     { key = "revenge", row = 2, label = "REVENGE", icon = "Revenge",
       test = function(st)
@@ -3196,6 +3198,8 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
             for i, key in ipairs(keys) do
                 local a = byKey[key]
                 if a then
+                    -- Shield Block must not share the dump/Bloodrage helper slot.
+                    local p = key == "block" and {W + 44, -42, 40} or p
                     a.hudSpot, a.inSpot = spot, true
                     a.root:ClearAllPoints(); a.root:SetSize(p[3], p[3])
                     a.root:SetPoint("TOPLEFT", main, "TOPLEFT", p[1], p[2])
@@ -3210,6 +3214,27 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                         styleText(a.c.text, 12, 0.94, 0.93, 0.98); a.c.text:Show()
                     end
                     colorBorder(a.c.edge, spot == "danger" and 0.95 or 0.45, spot == "danger" and 0.23 or 0.32, spot == "danger" and 0.2 or 0.66, 1)
+                    if key == "block" then
+                        local gl = rawget(a.c, "glowF")
+                        if not gl then
+                            gl = CreateFrame("Frame", nil, a.c)
+                            gl:SetPoint("CENTER")
+                            gl.t = gl:CreateTexture(nil, "OVERLAY")
+                            gl.t:SetAllPoints(); gl.t:SetTexture(MEDIA .. "ProcGlow.tga")
+                            gl.t:SetBlendMode("ADD"); gl.t:SetVertexColor(1, 0.82, 0.25)
+                            local pulse = gl:CreateAnimationGroup(); pulse:SetLooping("BOUNCE")
+                            local alpha = pulse:CreateAnimation("Alpha")
+                            alpha:SetFromAlpha(1); alpha:SetToAlpha(0.4); alpha:SetDuration(0.5)
+                            pulse:Play(); a.c.glowF = gl
+                        end
+                        gl:SetSize(40 / 0.64, 40 / 0.64)
+                        gl:SetFrameLevel(a.c:GetFrameLevel() + 3); gl:SetShown(DB.glow ~= false)
+                        a.c.plate:ClearAllPoints(); a.c.plate:SetPoint("TOP", a.root, "BOTTOM", 0, -3)
+                        a.c.plate:SetSize(50, 16); a.c.plate:SetColorTexture(0, 0, 0, 0.7)
+                        a.c.text:ClearAllPoints(); a.c.text:SetPoint("CENTER", a.c.plate, "CENTER")
+                        styleText(a.c.text, 12, 1, 0.85, 0.25)
+                        a.c.plate:Show(); a.c.text:Show()
+                    end
                     if not DB.off[key] then a.root:Show() end
                 end
             end
@@ -3314,7 +3339,8 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
             if CLASS == "WARLOCK" and spell["Drain Soul"] then shardText:SetFormattedText("Shards %d/%d", DRU.bags(), DB.shardGoal or 5)
             else shardText:SetText("") end
         end
-        tf:SetShown(DB.target and ctx.hostile and true or false)
+        -- The unit frame shows every target; combat helpers still require an enemy.
+        tf:SetShown(DB.target and plain(UnitExists("target"), false) and true or false)
         local key = ctx.hostile and targetKey()
         for _, f in ipairs(used) do
             f:SetShown(ctx.hostile and true or false)
@@ -3986,12 +4012,14 @@ do   -- click buttons (own block: Lua's 200 top-level locals limit)
     local function place()
         if InCombatLockdown() then wanted = true return end   -- Blizzard rule: move them after combat
         wanted = false
-        cover(tClick, tf, 18 + 9 + 28 + 9 + 8)    -- name line + health + power
+        cover(tClick, tf, DRU.lux and 30 or (18 + 9 + 28 + 9 + 8))
         cover(pClick, healthBar)
         pClick:SetShown(DB.target ~= false)
         if DB.target == false then
             if UnregisterUnitWatch then UnregisterUnitWatch(tClick) end
             tClick:Hide()
+        elseif RegisterUnitWatch then
+            RegisterUnitWatch(tClick)
         end
     end
     DBagsAlertsState.placeClickers = place
