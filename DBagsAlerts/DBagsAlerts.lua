@@ -644,16 +644,26 @@ local WARRIOR_ALERTS = {
       test = function(st)
           need(st, ctx.combat and ctx.hostile); need(st, ready("Execute")); need(st, usable("Execute"))
       end },
+    { key = "cleave", row = 2, label = "CLEAVE", icon = "Cleave",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile and spell["Cleave"] and (ctx.enemies or 0) >= 2)
+          if not st.ok then return end
+          need(st, usable("Cleave"))
+          need(st, IsCurrentSpell(spell["Cleave"]), true)
+          -- Extra threat on two enemies; leave a buffer for Block and core attacks.
+          local reserve = (spell["Shield Slam"] or (tankingHard and tankingHard())) and 60 or 40
+          needRage(st, reserve, false)
+      end },
     { key = "dump", row = 2, label = "SPEND RAGE", icon = "Heroic Strike",
       test = function(st)
-          local cleave = (ctx.enemies or 0) >= 2 and spell["Cleave"]
-          local name = cleave and "Cleave" or "Heroic Strike"
+          local name = "Heroic Strike"
           need(st, ctx.combat and ctx.hostile and spell[name])
+          need(st, (ctx.enemies or 0) < 2 or not spell["Cleave"])
           if not st.ok then return end
           local queued = IsCurrentSpell(spell[name])
           need(st, queued, true)          -- already queued? then stay quiet
           needRage(st, spendLine and spendLine() or DB.dumpAt, false)
-          return name, cleave and "CLEAVE" or "HEROIC STRIKE"
+          return name, "HEROIC STRIKE"
       end },
     { key = "sunder", row = 2, label = "SUNDER", icon = "Sunder Armor",
       test = function(st)
@@ -1340,7 +1350,7 @@ local SPOT = {
         danger = { "lowhp", "kick", "taunt", "loose" },
         next   = { "slam", "revenge", "vrush", "clap", "sunder", "execute" },
         buff   = { "demo", "rend", "shout" },               -- upkeep: never buried under the rotation
-        extra  = { "block", "dump", "bloodrage" },   -- off the global cooldown: press any time
+        extra  = { "block", "cleave", "dump", "bloodrage" },   -- off the global cooldown: press any time
     },
     PALADIN = {
         danger = { "lowhp", "kick", "taunt", "loose" },
@@ -1677,27 +1687,41 @@ end
 -- Swing timer. Forever fires PLAYER_SWING the moment your auto-attack lands
 -- (technique from AKForeverCombatTimers, MIT). If its length is secret in combat
 -- we use your weapon speed, read whenever it is readable.
-local swing = { start = 0, dur = 0, speed = nil }
+local swing = { start = 0, dur = 0, speed = nil, rangedSpeed = nil, ranged = false }
+DBagsAlertsState.swing = swing
 local QUEUED_SPELLS = { "Heroic Strike", "Cleave" }
 local function readSpeed()
     local ok, mh = pcall(UnitAttackSpeed, "player")
     if ok and mh and not secret(mh) and mh > 0 then swing.speed = mh end
+    if UnitRangedDamage then
+        local okR, speed = pcall(UnitRangedDamage, "player")
+        if okR and not secret(speed) and type(speed) == "number" and speed > 0 then swing.rangedSpeed = speed end
+    end
 end
 local function onSwing(duration, swingType)
-    local MH = Enum and Enum.SwingType and Enum.SwingType.MainHand
-    if MH ~= nil and swingType ~= nil and not secret(swingType) and swingType ~= MH then return end
+    -- Forever uses PlayerSwingType, not SwingType. Offhand must not reset the bar.
+    if secret(swingType) then return end
+    local types = Enum and (Enum.PlayerSwingType or Enum.SwingType)
+    local mh, ranged = types and types.MainHand or 0, types and types.Ranged or 2
+    if swingType ~= nil and swingType ~= mh and swingType ~= ranged then return end
+    swing.ranged = swingType == ranged
     readSpeed()
-    local d = (duration and not secret(duration) and duration > 0) and duration or swing.speed
-    if not d then return end
+    local speed = swing.speed
+    if swing.ranged then speed = swing.rangedSpeed end
+    local d = (not secret(duration) and type(duration) == "number" and duration > 0) and duration or speed
+    if not d then swing.start, swing.dur = 0, 0 return end
     swing.start, swing.dur = GetTime(), d
 end
 local function onAttackSpeed()
     local old = swing.speed
+    if swing.ranged then old = swing.rangedSpeed end
     readSpeed()
+    local speed = swing.speed
+    if swing.ranged then speed = swing.rangedSpeed end
     local now = GetTime()
-    if old and swing.speed and old ~= swing.speed and now < swing.start + swing.dur then
-        -- haste/slow mid-swing: stretch what is left
-        local left = (swing.start + swing.dur - now) * swing.speed / old
+    if old and speed and old ~= speed and now < swing.start + swing.dur then
+        -- haste/slow mid-swing: stretch what is left using the active weapon.
+        local left = (swing.start + swing.dur - now) * speed / old
         swing.dur = (now - swing.start) + left
     end
 end
@@ -1726,12 +1750,15 @@ local function updateSwing()
         for _, n in ipairs(QUEUED_SPELLS) do
             if spell[n] then
                 local q = IsCurrentSpell(spell[n])
-                if not secret(q) and q then queued = true end
+                if not swing.ranged and not secret(q) and q then queued = true end
             end
         end
-        if queued ~= swingQueued then
-            swingQueued = queued
-            if queued then swingBar:SetStatusBarColor(1, 0.78, 0.1) else swingBar:SetStatusBarColor(0.8, 0.8, 0.88) end
+        local color = swing.ranged and "shot" or queued
+        if color ~= swingQueued then
+            swingQueued = color
+            if swing.ranged then swingBar:SetStatusBarColor(0.25, 0.65, 1)
+            elseif queued then swingBar:SetStatusBarColor(1, 0.78, 0.1)
+            else swingBar:SetStatusBarColor(0.8, 0.8, 0.88) end
         end
     end
 end
@@ -3199,7 +3226,8 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                 local a = byKey[key]
                 if a then
                     -- Shield Block must not share the dump/Bloodrage helper slot.
-                    local p = key == "block" and {W + 44, -42, 40} or p
+                    local p = key == "block" and {W + 44, -42, 40}
+                        or key == "cleave" and {W + 44, -110, 40} or p
                     a.hudSpot, a.inSpot = spot, true
                     a.root:ClearAllPoints(); a.root:SetSize(p[3], p[3])
                     a.root:SetPoint("TOPLEFT", main, "TOPLEFT", p[1], p[2])
@@ -3214,7 +3242,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                         styleText(a.c.text, 12, 0.94, 0.93, 0.98); a.c.text:Show()
                     end
                     colorBorder(a.c.edge, spot == "danger" and 0.95 or 0.45, spot == "danger" and 0.23 or 0.32, spot == "danger" and 0.2 or 0.66, 1)
-                    if key == "block" then
+                    if key == "block" or key == "cleave" then
                         local gl = rawget(a.c, "glowF")
                         if not gl then
                             gl = CreateFrame("Frame", nil, a.c)
@@ -4207,6 +4235,9 @@ ev:SetScript("OnEvent", function(self, event, ...)
         swing.hasEvent = pcall(self.RegisterEvent, self, "PLAYER_SWING")
         pcall(self.RegisterUnitEvent, self, "UNIT_COMBAT", "player", "target")
         pcall(self.RegisterUnitEvent, self, "UNIT_ATTACK_SPEED", "player")
+        pcall(self.RegisterUnitEvent, self, "UNIT_RANGEDDAMAGE", "player")
+        reg("START_AUTOREPEAT_SPELL"); reg("STOP_AUTOREPEAT_SPELL")
+        reg("PLAYER_EQUIPMENT_CHANGED")
         readSpeed()
         readAll()
         hideBlizzard()
@@ -4254,8 +4285,20 @@ ev:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_COMBAT" then
         local unit, action = ...
         if unit == "target" then onTargetCombat(action) else onUnitCombat(...) end
-    elseif event == "UNIT_ATTACK_SPEED" then
+    elseif event == "UNIT_ATTACK_SPEED" or event == "UNIT_RANGEDDAMAGE" then
         onAttackSpeed()
+    elseif event == "START_AUTOREPEAT_SPELL" or event == "STOP_AUTOREPEAT_SPELL" then
+        -- Wait for a real shot event; starting Shoot does not mean a shot landed.
+        swing.ranged = event == "START_AUTOREPEAT_SPELL"
+        swing.start, swing.dur = 0, 0
+        readSpeed()
+    elseif event == "PLAYER_EQUIPMENT_CHANGED" then
+        local slot = ...
+        if slot == 16 or slot == 18 then
+            swing.start, swing.dur = 0, 0
+            swing.speed, swing.rangedSpeed = nil, nil
+            readSpeed()
+        end
     elseif event == "UNIT_AURA" then
         auraDirty = true          -- read once on the next tick, not on every aura event
     elseif event == "PLAYER_REGEN_ENABLED" then
@@ -4285,7 +4328,8 @@ local PLAIN = {
     clap = { "Thunder Clap", "Packs and elites." },
     demo = { "Demo Shout", "Mobs deal less damage." },
     execute = { "Execute", "Target under 20%." },
-    dump = { "Spend rage", "Heroic Strike or Cleave. Waits longer during heavy hits." },
+    cleave = { "Cleave", "Extra threat on 2+ enemies. 40 rage; 60 with Shield Slam or heavy hits. Hides when queued." },
+    dump = { "Spend rage", "Heroic Strike on one enemy. Waits longer during heavy hits." },
     sunder = { "Sunder Armor", "Stack to your Sunder setting." },
     rend = { "Rend", "Start of a fight." },
     shout = { "Battle Shout", "Buff missing." },
@@ -4380,6 +4424,8 @@ local WARRIOR_MACROS = {
       "Berserker Stance, then Intercept." },
     { "PA Fear Break", "#showtooltip Berserker Rage\n/cast [nostance:3] Berserker Stance; Berserker Rage",
       "Berserker Stance, then Berserker Rage." },
+    { "PA Retaliation", "#showtooltip Retaliation\n/startattack\n/cast [nostance:1] Battle Stance; Retaliation",
+      "Battle Stance, then Retaliation. Press again after switching stance." },
     { "PA Wall", "#showtooltip Shield Wall\n/cast [nostance:2] Defensive Stance; Shield Wall",
       "Shield Wall (goes Defensive first if needed)." },
     { "PA Stance", "#showtooltip\n/cast [stance:2] Battle Stance; Defensive Stance",

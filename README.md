@@ -6,6 +6,8 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 ## What's new
 
+- **1.0.4:** Separate glowing Cleave helper for 2+ engaged enemies, with a 40-rage buffer (60 with Shield Slam or heavy hits). Hides when queued; toggle Cleave in /pa. Added PA Retaliation: Battle Stance, then Retaliation, with auto-attack. Run /pa macros after /reload. The existing swing bar follows gun/bow/crossbow shots in blue and returns to melee on your next main-hand swing. Uses Forever's native swing type, ignores offhand swings, and handles ranged speed changes. Timing starts after a real shot event. /reload.
+
 - **1.0.3:** Upkeep timer icons glow gold when missing or due for refresh. Rend lights at 30% remaining and stops glowing when reapplied. Other spells keep their existing refresh timing. Restored the single Battle Shout reminder above the helper icons in the floating HUD. Shield Block gets its own glowing BLOCK cue when your target is attacking you and the spell is ready and usable. Friendly players and NPCs now show in the target frame too; its right-click area fits the compact header. /reload.
 
 - **1.0.2:** Warlock added. Warrior, Paladin, Druid and Warlock now share the floating HUD with no enclosing panel: next-spell cue beside the bars, small helper alerts, DoT countdowns, health/mana, shard count, and a cast bar that appears while casting. Idle target/DoT clutter stays hidden. Melee keeps slim threat/swing strips. Druid timers and resources follow Bear, Cat, caster and travel forms. Thin blue marker means queue your next spell; there is no guessed "safe to move" cue. Only learned spells show. `/pa oldlook` restores the previous layout. `/reload`.

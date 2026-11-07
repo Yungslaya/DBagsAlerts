@@ -267,7 +267,7 @@ do
         assert(h.frameless and h.width==300 and h.class==MODE_CLASS, "shared layout missing")
         for _,a in ipairs(DBagsAlertsState.alerts) do
             if a.hudSpot=="next" then assert(a.root._w==60, "wrong action size")
-            elseif a.key=="block" and a.hudSpot then assert(a.root._w==40, "wrong Shield Block size")
+            elseif (a.key=="block" or a.key=="cleave") and a.hudSpot then assert(a.root._w==40, "wrong Shield Block size")
             elseif a.hudSpot then assert(a.root._w==28, "wrong helper size") end
         end
         return h
