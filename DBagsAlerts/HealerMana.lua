@@ -308,7 +308,7 @@ local function check()
         rangeFrame:ClearAllPoints()
         if title then rangeFrame:SetPoint("TOPLEFT", f, "TOPRIGHT", 12, -4)
         else rangeFrame:SetPoint("BOTTOM", DBagsAlertsState.main, "TOP", 0, 50) end
-        rangeFrame:SetScale(DBagsAlertsDB.scale or 1)
+        rangeFrame:SetScale((DBagsAlertsDB.scale or 1) * (DBagsAlertsState.partScale and DBagsAlertsState.partScale("helpers") or 1))
         rangeName:SetText(selectedName)
         rangeFrame:SetAlpha(outAlpha); rangeGate:SetAlpha(checkedAlpha); rangeFrame:Show()
         state.status = state.status .. (out and " | TOO FAR" or " | group range monitored")
@@ -318,7 +318,7 @@ local function check()
     f.title:SetText(title); f.detail:SetText(detail)
     f.bar:SetShown(pct ~= nil)
     if pct then f.bar:SetValue(pct) end
-    local scale = DBagsAlertsDB.scale or 1
+    local scale = (DBagsAlertsDB.scale or 1) * (DBagsAlertsState.partScale and DBagsAlertsState.partScale("helpers") or 1)
     if scale ~= lastScale then f:SetScale(scale); lastScale = scale end
     local icon = drink and "Interface\\Icons\\INV_Drink_07" or "Interface\\Icons\\Spell_Holy_Heal"
     if icon ~= lastIcon then f.icon:SetTexture(icon); lastIcon = icon end

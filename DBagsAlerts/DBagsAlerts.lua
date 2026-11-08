@@ -53,6 +53,9 @@ local function say(fmt, ...) print("|cffff7d0aDBags|r|cffc79c6eAlerts|r: " .. st
 local DEFAULTS = {
     point = { "CENTER", "CENTER", 0, -170 },
     scale = 1,
+    targetOfTarget = false,
+    customSizes = false,
+    partSizes = {target=1, player=1, alerts=1, dots=1, casts=1, cooldowns=1, helpers=1},
     locked = true,
     off = {},            -- alert key -> true when turned off
     sunderGoal = 2,      -- Sunder stacks wanted on normal mobs (elites/bosses always 5)
@@ -82,6 +85,10 @@ local DEFAULTS = {
     shardGoal = 5,       -- warlock: Soul Shards to keep (Drain Soul alert below this)
 }
 
+function DRU.partScale(key)
+    if not DB or not DB.customSizes then return 1 end
+    return math.max(0.6, math.min(2, tonumber(DB.partSizes and DB.partSizes[key]) or 1))
+end
 -- Fallback lengths when neither the aura nor the tooltip tells us.
 local DEFAULT_DURATION = {
     ["Shield Block"] = 5, ["Battle Shout"] = 120, ["Demoralizing Shout"] = 30,
@@ -561,7 +568,7 @@ end
 -- Alerts. Order inside a row = priority (left = most important).
 ---------------------------------------------------------------------------
 local ctx = {}
-DBagsAlertsState = { ctx = ctx }   -- read-only peek for /pa debug and testing
+DBagsAlertsState = { ctx = ctx, partScale = DRU.partScale }   -- read-only peek for /pa debug and testing
 DBagsAlertsState.tankSetup = function()
     if CLASS == "PALADIN" then return DB and DB.tank ~= false end
     if CLASS == "DRUID" then return ctx.form == "bear" end
@@ -1427,6 +1434,13 @@ do -- Shared settings behavior: one opaque window at a time, draggable and remem
     DBagsAlertsState.settingsWindows = windows
     DBagsAlertsState.prepareSettingsWindow = function(w, key)
         windows[key] = w
+        if key ~= "main" and not rawget(w, "dbaChrome") then
+            local chrome=CreateFrame("Frame",nil,w,"BackdropTemplate")
+            chrome:SetPoint("TOPLEFT",-7,7);chrome:SetPoint("BOTTOMRIGHT",7,-7)
+            chrome:SetFrameLevel(math.max(0,(w:GetFrameLevel() or 1)-1))
+            chrome:SetBackdrop({edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border",edgeSize=20})
+            w.dbaChrome=chrome
+        end
         w:SetMovable(true); w:SetClampedToScreen(true); w:EnableMouse(true)
         w:RegisterForDrag("LeftButton")
         w:SetScript("OnDragStart", function(self) self:StartMoving() end)
@@ -1964,6 +1978,7 @@ local function layoutStack()
                 a.inSpot = true
                 a.root:SetSize(p[3], p[3])
                 a.root:ClearAllPoints()
+                a.root:SetScale(1)
                 a.root:SetPoint("TOPLEFT", main, "TOPLEFT", p[1], p[2])
                 setLevels(a, base + (#keys - i + 1) * 8)     -- first in the list = on top
                 local named = DB.names and spot ~= "buff"
@@ -2826,6 +2841,12 @@ tf.cast = makeCastBar(tf, 22)
 tf.tot = tf:CreateFontString(nil, "OVERLAY")              -- who your target is hitting
 styleText(tf.tot, 14, 1, 1, 1)
 tf.tot:SetJustifyH("RIGHT"); tf.tot:SetWordWrap(false)
+tf.totBar = makeBar(0.25, 0.52, 0.3, 16, "", tf)
+tf.totBar:SetPoint("TOPLEFT", tf.hp, "BOTTOMLEFT", 0, -4)
+tf.totBar:SetWidth(TARGET_W); tf.totBar.text:Hide(); tf.totBar.left:Hide()
+tf.tot:SetParent(tf.totBar); tf.tot:SetJustifyH("LEFT")
+tf.tot:ClearAllPoints(); tf.tot:SetPoint("LEFT", 4, 0)
+styleText(tf.tot, 12, 1, 1, 1); tf.totBar:Hide()
 tf:Hide()
 
 local tDirty = { all = true }
@@ -3163,6 +3184,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
     styleText(shardText, 13, 0.76, 0.68, 0.92)
     shardText:SetPoint("TOPRIGHT", -PAD, -85) -- repositioned beside utility after layout
     local dots, used, dotY, castY, utilityY = {}, {}, 0, 0, 0
+    local dotScale, dotColumns = 1, 6
     local function dotList()
         local names
         if CLASS == "WARRIOR" then names = {"Rend"}
@@ -3270,25 +3292,31 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         panel:Show(); healthBar:SetHeight(28); threatBar:SetHeight(10); swingBar:SetHeight(10)
         healthBar.left:SetText(""); rageBar.left:SetText("")
         styleText(healthBar.text, 18, 1, 1, 1); styleText(rageBar.text, 14, 1, 1, 1)
-        tf.pw:Show(); tf.tot:Show()
+        tf.pw:Show(); tf.tot:SetShown(DB.targetOfTarget and true or false)
     end
     DRU.layoutCaster = function()
         DRU.targetAuraCache = {}
         DRU.hideOldCaster()
         deck:Show()
-        blockW = W - 2 * PAD
-        main:SetSize(W, 260)
+        local targetScale, playerScale = DRU.partScale("target"), DRU.partScale("player")
+        local alertScale, castScale, cdScale = DRU.partScale("alerts"), DRU.partScale("casts"), DRU.partScale("cooldowns")
+        dotScale = DRU.partScale("dots")
+        blockW = 280
+        local width = math.max(W, blockW * math.max(targetScale, playerScale, castScale) + 2 * PAD)
+        dotColumns = math.max(1, math.min(6, math.floor((width - 2 * PAD) / (46 * dotScale))))
+        local actionTop = math.max(42, 8 + (28 + (DB.targetOfTarget and 20 or 0)) * targetScale + 6)
+        main:SetSize(width, 260)
         deck:ClearAllPoints(); deck:SetAllPoints()
         ring:Hide(); advice:Hide(); threatBar:Hide(); swingBar:Hide(); panel:Hide()
         for _, f in pairs(slotBG) do f:Hide() end
         for _, f in pairs(cdIcons) do f:Hide() end
         applyStyle()
         -- Put action cues beside the resource strip, leaving the world open above it.
-        local pos = { next = {PAD - NEXT - 10, -42, NEXT}, danger = {W + 2, -42, 28},
-                      extra = {W + 2, -76, 28}, buff = {W + 2, -110, 28} }
+        local pos = { next = {PAD - NEXT * alertScale - 10, -actionTop, NEXT}, danger = {width + 2, -actionTop, 28},
+                      extra = {width + 2, -actionTop - 34 * alertScale, 28}, buff = {width + 2, -actionTop - 68 * alertScale, 28} }
         local byKey = {}
         for _, a in ipairs(ALERTS) do
-            a.root:Hide(); a.inSpot = false; byKey[a.key] = a
+            a.root:Hide(); a.root:SetScale(alertScale); a.inSpot = false; byKey[a.key] = a
             if rawget(a.c, "glowF") then a.c.glowF:Hide() end
             if rawget(a.c, "gold") then a.c.gold:Hide() end
         end
@@ -3298,11 +3326,12 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                 local a = byKey[key]
                 if a then
                     -- Shield Block must not share the dump/Bloodrage helper slot.
-                    local p = key == "block" and {W + 44, -42, 40}
-                        or key == "cleave" and {W + 44, -110, 40} or p
+                    local p = key == "block" and {width + 44 * alertScale, -actionTop, 40}
+                        or key == "cleave" and {width + 44 * alertScale, -actionTop - 68 * alertScale, 40} or p
                     a.hudSpot, a.inSpot = spot, true
                     a.root:ClearAllPoints(); a.root:SetSize(p[3], p[3])
-                    a.root:SetPoint("TOPLEFT", main, "TOPLEFT", p[1], p[2])
+                    a.root:SetScale(alertScale)
+                    a.root:SetPoint("TOPLEFT", main, "TOPLEFT", p[1] / alertScale, p[2] / alertScale)
                     setLevels(a, main:GetFrameLevel() + 10 + (#keys - i + 1) * 8)
                     a.c.text:Hide(); a.c.plate:Hide()
                     if spot == "next" and DB.names then
@@ -3343,25 +3372,28 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         for _, f in ipairs(dots) do f:Hide() end
         wipe(used)
         local list = dotList()
-        local y = 42
+        local y = actionTop
         dotY = y
         for i, name in ipairs(list) do
             local f = tile(i); f.name = name
             f:SetSize(40, 40); f:ClearAllPoints()
-            f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + (i - 1) * 46, -y)
+            f:SetScale(dotScale)
+            f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / dotScale + ((i - 1) % dotColumns) * 46, -y / dotScale - math.floor((i - 1) / dotColumns) * 47)
             f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name])); f:Show()
             used[#used + 1] = f
         end
-        if #list > 0 or CLASS == "DRUID" then y = y + 47 end
+        if #list > 0 or CLASS == "DRUID" then
+            y = y + math.ceil((CLASS == "DRUID" and 6 or #list) / dotColumns) * 47 * dotScale
+        end
         healthBar:SetHeight(14); healthBar:SetWidth(blockW)
-        healthBar:ClearAllPoints(); healthBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
+        healthBar:ClearAllPoints(); healthBar:SetScale(playerScale); healthBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / playerScale, -y / playerScale)
         healthBar:SetStatusBarTexture(BAR_TEX); healthBar:SetStatusBarColor(0.19, 0.55, 0.38)
         healthBar.frame:Hide(); styleText(healthBar.text, 12, 1, 1, 1)
         healthBar.left:SetText("")
         healthBar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.5)
-        y = y + 17
+        y = y + 17 * playerScale
         rageBar:SetHeight(18); rageBar:SetWidth(blockW)
-        rageBar:ClearAllPoints(); rageBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
+        rageBar:ClearAllPoints(); rageBar:SetScale(playerScale); rageBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / playerScale, -y / playerScale)
         rageBar:SetStatusBarTexture(BAR_TEX); rageBar.frame:Hide(); rageBar.tick:Hide()
         if POWER == RAGE then rageBar:SetStatusBarColor(0.85, 0.12, 0.12)
         elseif POWER == DRU.ENERGY then rageBar:SetStatusBarColor(1, 0.85, 0.1)
@@ -3369,14 +3401,14 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         rageBar.left:SetText("")
         rageBar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.5)
         styleText(rageBar.text, 14, 1, 1, 1)
-        y = y + 24
+        y = y + 24 * playerScale
         -- Melee keeps useful timing/threat as quiet 3 px strips, instead of bulky bars.
         if not DRU.caster then
-            threatBar:ClearAllPoints(); threatBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
+            threatBar:ClearAllPoints(); threatBar:SetScale(playerScale); threatBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / playerScale, -y / playerScale)
             threatBar:SetSize(blockW, 3); threatBar.frame:Hide(); threatBar:Show()
-            swingBar:ClearAllPoints(); swingBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -(y + 5))
+            swingBar:ClearAllPoints(); swingBar:SetScale(playerScale); swingBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / playerScale, -y / playerScale - 5)
             swingBar:SetSize(blockW, 3); swingBar.frame:Hide()
-            y = y + 13
+            y = y + 13 * playerScale
         end
         castY = y
         local cc = CLASS == "PALADIN" and {0.80, 0.54, 0.62}
@@ -3387,44 +3419,47 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         castPlayer:SetStatusBarTexture(BAR_TEX); castPlayer.frame:Hide()
         castPlayer:SetHeight(26); castPlayer:SetWidth(blockW - 27)
         castPlayer.icon:SetSize(26, 26)
-        castPlayer:ClearAllPoints(); castPlayer:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + 27, -y)
+        castPlayer:ClearAllPoints(); castPlayer:SetScale(castScale); castPlayer:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / castScale + 27, -y / castScale)
         styleText(castPlayer.name, 14, 1, 1, 1); styleText(castPlayer.left, 14, 1, 1, 1)
-        if DB.casts then y = y + 32 end
+        if DB.casts then y = y + 32 * castScale end
         utilityY = y
         shardText:ClearAllPoints(); shardText:SetPoint("TOPRIGHT", main, "TOPRIGHT", -PAD, -(y + 6))
         local n = 0
+        local cdColumns = math.max(1, math.min(6, math.floor((width - 2 * PAD) / (31 * cdScale))))
         if not DB.off.cooldowns then
             for _, name in ipairs(CD_SPELLS) do
                 if spell[name] then
                     local f = cdIcons[name] or makeCD(name); cdIcons[name] = f
                     f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
                     f:ClearAllPoints(); f:SetSize(26, 26)
-                    f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + (n % 6) * 31, -(y + math.floor(n / 6) * 31))
+                    f:SetScale(cdScale); f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / cdScale + (n % cdColumns) * 31, -y / cdScale - math.floor(n / cdColumns) * 31)
                     f.glow:SetSize(26, 26); f.glow:SetAlpha(0) -- no duplicate glowing suggestions
                     f:Show(); n = n + 1
                 end
             end
         end
-        if n > 0 then y = y + math.ceil(n / 6) * 31 end
+        if n > 0 then y = y + math.ceil(n / cdColumns) * 31 * cdScale end
         if CLASS ~= "WARLOCK" then shardText:SetText("") end
-        main:SetSize(W, y + 8); main:SetScale(DB.scale)
+        main:SetSize(width, y + 8); main:SetScale(DB.scale)
         main:ClearAllPoints(); main:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
         main:EnableMouse(not DB.locked); main:EnableMouseWheel(not DB.locked); main.bg:SetShown(not DB.locked)
         -- Target is a compact header attached to the same column.
-        tf:ClearAllPoints(); tf:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -8)
+        tf:ClearAllPoints(); tf:SetScale(targetScale); tf:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / targetScale, -8 / targetScale)
         tf:SetSize(blockW, 30)
         tf.name:ClearAllPoints(); tf.name:SetPoint("TOPLEFT"); tf.name:SetWidth(blockW - 34); styleText(tf.name, 14, 0.9, 0.9, 0.94)
         tf.level:ClearAllPoints(); tf.level:SetPoint("TOPRIGHT"); styleText(tf.level, 12, 0.8, 0.77, 0.63)
         tf.hp:ClearAllPoints(); tf.hp:SetPoint("TOPLEFT", tf, "TOPLEFT", 0, -19)
         tf.hp:SetSize(blockW, 9); styleText(tf.hp.text, 10, 1, 1, 1)
         tf.hp:SetStatusBarTexture(BAR_TEX); tf.hp.frame:Hide()
-        tf.pw:Hide(); tf.tot:Hide()
+        tf.pw:Hide(); tf.tot:SetShown(DB.targetOfTarget and true or false)
+        tf.totBar:ClearAllPoints(); tf.totBar:SetPoint("TOPLEFT",tf.hp,"BOTTOMLEFT",0,-4)
+        tf.totBar:SetWidth(blockW); tf.totBar:SetShown(DB.targetOfTarget and plain(UnitExists("targettarget"), false) and true or false)
         -- Target casts get a separate lane above the header, clear of helper icons.
         tf.cast:ClearAllPoints(); tf.cast:SetPoint("BOTTOMLEFT", tf, "TOPLEFT", 23, 12)
-        tf.cast:SetSize(blockW - 23, 20); tf.cast.icon:SetSize(20, 20); tf.cast.frame:Hide()
+        tf.cast:SetScale(castScale / targetScale); tf.cast:SetSize(blockW - 23, 20); tf.cast.icon:SetSize(20, 20); tf.cast.frame:Hide()
         tDirty.all = true
         DBagsAlertsState.dotTiles = used
-        DBagsAlertsState.casterHUD = {width=W, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck, frameless=true, class=CLASS, form=ctx.form, power=POWER, melee=not DRU.caster}
+        DBagsAlertsState.casterHUD = {width=width, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck, frameless=true, class=CLASS, form=ctx.form, power=POWER, melee=not DRU.caster}
         if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end
     end
     local elapsed, shardAt = 0, 0
@@ -3451,7 +3486,8 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                                 f.name = plain(aura.name, nil)
                                 f.auraID = id
                                 f:SetSize(40,40); f:ClearAllPoints()
-                                f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + (i - 1) * 46, -dotY)
+                                f:SetScale(dotScale)
+                                f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / dotScale + ((i - 1) % dotColumns) * 46, -dotY / dotScale - math.floor((i - 1) / dotColumns) * 47)
                                 f.icon:SetTexture(aura.icon)
                                 f.icon:SetDesaturated(false); f.shade:SetAlpha(0); f:SetAlpha(1)
                                 f.num:SetText(""); f.bar:SetValue(0)
@@ -3547,13 +3583,13 @@ local function updateTargetPower()
 end
 
 local function updateToT()
-    local exists = plain(UnitExists("targettarget"), false)
-    if not exists then tf.tot:SetText("") return end
-    pcall(tf.tot.SetFormattedText, tf.tot, ">> %s", UnitName("targettarget"))
-    local me = UnitIsUnit("targettarget", "player")
-    if secret(me) then tf.tot:SetTextColor(1, 1, 1)
-    elseif me then tf.tot:SetTextColor(0.3, 1, 0.3)            -- hitting you: good
-    else tf.tot:SetTextColor(1, 0.3, 0.3) end                    -- hitting someone else: taunt?
+    local show = DB.target and DB.targetOfTarget and plain(UnitExists("targettarget"), false)
+    tf.totBar:SetShown(show and true or false); tf.tot:SetShown(show and true or false)
+    if not show then tf.tot:SetText("") return end
+    tf.totBar:SetMinMaxValues(0, UnitHealthMax("targettarget"))
+    tf.totBar:SetValue(UnitHealth("targettarget"), Enum.StatusBarInterpolation and Enum.StatusBarInterpolation.ExponentialEaseOut)
+    pcall(tf.tot.SetFormattedText, tf.tot, "> %s", UnitName("targettarget"))
+    tf.tot:SetTextColor(1, 1, 1)
 end
 
 local function updateTarget()
@@ -3598,8 +3634,12 @@ layoutExtras = function(width, x, y)
     tf.level:ClearAllPoints(); tf.level:SetPoint("TOPRIGHT", tf, "TOPRIGHT", 0, 0)
     tf.hp:SetWidth(TARGET_W); tf.hp:ClearAllPoints(); tf.hp:SetPoint("TOPLEFT", tf, "TOPLEFT", 0, -(18 + gb))
     tf.pw:SetWidth(TARGET_W); tf.pw:ClearAllPoints(); tf.pw:SetPoint("TOPLEFT", tf.hp, "BOTTOMLEFT", 0, -gb)
-    tf.cast:SetWidth(TARGET_W - 23); tf.cast:ClearAllPoints(); tf.cast:SetPoint("TOPLEFT", tf.pw, "BOTTOMLEFT", 23, -(gb + 2))
-    tf.tot:ClearAllPoints(); tf.tot:SetPoint("TOPRIGHT", tf.cast, "BOTTOMRIGHT", 0, -4); tf.tot:SetWidth(TARGET_W)
+    tf.totBar:ClearAllPoints(); tf.totBar:SetPoint("TOPLEFT",tf.pw,"BOTTOMLEFT",0,-4)
+    tf.cast:SetScale(1); tf.cast:SetWidth(TARGET_W - 23); tf.cast:ClearAllPoints()
+    tf.cast:SetPoint("TOPLEFT", DB.targetOfTarget and tf.totBar or tf.pw, "BOTTOMLEFT", 23, -(gb + 2))
+    tf.totBar:SetWidth(TARGET_W)
+    tf.tot:ClearAllPoints(); tf.tot:SetPoint("LEFT", tf.totBar, "LEFT", 4, 0); tf.tot:SetWidth(TARGET_W - 8)
+    tf:SetScale(DRU.partScale("target")); tf.totBar:SetShown(DB.targetOfTarget and plain(UnitExists("targettarget"), false) and true or false)
     tDirty.all = true
     return y
 end
@@ -4130,6 +4170,22 @@ do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
     end)
 end
 
+function DRU.applyHelperSize()
+    if not DB then return end
+    local relative=DRU.partScale("helpers")
+    for _,key in ipairs({"buffNag","stanceNag"}) do
+        local frame=DBagsAlertsState[key]
+        if frame then frame:SetScale(relative) end
+    end
+    local follow=DBagsAlertsState.followBuddy
+    if follow and follow.frame then follow.frame:SetScale((DB.scale or 1)*relative) end
+    if not InCombatLockdown() then
+        for _,name in ipairs({"DBagsAlertsEatButton","DBagsAlertsStoneButton"}) do
+            if _G[name] then _G[name]:SetScale((DB.scale or 1)*relative) end
+        end
+    end
+end
+
 do   -- click buttons (own block: Lua's 200 top-level locals limit)
     -- Blizzard's secure unit buttons over our frames: right-click = the normal WoW
     -- menu (invite, whisper, trade...), left-click = target, mouseover = tooltip.
@@ -4347,7 +4403,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         local function reg(e, u1, u2)
             if u1 then pcall(self.RegisterUnitEvent, self, e, u1, u2) else pcall(self.RegisterEvent, self, e) end
         end
-        reg("UNIT_HEALTH", "player", "target"); reg("UNIT_MAXHEALTH", "player", "target")
+        reg("UNIT_HEALTH", "player", "target", "targettarget"); reg("UNIT_MAXHEALTH", "player", "target", "targettarget")
         reg("UNIT_POWER_FREQUENT", "player", "target"); reg("UNIT_MAXPOWER", "player", "target")
         reg("UNIT_TARGET", "target")
         for _, e in ipairs({ "UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_DELAYED", "UNIT_SPELLCAST_CHANNEL_UPDATE" }) do
@@ -4383,7 +4439,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         DRU.refreshPower()
     elseif event == "UNIT_HEALTH" or event == "UNIT_MAXHEALTH" then
         local unit = ...
-        if unit == "target" then tDirty.hp = true else barsDirty.health = true end
+        if unit == "target" then tDirty.hp = true elseif unit == "targettarget" then tDirty.tot = true else barsDirty.health = true end
     elseif event == "UNIT_POWER_FREQUENT" or event == "UNIT_MAXPOWER" then
         local unit, ptype = ...
         if unit == "target" then tDirty.pw = true
@@ -4432,6 +4488,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         if ... == "target" then DRU.targetAuraCache = {} end
         auraDirty = true          -- read once on the next tick, not on every aura event
     elseif event == "PLAYER_REGEN_ENABLED" then
+        if DRU.applyHelperSize then DRU.applyHelperSize() end
         readAll()
         if event == "PLAYER_REGEN_ENABLED" then readSpeed() end
     end
@@ -4738,17 +4795,9 @@ local function makeSlider(parent, label, minV, maxV, step, fmt, get, set)
     return s
 end
 
-local function makeButton(parent, label, w, onClick)
-    local b = CreateFrame("Button", nil, parent)
-    b:SetSize(w, 24)
-    b.bg = b:CreateTexture(nil, "BACKGROUND")
-    b.bg:SetAllPoints(); b.bg:SetColorTexture(0.18, 0.18, 0.22, 1)
-    addBorder(b, 0, 0, 0, 1, 1)
-    b.hl = b:CreateTexture(nil, "HIGHLIGHT")
-    b.hl:SetAllPoints(); b.hl:SetColorTexture(1, 0.82, 0.2, 0.15)
-    b.text = b:CreateFontString(nil, "OVERLAY")
-    styleText(b.text, 13, C(1, 0.9, 0.5)); b.text:SetPoint("CENTER"); b.text:SetText(label)
-    b:SetScript("OnClick", onClick)
+local function makeButton(parent, label, width, onClick)
+    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    b:SetSize(width, 28); b:SetText(label); b:SetScript("OnClick", onClick)
     return b
 end
 
@@ -4764,202 +4813,128 @@ local function heading(parent, text, y)
 end
 
 local function buildSettings()
-    local w = CreateFrame("Frame", "DBagsAlertsSettings", UIParent)
-    w:SetSize(390, 662)
-    w:SetPoint("CENTER")
-    w:SetFrameStrata("DIALOG")
-    w:SetMovable(true); w:EnableMouse(true); w:SetClampedToScreen(true)
-    w:RegisterForDrag("LeftButton")
-    w:SetScript("OnDragStart", w.StartMoving)
-    w:SetScript("OnDragStop", w.StopMovingOrSizing)
-    w.bg = w:CreateTexture(nil, "BACKGROUND")
-    w.bg:SetAllPoints(); w.bg:SetColorTexture(0.055, 0.055, 0.065, 1)
-    addBorder(w, 0, 0, 0, 1, 1)
-    local accent = w:CreateTexture(nil, "ARTWORK")
-    accent:SetPoint("TOPLEFT"); accent:SetPoint("TOPRIGHT"); accent:SetHeight(3)
-    local cc = CLASS and ((C_ClassColor and C_ClassColor.GetClassColor and C_ClassColor.GetClassColor(CLASS))
-        or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[CLASS]))
-    if cc then accent:SetColorTexture(cc.r, cc.g, cc.b, 1) else accent:SetColorTexture(1, 0.82, 0.2, 1) end
-    if UISpecialFrames then table.insert(UISpecialFrames, "DBagsAlertsSettings") end  -- Esc closes it
-
-    local title = w:CreateFontString(nil, "OVERLAY")
-    styleText(title, 18, C(1, 1, 1)); title:SetPoint("TOP", 0, -12)
-    title:SetText("DBagsAlerts")
-    local sub = w:CreateFontString(nil, "OVERLAY")
-    styleText(sub, 10, C(0.7, 0.7, 0.75)); sub:SetPoint("TOP", title, "BOTTOM", 0, -3)
-    sub:SetText("")
-    local close = makeButton(w, "X", 24, function() w:Hide() end)
-    close:SetPoint("TOPRIGHT", -8, -8)
-    local outer = w
-    DBagsAlertsState.prepareSettingsWindow(outer, "main")
-    outer.opened = false
-    local scroll = CreateFrame("ScrollFrame", "DBagsAlertsSettingsScroll", outer, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", outer, "TOPLEFT", 0, -44)
-    scroll:SetPoint("BOTTOMRIGHT", outer, "BOTTOMRIGHT", -26, 12)
-    local page = CreateFrame("Frame", nil, scroll); page:SetWidth(360)
-    scroll:SetScrollChild(page)
-    local w = CreateFrame("Frame", nil, page)
-    w:SetWidth(360); w:SetPoint("TOPLEFT", page, "TOPLEFT", 0, 44)
-
-    local items = {}
-    local function add(x) table.insert(items, x) return x end
-
-    -- LOOK
-    heading(w, "Display", -52)
-    local size = add(makeSlider(w, "Size", 0.6, 2.0, 0.05, "%.2fx", function() return DB.scale end,
-        function(v) DB.scale = v; main:SetScale(v) end))
-    size:SetPoint("TOPLEFT", 20, -92)
-    local lock = add(makeCheck(w, "Lock position", "Uncheck to drag. Mouse wheel resizes.",
-        function() return DB.locked end, function(v) DB.locked = v; layout() end))
-    lock:SetPoint("TOPLEFT", 16, -114)
-    local function relayout() layout() end
-    local big = add(makeCheck(w, "Big icon", "One icon: the next button to press.",
-        function() return DB.stack ~= false end, function(v) DB.stack = v; relayout() end))
-    big:SetPoint("TOPLEFT", 16, -136)
-    local nm = add(makeCheck(w, "Spell names", "Name under the big icon.",
-        function() return DB.names end, function(v) DB.names = v; relayout() end))
-    nm:SetPoint("TOPLEFT", 180, -136)
-    local rg = add(makeCheck(w, "Aggro dot", "Dot over every mob in a fight. Green: it's on you. Yellow: about to lose it. Red: it's not hitting you.",
-        function() return DB.range end, function(v) DB.range = v; relayout() end))
-    rg:SetPoint("TOPLEFT", 16, -158)
-    local tip = add(makeCheck(w, "Rage tips", "Short tip line under the rage bar.",
-        function() return DB.advice end, function(v) DB.advice = v; relayout() end))
-    tip:SetPoint("TOPLEFT", 180, -158)
-    local tfc = add(makeCheck(w, "Target frame", "Target name, health, and who it's hitting.",
-        function() return DB.target end, function(v) DB.target = v; relayout() end))
-    tfc:SetPoint("TOPLEFT", 16, -180)
-    local cbc = add(makeCheck(w, "Cast bars", "Your cast and your target's cast. Thin blue end mark: queue the next spell. Move after the cast finishes.",
-        function() return DB.casts end, function(v) DB.casts = v; relayout() end))
-    cbc:SetPoint("TOPLEFT", 180, -180)
-    local hb = add(makeCheck(w, "Hide Blizzard frames", "Hides the normal player, target and cast frames. Uncheck + /reload to get them back.",
-        function() return DB.hideBlizz end, function(v) DB.hideBlizz = v; if v then hideBlizzard() else say("type /reload to bring them back.") end end))
-    hb:SetPoint("TOPLEFT", 16, -202)
-    local cs = add(makeCheck(w, "Classic WoW frames", "Gold WoW frames and glossy bars. Uncheck for plain thin lines.",
-        function() return DB.style ~= "clean" end, function(v) DB.style = v and "classic" or "clean"; relayout() end))
-    cs:SetPoint("TOPLEFT", 180, -202)
-    local cur = add(makeCheck(w, "Cursor ring", "A ring around your mouse so you never lose it.",
-        function() return DB.cursor ~= false end, function(v) DB.cursor = v end))
-    cur:SetPoint("TOPLEFT", 16, -224)
-    local curc = add(makeCheck(w, "Ring only in combat", "Show the cursor ring only while you fight.",
-        function() return DB.cursorCombat end, function(v) DB.cursorCombat = v end))
-    curc:SetPoint("TOPLEFT", 180, -224)
-    local nag = add(makeCheck(w, "Buff reminder", "Shows your missing buff (Battle Shout) next to the icons, even out of combat. Hidden in towns.",
-        function() return DB.buffNag ~= false end, function(v) DB.buffNag = v end))
-    nag:SetPoint("TOPLEFT", 16, -246)
-    local snag = add(makeCheck(w, "Stance reminder", "Flashes DEFENSIVE above your character when you fight in another stance (warrior).",
-        function() return DB.stanceNag ~= false end, function(v) DB.stanceNag = v end))
-    snag:SetPoint("TOPLEFT", 180, -246)
-    local fnag = add(makeCheck(w, "Eat reminder", "Shows an EAT button when you have no Well Fed (+5% XP) but carry food that gives it. Click it to eat.",
-        function() return DB.foodNag ~= false end, function(v) DB.foodNag = v end))
-    fnag:SetPoint("TOPLEFT", 16, -268)
-    local stn = add(makeCheck(w, "Weapon stone", "Button to put a sharpening stone or weightstone on your weapon when it has none.",
-        function() return DB.stoneNag ~= false end, function(v) DB.stoneNag = v end))
-    stn:SetPoint("TOPLEFT", 180, -268)
-    local stn2 = add(makeCheck(w, "Show if I have none", "Grey NO STONE icon when your bags have no stone for your weapon.",
-        function() return DB.stoneNeed ~= false end, function(v) DB.stoneNeed = v end))
-    stn2:SetPoint("TOPLEFT", 16, -290)
-    local test = makeButton(w, "Preview", 200, function() testUntil = GetTime() + 8 end)
-    test:SetPoint("TOPLEFT", 20, -320)
-    local healer = makeButton(w, "Healer checks", 106, function()
-        if DBagsAlertsState.openHealerSettings then DBagsAlertsState.openHealerSettings() end
-    end)
-    healer:SetPoint("TOPLEFT", 230, -320)
-    local party = makeButton(w, "Party helpers", 130, function()
-        if DBagsAlertsState.openPartyDefensives then DBagsAlertsState.openPartyDefensives() end
-    end)
-    party:SetPoint("TOPLEFT", 220, -348)
-    local pets = makeButton(w, "Pet controls", 130, function()
-        if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end
-    end)
-    pets:SetPoint("TOPLEFT", 220, -376)
-    local debugButton = makeButton(w, "Debug", 200, function()
-        if DBagsAlertsDebug then DBagsAlertsDebug.open() end
-    end)
-    debugButton:SetPoint("TOPLEFT", 20, -376)
-    if CLASS_MACROS[CLASS] then
-        local mk = makeButton(w, "Create macros", 200, makeMacros)
-        mk:SetPoint("TOPLEFT", 20, -348)
-        mk:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:SetText("Create macros", 1, 0.82, 0.2)
-            GameTooltip:AddLine("Adds " .. #CLASS_MACROS[CLASS] .. " character macros. Find them in /macro. Running it again updates them." ..
-                "", 1, 1, 1, true)
-            GameTooltip:Show()
-        end)
-        mk:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    end
-
-    -- WARNINGS
-    heading(w, "Thresholds", -416)
-    local y = -456
-    local hp = add(makeSlider(w, "Low health", 10, 80, 5, "%d%%", function() return DB.lowHp end,
-        function(v) DB.lowHp = v end))
-    hp:SetPoint("TOPLEFT", 20, y)
-    y = y - 40
-    if CLASS == "WARRIOR" then
-        local dump = add(makeSlider(w, "Spend rage at", 30, 100, 5, "%d rage", function() return DB.dumpAt end,
-            function(v) DB.dumpAt = v; layout() end))
-        dump:SetPoint("TOPLEFT", 20, y)
-        y = y - 40
-        local dumpT = add(makeSlider(w, "Spend rage at (heavy hits)", 50, 100, 5, "%d rage",
-            function() return DB.dumpTank or 90 end, function(v) DB.dumpTank = v end))
-        dumpT:SetPoint("TOPLEFT", 20, y)
-        y = y - 40
-        local sun = add(makeSlider(w, "Sunder stacks (normal mobs)", 0, 5, 1, "%d", function() return DB.sunderGoal end,
-            function(v) DB.sunderGoal = v end))
-        sun:SetPoint("TOPLEFT", 20, y)
-        y = y - 30
-    else
-        local mana = add(makeSlider(w, "Low mana", 5, 60, 5, "%d%%", function() return DB.lowMana end,
-            function(v) DB.lowMana = v; layout() end))
-        mana:SetPoint("TOPLEFT", 20, y)
-        y = y - 30
-        if CLASS == "WARLOCK" then
-            y = y - 10
-            local sh = add(makeSlider(w, "Soul Shards to keep", 1, 20, 1, "%d", function() return DB.shardGoal or 5 end,
-                function(v) DB.shardGoal = v end))
-            sh:SetPoint("TOPLEFT", 20, y)
-            y = y - 30
-        else
-            local tank = add(makeCheck(w, "Tank mode",
-                "On: Righteous Fury, Seal of Fury, Sanctuary. Off: Righteousness, Might.",
-                function() return DB.tank end, function(v) DB.tank = v end))
-            tank:SetPoint("TOPLEFT", 16, y)
-            y = y - 26
+    local outer = CreateFrame("Frame", "DBagsAlertsSettings", UIParent, "BackdropTemplate")
+    outer:SetSize(760, 580); outer:SetPoint("CENTER"); outer:SetFrameStrata("DIALOG")
+    DBagsAlertsState.prepareSettingsWindow(outer, "main"); outer.opened = false
+    outer:SetBackdrop({bgFile="Interface\\DialogFrame\\UI-DialogBox-Background",edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile=true,tileSize=32,edgeSize=24,insets={left=6,right=6,top=6,bottom=6}})
+    local title=outer:CreateFontString(nil,"OVERLAY");styleText(title,20,1,0.82,0.2)
+    title:SetPoint("TOPLEFT",24,-18);title:SetText("DBagsAlerts")
+    local close=CreateFrame("Button",nil,outer,"UIPanelCloseButton");close:SetPoint("TOPRIGHT",-8,-8)
+    close:SetScript("OnClick",function() outer:Hide() end)
+    local items,pages,tabs,independent={},{},{},{}
+    outer.controls={};outer.pages=pages;outer.tabs=tabs
+    local function refresh()
+        for _,item in ipairs(items) do item.refresh() end
+        for _,item in ipairs(independent) do
+            item:EnableMouse(DB.customSizes);item:EnableMouseWheel(DB.customSizes);item:SetAlpha(DB.customSizes and 1 or 0.4)
         end
     end
-    local snd = add(makeCheck(w, "Sound on danger alerts", "Raid warning sound.",
-        function() return DB.sound end, function(v) DB.sound = v end))
-    snd:SetPoint("TOPLEFT", 16, y)
-    y = y - 44
-    local crs = add(makeSlider(w, "Cursor ring size", 24, 120, 4, "%d", function() return DB.cursorSize or 48 end,
-        function(v) DB.cursorSize = v; if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end end))
-    crs:SetPoint("TOPLEFT", 20, y)
-    y = y - 34
-
-    -- WHICH ALERTS
-    heading(w, "Alerts", y)
-    y = y - 24
-    local col = 0
-    local list = {}
-    for _, a in ipairs(ALERTS) do table.insert(list, a.key) end
-    table.insert(list, "cooldowns"); table.insert(list, "swing")
-    PLAIN.cooldowns = { "Cooldowns", "Cooldown row under the bars." }
-    PLAIN.swing = { "Swing timer", "Auto-attack timer." }
-    for _, key in ipairs(list) do
-        local p = PLAIN[key] or { key, "" }
-        local cb = add(makeCheck(w, p[1], p[2], function() return not DB.off[key] end,
-            function(v) DB.off[key] = (not v) or nil; layout() end))
-        cb:SetPoint("TOPLEFT", 16 + col * 168, y)
-        col = col + 1
-        if col == 2 then col = 0; y = y - 22 end
+    local function selectPage(key)
+        if not pages[key] then key="display" end
+        for name,page in pairs(pages) do page.scroll:SetShown(name==key);tabs[name]:SetAlpha(name==key and 1 or 0.65) end
+        DB.settingsPage=key;outer.selectedPage=key;refresh()
     end
-    if col == 1 then y = y - 22 end
-    local fullHeight = -y + 16
-    w:SetHeight(fullHeight); page:SetHeight(fullHeight - 44)
-    outer:SetHeight(math.min(fullHeight, 820, math.max(420, (UIParent:GetHeight() or 900) - 80)))
-    outer.refresh = function() for _, it in ipairs(items) do it.refresh() end end
-    DBagsAlertsState.settingsFrame = outer
+    outer.selectPage=selectPage
+    local function page(key,label)
+        local index=#outer.tabs+1
+        outer.tabs[index]=key
+        local tab=makeButton(outer,label,140,function() selectPage(key) end)
+        tab:SetPoint("TOPLEFT",20,-65-(index-1)*40);tabs[key]=tab
+        local scroll=CreateFrame("ScrollFrame",nil,outer,"UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT",184,-62);scroll:SetPoint("BOTTOMRIGHT",-38,24)
+        local body=CreateFrame("Frame",nil,scroll);body:SetWidth(510);scroll:SetScrollChild(body)
+        local heading=body:CreateFontString(nil,"OVERLAY");styleText(heading,17,1,0.82,0.2)
+        heading:SetPoint("TOPLEFT",8,0);heading:SetText(label)
+        local result={body=body,scroll=scroll,y=-40};pages[key]=result
+        return result
+    end
+    local function relayout() layout();tDirty.all=true;if DRU.applyHelperSize then DRU.applyHelperSize() end end
+    local function check(page,key,label,tip,get,set)
+        local widget=makeCheck(page.body,label,tip,get or function() return DB[key] end,set or function(v) DB[key]=v;relayout() end)
+        widget:SetPoint("TOPLEFT",4,page.y);page.y=page.y-32
+        widget.text:SetWidth(455);styleText(widget.text,14,0.94,0.94,0.9)
+        items[#items+1]=widget;outer.controls[key]=widget;return widget
+    end
+    local function slider(page,key,label,lo,hi,step,fmt,get,set,custom)
+        local widget=makeSlider(page.body,label,lo,hi,step,fmt,get,set)
+        widget:SetWidth(340);widget:SetPoint("TOPLEFT",12,page.y-22);page.y=page.y-66
+        items[#items+1]=widget;outer.controls[key]=widget
+        if custom then independent[#independent+1]=widget end
+        return widget
+    end
+    local function button(page,key,label,callback)
+        local widget=makeButton(page.body,label,300,callback)
+        widget:SetPoint("TOPLEFT",8,page.y);page.y=page.y-42;outer.controls[key]=widget;return widget
+    end
+    local display=page("display","Display")
+    check(display,"locked","Lock HUD position","Uncheck to drag the HUD.")
+    check(display,"stack","Large spell cue","Show one clear next-spell cue.")
+    check(display,"names","Spell names","Show the spell name below the cue.")
+    check(display,"classic","Classic borders","Use WoW borders and glossy bars.",function() return DB.style~="clean" end,function(v) DB.style=v and "classic" or "clean";relayout() end)
+    check(display,"sound","Alert sound","Play a sound for danger alerts.")
+    button(display,"preview","Preview HUD",function() testUntil=GetTime()+8 end)
+    local frames=page("frames","Frames")
+    check(frames,"target","Target frame","Show the selected player's or enemy's health.")
+    check(frames,"targetOfTarget","Target of Target","Show who your target is targeting, with a small health bar. Off by default.")
+    check(frames,"casts","Cast bars","Show your casts and target casts.")
+    check(frames,"range","Aggro dots","Green: on you. Yellow: threat at risk. Red: on someone else.")
+    check(frames,"swing","Swing timer","Show melee or ranged attack timing.",function() return not DB.off.swing end,function(v) DB.off.swing=not v or nil;relayout() end)
+    check(frames,"hideBlizz","Hide Blizzard frames","Turning this off needs /reload to restore the default frames.",nil,function(v) DB.hideBlizz=v;if v then hideBlizzard() else say("/reload restores Blizzard frames.") end end)
+    local sizes=page("sizes","Sizes")
+    slider(sizes,"scale","Whole HUD",0.6,2,0.05,"%.2fx",function() return DB.scale end,function(v) DB.scale=v;relayout() end)
+    check(sizes,"customSizes","Separate sizes","Off by default. Turn on to resize each part.",nil,function(v) DB.customSizes=v;relayout();refresh() end)
+    for _,part in ipairs({{"target","Target frame"},{"player","Health and power"},{"alerts","Spell cues"},{"dots","Debuff timers"},{"casts","Cast bars"},{"cooldowns","Cooldown row"},{"helpers","Reminders and helper text"}}) do
+        local key,label=part[1],part[2]
+        slider(sizes,"size_"..key,label,0.6,2,0.05,"%.2fx",function() return DB.partSizes[key] or 1 end,
+            function(v) if DB.customSizes then DB.partSizes[key]=v;relayout() end end,true)
+    end
+    slider(sizes,"partySize","Party cooldown icons",20,44,2,"%d px",function() return DB.partyDefensives and DB.partyDefensives.size or 28 end,
+        function(v) DB.partyDefensives=DB.partyDefensives or {};DB.partyDefensives.size=v;if DBagsAlertsState.partyDefensives then DBagsAlertsState.partyDefensives.update() end end)
+    slider(sizes,"cursorSize","Cursor ring",24,120,4,"%d px",function() return DB.cursorSize or 48 end,
+        function(v) DB.cursorSize=v;if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end end)
+    button(sizes,"petSize","Pet size and position",function() if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end end)
+    button(sizes,"resetSizes","Reset separate sizes",function() for key in pairs(DB.partSizes) do DB.partSizes[key]=1 end;relayout();refresh() end)
+    local reminders=page("reminders","Reminders")
+    for _,entry in ipairs({{"buffNag","Missing buff","Remind me about Battle Shout and other upkeep buffs."},
+        {"stanceNag","Defensive Stance","Warn when tanking in the wrong stance."},{"foodNag","Food buff","Show food I can eat for the XP buff."},
+        {"stoneNag","Weapon stone","Remind me to sharpen or weight my weapon."},{"stoneNeed","Missing weapon stone","Show when I have no stone in my bags."},
+        {"advice","Rage tips","Show short rage-spending advice."},{"cursor","Cursor ring","Keep the cursor easy to find."},
+        {"cursorCombat","Cursor ring in combat only","Hide the ring outside combat."}}) do check(reminders,entry[1],entry[2],entry[3]) end
+    local alerts=page("alerts","Alerts")
+    for _,alert in ipairs(ALERTS) do
+        local key=alert.key;local text=PLAIN[key] or {key,""}
+        check(alerts,"alert_"..key,text[1],text[2],function() return not DB.off[key] end,function(v) DB.off[key]=not v or nil;relayout() end)
+    end
+    check(alerts,"cooldowns","Cooldown row","Show learned cooldowns below your bars.",function() return not DB.off.cooldowns end,function(v) DB.off.cooldowns=not v or nil;relayout() end)
+    local thresholds=page("thresholds","Class settings")
+    slider(thresholds,"lowHp","Low health",10,80,5,"%d%%",function() return DB.lowHp end,function(v) DB.lowHp=v end)
+    if CLASS=="WARRIOR" then
+        slider(thresholds,"dumpAt","Spend rage",30,100,5,"%d",function() return DB.dumpAt end,function(v) DB.dumpAt=v;relayout() end)
+        slider(thresholds,"dumpTank","Spend rage while taking heavy hits",50,100,5,"%d",function() return DB.dumpTank or 90 end,function(v) DB.dumpTank=v end)
+        slider(thresholds,"sunderGoal","Sunder stacks on normal mobs",0,5,1,"%d",function() return DB.sunderGoal end,function(v) DB.sunderGoal=v end)
+    else
+        slider(thresholds,"lowMana","Low mana",5,60,5,"%d%%",function() return DB.lowMana end,function(v) DB.lowMana=v end)
+        if CLASS=="WARLOCK" then slider(thresholds,"shardGoal","Keep Soul Shards",1,20,1,"%d",function() return DB.shardGoal or 5 end,function(v) DB.shardGoal=v end) end
+        if CLASS=="PALADIN" then check(thresholds,"tank","Tank mode","Use tank buff reminders.") end
+    end
+    local group=page("group","Group")
+    button(group,"healer","Healer checks",function() if DBagsAlertsState.openHealerSettings then DBagsAlertsState.openHealerSettings() end end)
+    button(group,"party","Party cooldowns",function() if DBagsAlertsState.openPartyDefensives then DBagsAlertsState.openPartyDefensives() end end)
+    button(group,"groupRange","Group distance warning",function() if DBagsAlertsState.openGroupRange then DBagsAlertsState.openGroupRange() end end)
+    button(group,"follow","Follow buddy",function() if DBagsAlertsState.openFollowBuddy then DBagsAlertsState.openFollowBuddy() end end)
+    local tools=page("tools","Tools")
+    button(tools,"pets","Pet controls",function() if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end end)
+    if CLASS_MACROS[CLASS] then button(tools,"macros","Create or update macros",makeMacros) end
+    button(tools,"debug","Debug and Lua errors",function() if DBagsAlertsDebug then DBagsAlertsDebug.open() end end)
+    for _,page in pairs(pages) do
+        local height=math.max(460,-page.y+24);page.body:SetHeight(height)
+        local scrollbar=rawget(page.scroll,"ScrollBar")
+        if scrollbar then scrollbar:SetShown(height>494) end
+    end
+    outer.refresh=refresh;selectPage(DB.settingsPage or "display")
+    if UISpecialFrames then table.insert(UISpecialFrames,"DBagsAlertsSettings") end
+    DBagsAlertsState.settingsFrame=outer
     return outer
 end
 

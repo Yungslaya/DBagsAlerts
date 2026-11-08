@@ -52,7 +52,7 @@ state.frame = hud
 local pendingUntil, noticeUntil
 local function show(title, name, r,g,b)
     hud.title:SetText(title); hud.title:SetTextColor(r,g,b); hud.name:SetText(name or "")
-    hud:SetScale(DBagsAlertsDB.scale or 1);hud:EnableMouse(not config().statusLocked);hud:Show()
+    hud:SetScale((DBagsAlertsDB.scale or 1) * (DBagsAlertsState.partScale and DBagsAlertsState.partScale("helpers") or 1));hud:EnableMouse(not config().statusLocked);hud:Show()
 end
 local function apply()
     local c=config();local typed=c.name:match("^%s*(.-)%s*$")
