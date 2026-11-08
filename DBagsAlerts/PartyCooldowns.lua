@@ -117,21 +117,37 @@ local function observedEntries(unit)
 end
 local function senderUnit(sender)
  sender=canonical(sender); if not sender then return end
- local found
+ -- Forever names can be rendered with a space or a hyphen between their parts.
+ -- Match complete normalized names only, and reject any ambiguous short name.
+ local compact=sender:gsub("%-","")
+ local found,foundKey
  for i=0,4 do
   local unit=i==0 and "player" or ("party"..i)
   if plain(UnitExists(unit)) then
    local full,short=identity(unit)
-   if sender==full then return unit,full end
-   if sender==short then if found then return end; found=unit end
+   local display=UnitName and canonical(UnitName(unit))
+   local matches=sender==full or sender==short or sender==display
+      or (full and compact==full:gsub("%-",""))
+      or (short and compact==short:gsub("%-",""))
+      or (display and compact==display:gsub("%-",""))
+   if matches then
+    if found and found~=unit then return end
+    found,foundKey=unit,full
+   end
   end
  end
- if found then return found,identity(found) end
+ return found,foundKey
 end
 state.summary=function()
  local peers=0;for _,peer in pairs(state.peers) do if GetTime()-peer.at<=15 then peers=peers+1 end end
  return string.format("CD sync v2: %d peers; %d known; %d sent / %d received; %d casts / %d buffs; %d restricted casts",
   peers,#(state.known or {}),state.stats.sent,state.stats.received,state.stats.casts,state.stats.auras,state.stats.restricted)
+  .."; send result="..tostring(state.lastSendResult or "not attempted")
+  .."; failures="..tostring(state.sendFailures or 0)
+  .."; prefix="..tostring(state.prefixResult or "not registered")
+  .."; outgoing restricted="..tostring(state.outgoingRestricted)
+  .."; incoming="..tostring(state.incoming or 0).."; unmatched sender="..tostring(state.unmatchedSender or 0)
+  ..(state.lastReceiveIssue and ("; "..state.lastReceiveIssue) or "")
 end
 local function rebuild()
  local _,class=UnitClass("player"); class=plain(class)
@@ -218,14 +234,28 @@ local function transmit(message)
  local c=DBagsAlertsDB and DBagsAlertsDB.partyDefensives
  if not c or c.share==false then return end
  if C_ChatInfo and C_ChatInfo.SendAddonMessage then
-  C_ChatInfo.SendAddonMessage(state.prefix,message,channel());state.stats.sent=state.stats.sent+1
+  if C_ChatInfo.AreOutgoingAddonChatMessagesRestricted then
+   local ok,restricted=pcall(C_ChatInfo.AreOutgoingAddonChatMessagesRestricted)
+   state.outgoingRestricted=ok and plain(restricted) or nil
+   if state.outgoingRestricted==true then state.lastSendResult="Restricted by game";return end
+  end
+  local ok,result=pcall(C_ChatInfo.SendAddonMessage,state.prefix,message,channel())
+  state.lastSendResult=ok and (plain(result) or "no result") or "send failed"
+  local success=Enum and Enum.SendAddonMessageResult and Enum.SendAddonMessageResult.Success
+  if ok and (result==nil or (not secret(result) and (result==true or result==success or result==0))) then
+   state.stats.sent=state.stats.sent+1
+  else state.sendFailures=(state.sendFailures or 0)+1 end
  end
 end
 local function readMessage(prefix,message,distribution,sender)
- if (prefix~=state.prefix and prefix~=state.legacyPrefix) or not scope() or (distribution~="PARTY" and distribution~="INSTANCE_CHAT") then return end
+ if prefix~=state.prefix and prefix~=state.legacyPrefix then return end
+ state.incoming=(state.incoming or 0)+1
+ if not scope() then state.lastReceiveIssue="Report arrived outside tracker scope";return end
+ if distribution~="PARTY" and distribution~="INSTANCE_CHAT" then state.lastReceiveIssue="Unsupported report channel";return end
  if secret(message) or type(message)~="string" or #message>250 then return end
  local unit,key=senderUnit(sender)
- if not unit or unit=="player" then return end
+ if not unit then state.unmatchedSender=(state.unmatchedSender or 0)+1;state.lastReceiveIssue="Sender name did not uniquely match a party member";return end
+ if unit=="player" then return end
  if message=="Q" then state.force=true;return end
  local epoch,seq,body=message:match("^S:(%d+):(%d+):(.*)$")
  seq=tonumber(seq);if not epoch or not seq then return end
@@ -238,7 +268,11 @@ local function readMessage(prefix,message,distribution,sender)
   id,remaining,duration=tonumber(id),tonumber(remaining),tonumber(duration)
   if not id or id<1 or id>10000000 or not remaining or remaining>864000 or duration>864000 or remaining>duration+1 or seen[id] or #entries>=6 then return end
   local name=plain(C_Spell.GetSpellName(id))
-  if type(name)~="string" or not allowed[name] then return end
+  -- Base defensive IDs can be validated without a cached remote spell name.
+  if type(name)~="string" then
+   for _,profile in ipairs(profiles[class] or {}) do if id==profile[2] then name=profile[1];break end end
+  end
+  if type(name)~="string" or not allowed[name] then state.lastReceiveIssue="Unknown defensive spell ID "..id;return end
   local estimated=status=="E" or status=="T"
   entries[#entries+1]={id=id,name=name,status=status=="E" and "C" or status=="T" and "R" or status,
    remaining=remaining/10,duration=duration/10,at=GetTime(),estimated=estimated};seen[id]=true
@@ -273,12 +307,25 @@ state.get=function(unit)
 end
 local elapsed,lastSend,lastBody=0,-100,nil
 local frame=CreateFrame("Frame");state.driver=frame
-for _,event in ipairs({"PLAYER_LOGIN","PLAYER_ENTERING_WORLD","GROUP_ROSTER_UPDATE","SPELLS_CHANGED","SPELL_UPDATE_COOLDOWN","UNIT_SPELLCAST_SUCCEEDED","CHAT_MSG_ADDON"}) do frame:RegisterEvent(event) end
+for _,event in ipairs({"PLAYER_LOGIN","PLAYER_ENTERING_WORLD","GROUP_ROSTER_UPDATE","SPELLS_CHANGED","PLAYER_REGEN_ENABLED","SPELL_UPDATE_COOLDOWN","UNIT_SPELLCAST_SUCCEEDED","CHAT_MSG_ADDON"}) do frame:RegisterEvent(event) end
 frame:SetScript("OnEvent",function(_,event,...)
  if event=="CHAT_MSG_ADDON" then readMessage(...);return end
  if event=="UNIT_SPELLCAST_SUCCEEDED" then
   local unit,_,castID=...;observe(unit,castID)
   if unit~="player" then return end
+  -- A readable successful own cast confirms the actual trained spell/rank even
+  -- when the spellbook snapshot was incomplete at login or after learning it.
+  if type(castID)=="number" and not secret(castID) then
+   local castName=plain(C_Spell.GetSpellName(castID))
+   for _,profile in ipairs(profileFor("player")) do
+    if castID==profile[2] or castName==profile[1] then
+     state.known=state.known or {};local exists=false
+     for _,entry in ipairs(state.known) do if entry.name==profile[1] then entry.id=castID;exists=true;break end end
+     if not exists then state.known[#state.known+1]={id=castID,name=profile[1]} end
+     break
+    end
+   end
+  end
   if secret(castID) then
    state.confirmed={}
   elseif type(castID)=="number" then
@@ -291,9 +338,12 @@ frame:SetScript("OnEvent",function(_,event,...)
   end
  end
  if event=="PLAYER_LOGIN" then
-  if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then C_ChatInfo.RegisterAddonMessagePrefix(state.prefix);C_ChatInfo.RegisterAddonMessagePrefix(state.legacyPrefix) end
+  if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+   state.prefixResult=plain(C_ChatInfo.RegisterAddonMessagePrefix(state.prefix))
+   C_ChatInfo.RegisterAddonMessagePrefix(state.legacyPrefix)
+  end
  end
- if event=="PLAYER_LOGIN" or event=="SPELLS_CHANGED" or event=="PLAYER_ENTERING_WORLD" then
+ if event=="PLAYER_LOGIN" or event=="SPELLS_CHANGED" or event=="PLAYER_ENTERING_WORLD" or event=="PLAYER_REGEN_ENABLED" then
   state.rebuild=true;state.rebuildAt=event=="SPELLS_CHANGED" and GetTime()+0.5 or 0
  end
  if event=="GROUP_ROSTER_UPDATE" or event=="PLAYER_ENTERING_WORLD" then
@@ -313,7 +363,9 @@ frame:SetScript("OnUpdate",function(_,dt)
   state.peers={};state.own={};state.observed={};state.auraSeen={};state.wasActive=false;return
  end
  if not state.wasActive then state.wasActive=true;state.request=true;state.rebuild=true;state.rebuildAt=0;state.force=true end
- if state.rebuild and GetTime()>=(state.rebuildAt or 0) then rebuild();state.rebuild=false end
+ -- Stance changes fire SPELLS_CHANGED during combat. Keep the last readable
+ -- spellbook rather than replacing the shared list with a restricted/empty scan.
+ if state.rebuild and not InCombatLockdown() and GetTime()>=(state.rebuildAt or 0) then rebuild();state.rebuild=false end
  local now=GetTime();local body=payload(sample())
  if now-lastSend<0.5 then return end
  if state.request then transmit("Q");state.request=false end

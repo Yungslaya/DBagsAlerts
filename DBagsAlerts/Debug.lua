@@ -75,6 +75,12 @@ function D.report()
  local c=config();local out={"DBagsAlerts "..safe(version()),context(),"Debug recording: "..safe(c.enabled)}
  local cd=DBagsAlertsState and DBagsAlertsState.partyCooldowns
  if cd and cd.summary then out[#out+1]=cd.summary() end
+ local shared=DBagsAlertsDB and DBagsAlertsDB.partyDefensives or {}
+ out[#out+1]="Party cooldown display: "..safe(shared.enabled).."; sharing: "..safe(shared.share)
+ local healer=DBagsAlertsState and DBagsAlertsState.healerMana
+ local range=DBagsAlertsState and DBagsAlertsState.groupRange
+ if healer then out[#out+1]="Healer checks: "..safe(healer.status) end
+ if range then out[#out+1]="Group range: "..safe(range.status) end
  for label,error in pairs(D.guards) do out[#out+1]="Guard "..label..": "..error end
  out[#out+1]="Recent events (bounded; no chat text):"
  for _,event in ipairs(c.events) do out[#out+1]=event end
