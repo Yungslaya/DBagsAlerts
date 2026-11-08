@@ -1831,7 +1831,7 @@ threatBar.ok:Hide(); threatBar.bad:Hide()   -- color says it: green = tanking, r
 local CLASS_CDS = {
     -- Rotation buttons are left out: the big icons already tell you when to press them.
     -- This row is for emergency + utility cooldowns you want to know are ready in advance.
-    WARRIOR = { "Shield Wall", "Last Stand", "Challenging Shout", "Concussion Blow",
+    WARRIOR = { "Shield Wall", "Last Stand", "Retaliation", "Challenging Shout", "Concussion Blow",
         "Intimidating Shout", "Berserker Rage" },
     PALADIN = { "Templar's Bulwark", "Divine Protection", "Divine Shield", "Lay on Hands",
         "Blessing of Protection", "Blessing of Freedom" },
@@ -3192,6 +3192,9 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         f.top = CreateFrame("Frame", nil, f); f.top:SetAllPoints(); f.top:SetFrameLevel(f:GetFrameLevel() + 2)
         f.num = f.top:CreateFontString(nil, "OVERLAY"); styleText(f.num, 17, 1, 1, 1)
         f.num:SetPoint("CENTER", 0, 1)
+        f.nativeCD = CreateFrame("Cooldown", nil, f.top, "CooldownFrameTemplate")
+        f.nativeCD:SetAllPoints(); f.nativeCD:SetDrawEdge(false); f.nativeCD:SetDrawBling(false)
+        f.nativeCD:SetHideCountdownNumbers(false); f.nativeCD:Hide()
         f.bar = CreateFrame("StatusBar", nil, f.top)
         f.bar:SetPoint("BOTTOMLEFT"); f.bar:SetPoint("BOTTOMRIGHT"); f.bar:SetHeight(3)
         f.bar:SetStatusBarTexture(BAR_TEX); f.bar:SetMinMaxValues(0, 1)
@@ -3222,11 +3225,33 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         if want then f.refreshGlow:Show(); f.refreshPulse:Play()
         else f.refreshPulse:Stop(); f.refreshGlow:Hide() end
     end
+    DRU.targetAuraCache = {}
     local function dotLeft(name, now, key)
-        -- Own-cast history is readable. Do not scan secret aura fields every tick.
+        -- Re-read the current target, including DoTs applied before switching away.
+        -- Cache per spell; aura/target events invalidate it immediately.
+        local cached = DRU.targetAuraCache[name]
+        if not cached or now - cached.at >= 0.5 then
+            local real, aura = targetDebuff(name)
+            cached = {at=now, real=real, aura=aura}
+            DRU.targetAuraCache[name] = cached
+        end
+        local aura, real = cached.aura, cached.real
+        local length = durationOf(name)
+        if real == "on" and aura then
+            local exp, duration = plain(aura.expirationTime, nil), plain(aura.duration, nil)
+            if exp and exp > 0 then
+                return math.max(0, exp - now), (duration and duration > 0) and duration or length
+            end
+            local id = plain(aura.auraInstanceID, nil)
+            if id and C_UnitAuras.GetAuraDuration then
+                local obj = C_UnitAuras.GetAuraDuration("target", id)
+                if obj then return nil, length, obj end
+            end
+        end
         local t = DRU.dotAt[name]
         local at = name == "Rend" and rendAt[key] or (t and t[key])
-        local length = durationOf(name)
+        -- Readable absence wins after the short spell-landing grace period.
+        if real == "off" and not (at and now - at <= 1) then return nil, length end
         if at then return math.max(0, length - (now - at)), length end
         return nil, length
     end
@@ -3419,12 +3444,17 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         local key = ctx.hostile and targetKey()
         for _, f in ipairs(used) do
             f:SetShown(ctx.hostile and true or false)
-            local left, length
-            if ctx.hostile then left, length = dotLeft(f.name, now, key) end
+            local left, length, nativeDuration
+            if ctx.hostile then left, length, nativeDuration = dotLeft(f.name, now, key) end
             local refreshSoon = left ~= nil and length ~= nil and length > 0
                 and left <= length * (refreshAt[f.name] or 0)
-            setRefreshGlow(f, ctx.hostile and ctx.combat and (not left or left <= 0 or refreshSoon))
-            if left and left > 0 then
+            setRefreshGlow(f, ctx.hostile and ctx.combat and not nativeDuration and (not left or left <= 0 or refreshSoon))
+            f.nativeCD:SetShown(nativeDuration ~= nil)
+            if nativeDuration then
+                f.nativeCD:SetCooldownFromDurationObject(nativeDuration)
+                f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
+                f.num:SetText(""); f.bar:SetValue(0)
+            elseif left and left > 0 then
                 f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
                 f.num:SetFormattedText("%d", math.ceil(left))
                 f.bar:SetValue(length > 0 and left / length or 0)
@@ -4261,7 +4291,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         self:RegisterEvent("LEARNED_SPELL_IN_SKILL_LINE")
         self:RegisterEvent("PLAYER_REGEN_ENABLED")
         self:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
-        self:RegisterUnitEvent("UNIT_AURA", "player")
+        self:RegisterUnitEvent("UNIT_AURA", "player", "target")
         -- "something changed" events: they only set flags; the work happens once per frame
         local function reg(e, u1, u2)
             if u1 then pcall(self.RegisterUnitEvent, self, e, u1, u2) else pcall(self.RegisterEvent, self, e) end
@@ -4313,6 +4343,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_TARGET" then
         tDirty.tot = true
     elseif event == "PLAYER_TARGET_CHANGED" then
+        DRU.targetAuraCache = {}
         barsDirty.threat = true
         tDirty.all = true
         -- if the game hides mob IDs, all mobs share one memory slot: wipe it for the new mob
@@ -4347,6 +4378,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
             readSpeed()
         end
     elseif event == "UNIT_AURA" then
+        if ... == "target" then DRU.targetAuraCache = {} end
         auraDirty = true          -- read once on the next tick, not on every aura event
     elseif event == "PLAYER_REGEN_ENABLED" then
         readAll()

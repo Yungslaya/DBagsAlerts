@@ -35,27 +35,49 @@ local function frameUnit(frame)
     if type(unit) == "string" then return unit end
     if frame.GetAttribute then return plain(frame:GetAttribute("unit")) end
 end
+local function matches(frame, unit)
+    local token = frameUnit(frame)
+    if token == unit then return true end
+    return type(token) == "string" and UnitIsUnit and plain(UnitIsUnit(token, unit)) == true
+end
 local function findFrame(unit)
     -- Compact/raid-style party frames first; they include the player and can be role-sorted.
     for i = 1, 5 do
         local frame = _G["CompactPartyFrameMember" .. i]
-        if visible(frame) and frameUnit(frame) == unit then return frame end
+        if visible(frame) and matches(frame, unit) then return frame end
     end
     for i = 1, 40 do
         local frame = _G["CompactRaidFrame" .. i]
-        if visible(frame) and frameUnit(frame) == unit then return frame end
+        if visible(frame) and matches(frame, unit) then return frame end
     end
     local container = _G.CompactPartyFrame
     local frames = container and container.memberUnitFrames
     if readable(frames) then
         for _, frame in pairs(frames) do
-            if visible(frame) and frameUnit(frame) == unit then return frame end
+            if visible(frame) and matches(frame, unit) then return frame end
         end
     end
     local party = _G.PartyFrame
     for i = 1, 4 do
         local frame = party and party["MemberFrame" .. i] or _G["PartyMemberFrame" .. i]
         if visible(frame) and (frameUnit(frame) or ("party" .. i)) == unit then return frame end
+    end
+    -- Some layouts nest their compact members instead of exporting global names.
+    local budget = 80
+    local function search(parent, depth)
+        if not parent or depth > 3 or budget <= 0 then return end
+        budget = budget - 1
+        if visible(parent) and matches(parent, unit) then return parent end
+        if parent.GetChildren then
+            for _, child in ipairs({parent:GetChildren()}) do
+                local found = search(child, depth + 1)
+                if found then return found end
+            end
+        end
+    end
+    for _, name in ipairs({"CompactPartyFrame", "PartyFrame", "CompactRaidFrameContainer"}) do
+        local found = search(_G[name], 0)
+        if found then return found end
     end
     if unit == "player" and visible(_G.PlayerFrame) then return PlayerFrame end
 end
@@ -89,6 +111,45 @@ end
 local function hideAll()
     for _, row in pairs(state.rows) do row:Hide() end
 end
+-- Older Forever spells may not carry the retail BIG_DEFENSIVE category.
+-- Only readable identities are matched; hidden fields are never decoded.
+local defensiveNames = {}
+for _, name in ipairs({"Shield Wall", "Last Stand", "Shield Block", "Retaliation",
+    "Barkskin", "Frenzied Regeneration", "Survival Instincts", "Divine Protection",
+    "Divine Shield", "Blessing of Protection", "Templar's Bulwark", "Evasion",
+    "Cloak of Shadows", "Ice Block", "Ice Barrier", "Mana Shield", "Deterrence",
+    "Feign Death", "Dispersion", "Pain Suppression", "Guardian Spirit",
+    "Power Word: Shield", "Sacrifice", "Soul Link", "Shadow Ward", "Stoneform",
+    "Astral Shift", "Shamanistic Rage"}) do defensiveNames[name] = true end
+local defensiveIDs = {[871]=true,[12975]=true,[2565]=true,[22812]=true,[22842]=true,
+    [498]=true,[642]=true,[1022]=true,[5277]=true,[45438]=true,[19263]=true,
+    [33206]=true,[47585]=true,[47788]=true,[48707]=true,[48792]=true}
+local function defensiveAuras(unit, api)
+    local result, seen = {}, {}
+    local ok, ids = pcall(api.GetUnitAuraInstanceIDs, unit, "HELPFUL|BIG_DEFENSIVE", 3)
+    if ok and readable(ids) then
+        for _, id in ipairs(ids) do
+            if not secret(id) and type(id) == "number" then
+                local aura = api.GetAuraDataByAuraInstanceID(unit, id)
+                if readable(aura) then result[#result + 1] = {auraInstanceID=id, icon=aura.icon, duration=aura.duration, expirationTime=aura.expirationTime}; seen[id] = true end
+            end
+        end
+    end
+    if #result < 3 and api.GetAuraDataByIndex then
+        for i = 1, 80 do
+            local aura = api.GetAuraDataByIndex(unit, i, "HELPFUL")
+            if not readable(aura) then break end
+            local id, spellID, name = plain(aura.auraInstanceID), plain(aura.spellId), plain(aura.name)
+            if type(id) == "number" and not seen[id] and
+                ((type(spellID) == "number" and defensiveIDs[spellID]) or
+                 (type(name) == "string" and defensiveNames[name])) then
+                result[#result + 1] = aura; seen[id] = true
+                if #result >= 3 then break end
+            end
+        end
+    end
+    return result
+end
 local function paint(unit, anchor, c)
     local row = rowFor(unit)
     if row.anchor ~= anchor or row.size ~= c.size or row.left ~= c.left then
@@ -103,13 +164,12 @@ local function paint(unit, anchor, c)
         row.anchor, row.size, row.left = anchor, c.size, c.left
     end
     local api = C_UnitAuras
-    local ids = api.GetUnitAuraInstanceIDs(unit, "HELPFUL|BIG_DEFENSIVE", 3)
-    if not readable(ids) then row:Hide(); return 0 end
+    local auras = defensiveAuras(unit, api)
     local count = 0
-    for _, id in ipairs(ids) do
+    for _, aura in ipairs(auras) do
         if count >= 3 then break end
-        if not secret(id) and type(id) == "number" then
-            local aura = api.GetAuraDataByAuraInstanceID(unit, id)
+        local id = plain(aura.auraInstanceID)
+        if type(id) == "number" then
             if readable(aura) then
                 count = count + 1
                 local icon = row.icons[count]
@@ -233,4 +293,11 @@ DBagsAlertsState.openPartyDefensives = function()
     refresh(); window.status:SetText(state.status); DBagsAlertsState.showSettingsWindow(window, "party")
 end
 SLASH_DBAGSPARTY1 = "/dbaparty"
-SlashCmdList.DBAGSPARTY = DBagsAlertsState.openPartyDefensives
+SlashCmdList.DBAGSPARTY = function(msg)
+    if msg and msg:lower():match("^status") then
+        refresh()
+        print("DBagsAlerts: " .. state.status .. ". Active buffs only; not ready cooldowns.")
+        return
+    end
+    DBagsAlertsState.openPartyDefensives()
+end

@@ -46,6 +46,31 @@ for cls in ("WARRIOR","PALADIN","DRUID","WARLOCK","PRIEST","SHAMAN","MAGE","ROGU
       MODE.secret=true;s.update()
       assert(s.rows.party1:IsShown(),"hidden aura fields blocked display")
       MODE.secret=false
+      -- Forever can expose readable defensive auras without retail categories.
+      local originalIDs=C_UnitAuras.GetUnitAuraInstanceIDs
+      local originalIndex=C_UnitAuras.GetAuraDataByIndex
+      C_UnitAuras.GetUnitAuraInstanceIDs=function() return {} end
+      C_UnitAuras.GetAuraDataByIndex=function(unit,index,filter)
+          assert(filter=="HELPFUL")
+          if index==1 then return {auraInstanceID=700,spellId=19740,name="Blessing of Might",icon=1} end
+          if index==2 then return {auraInstanceID=701,spellId=2565,name="Shield Block",icon=2,duration=5,expirationTime=10} end
+      end
+      s.update()
+      assert(s.rows.party1:IsShown() and s.rows.party1.icons[1].auraID==701,"uncategorized defensive missing")
+      assert(not s.rows.party1.icons[2]:IsShown(),"ordinary buff treated as defensive")
+      -- Matching by readable localized name also covers Forever-specific spell IDs.
+      C_UnitAuras.GetAuraDataByIndex=function(unit,index)
+          if index==1 then return {auraInstanceID=702,spellId=999999,name="Templar's Bulwark",icon=3} end
+      end
+      s.update();assert(s.rows.party1.icons[1].auraID==702,"Forever-specific defensive missing")
+      -- Nested member frames need not be exported under the standard global name.
+      local nested=CompactPartyFrameMember3;CompactPartyFrameMember3=nil
+      CompactPartyFrame=CreateFrame("Frame")
+      CompactPartyFrame.GetChildren=function() return nested end
+      s.update();assert(s.rows.party1.anchor==nested and s.rows.party1:IsShown(),"nested party frame missing")
+      CompactPartyFrame=nil;CompactPartyFrameMember3=nested
+      C_UnitAuras.GetUnitAuraInstanceIDs=originalIDs
+      C_UnitAuras.GetAuraDataByIndex=originalIndex
       DEFENSIVES.party1={};s.update();assert(not s.rows.party1:IsShown(),"expired defensive stayed visible")
       DEFENSIVES.party1={203};s.update()
       DBagsAlertsDB.partyDefensives.left=true;DBagsAlertsDB.partyDefensives.size=40;s.update()
