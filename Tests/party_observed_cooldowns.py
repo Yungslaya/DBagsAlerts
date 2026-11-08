@@ -40,7 +40,7 @@ for cls,(name,spell_id,duration) in cases.items():
   chunk=lua.eval('function(s) return assert(loadstring(s)) end')((root/'DBagsAlerts'/file).read_text(encoding='utf-8-sig'))
   lua.execute('local chunk=...;chunk("DBagsAlerts",{})',chunk)
  lua.execute('''
-  FIRE("PLAYER_LOGIN");FIRE("PLAYER_ENTERING_WORLD");TICK();TICK()
+  DBagsAlertsDB=DBagsAlertsDB or {};DBagsAlertsDB.partyDefensives={enabled=true,placeholders=true};FIRE("PLAYER_LOGIN");FIRE("PLAYER_ENTERING_WORLD");TICK();TICK()
   local state=DBagsAlertsState.partyCooldowns
   local function find()
    for _,e in ipairs(state.get("party1")) do if e.name==CDNAME then return e end end
@@ -57,6 +57,18 @@ for cls,(name,spell_id,duration) in cases.items():
   assert(find().status=="R" and find().estimated,"expired timer did not become estimated ready")
   FIRE("UNIT_SPELLCAST_SUCCEEDED","party1",nil,999999)
   assert(find().status=="C" and find().remaining==BASECD,"higher-rank cast did not restart timer")
+  -- Missed/restricted cast events: a readable defensive buff starts a timer.
+  state.observed={};state.auraSeen={};MODE.secret=false
+  local auraExpiry=GetTime()+10
+  C_UnitAuras.GetUnitAuraInstanceIDs=function(u) return u=="party1" and {991} or {} end
+  C_UnitAuras.GetAuraDataByAuraInstanceID=function() return {auraInstanceID=991,spellId=CDID,name=CDNAME,icon=123,duration=10,expirationTime=auraExpiry} end
+  DBagsAlertsState.partyDefensives.update()
+  assert(find().status=="C" and find().estimated and find().remaining==BASECD,"buff-only observation did not track cooldown")
+  ADVANCE(3);DBagsAlertsState.partyDefensives.update()
+  assert(find().remaining==BASECD-3,"scanning the same buff restarted the cooldown")
+  C_UnitAuras.GetUnitAuraInstanceIDs=function() return {} end
+  ADVANCE(8);DBagsAlertsState.partyDefensives.update()
+  assert(find().remaining==BASECD-11,"buff falling off erased cooldown")
   DBagsAlertsDB.partyDefensives.placeholders=false
   assert(#state.get("party1")==1,"hide placeholders removed tracked spell or kept unobserved spells")
   DBagsAlertsDB.partyDefensives.placeholders=true

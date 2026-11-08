@@ -4,7 +4,25 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 > **WIP:** it's being built and tested while leveling. Expect changes and rough edges.
 
+## Party cooldown repair
+
+`/dbaparty` separates Show party cooldowns from Share my cooldowns. Sharing starts on in five-player dungeons, even when the sender's own icon display is off; switch it off to opt out. No traffic outside the dungeon scope.
+
+No-addon members: readable casts and active defensive buffs seed estimated timers. Repeated buff scans do not restart a timer. Hidden identities are not decoded; missed uses, talents and resets can affect estimates.
+
+Addon members: v2 messages carry readable cooldown snapshots and readiness, with a tagged own-cast estimate if live timing is restricted. Exact and estimated states stay distinct. Upgrade both clients to this build for the new messages; v1 reports are still accepted. `/dbaparty status` and `/dbadebug` include sync counters to diagnose missing reports or restricted casts.
+
+## Starter setup (starter setup)
+
+New installs keep the combat HUD, readable bars, spell cues, DoT timers and buff reminder. Optional target/cast replacement frames, cursor ring, aggro dots, stance/food/stone reminders, healer/party checks, party-distance screen flashes, pet replacement frame and follow helper start off. Native Blizzard frames stay visible. Custom sizing and sounds start off.
+
+`/dba` → Display → Use starter setup, or `/dba starter`, previews this on an existing character. `/dba restore` restores the previous feature choices. `/reload` completes the frame change. Your macros, custom sizes/positions, timers and chosen follow name are retained. Existing users are never switched automatically.
+
+Combat coverage: Protection Warrior; Protection Paladin with basic Retribution damage-mode cues; Feral Bear/Cat and Balance Druid; shared Affliction/Demonology/Destruction Warlock leveling cues. Restoration has basic upkeep/self-care, not party-healing guidance. Hunter has pet tools only; no Hunter rotation.
+
 ## What's new
+
+- **1.0.16:** Starter setup with optional extras, preserved existing preferences, and reversible presentation presets. See the release notes for fixes and validation.
 
 - **1.0.15:** Fixed the Druid DoT display querying aura IDs when Forever blocks aura access. Restricted mode uses readable own-cast timers; native auras resume when permitted. HUD layout changes, including form changes, wait until combat ends because secure helper buttons protect the shared anchor. Regression checks now forbid aura API calls while restricted and protected anchor changes in combat. `/reload` after updating; in-game confirmation pending.
 

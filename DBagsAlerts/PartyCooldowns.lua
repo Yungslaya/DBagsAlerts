@@ -23,16 +23,20 @@ local lists={}
 for class, spells in pairs(profiles) do
  lists[class]={};for _,spell in ipairs(spells) do lists[class][#lists[class]+1]=spell[1] end
 end
-local state={peers={},own={},confirmed={},used={},observed={},prefix="DBACD1"}
+local state={peers={},own={},confirmed={},used={},observed={},prefix="DBACD2",legacyPrefix="DBACD1",stats={casts=0,restricted=0,auras=0,sent=0,received=0}}
 DBagsAlertsState.partyCooldowns=state
 local function scope()
  local c=DBagsAlertsDB and DBagsAlertsDB.partyDefensives
- if c and c.enabled==false then return false end
+ if not c then
+  DBagsAlertsDB=DBagsAlertsDB or {};DBagsAlertsDB.partyDefensives={};c=DBagsAlertsDB.partyDefensives
+ end
+ if c.share==nil then c.share=true end
+ if not c.enabled and not c.share then return false end
  if not IsInGroup() or IsInRaid() then return false end
  local n=plain(GetNumGroupMembers()); local inside,kind=IsInInstance()
  return n and n>=2 and n<=5 and plain(inside)==true and plain(kind)=="party"
 end
-local function canonical(s) return type(s)=="string" and s:lower():gsub("%s","") or nil end
+local function canonical(s) return not secret(s) and type(s)=="string" and s:lower():gsub("%s","") or nil end
 local function identity(unit)
  local name,realm
  if UnitFullName then name,realm=UnitFullName(unit) else name=UnitName(unit) end
@@ -45,13 +49,16 @@ local function profileFor(unit)
  local _,class=UnitClass(unit);return profiles[plain(class)] or {}
 end
 local function observe(unit,castID)
- if not scope() or secret(castID) or type(castID)~="number" or type(unit)~="string" then return end
+ if not scope() then return end
+ if secret(castID) then state.stats.restricted=state.stats.restricted+1;return end
+ if type(castID)~="number" or secret(unit) or type(unit)~="string" then return end
  if unit~="player" and not unit:match("^party[1-4]$") then return end
  if plain(UnitExists(unit))~=true then return end
  local key=identity(unit);if not key then return end
  local name=plain(C_Spell.GetSpellName(castID))
  for _,profile in ipairs(profileFor(unit)) do
   if castID==profile[2] or (name and name==profile[1]) then
+   state.stats.casts=state.stats.casts+1
    state.observed[key]=state.observed[key] or {}
    state.observed[key][profile[1]]={id=castID,at=GetTime(),duration=profile[4]}
    if DBagsAlertsDebug then DBagsAlertsDebug.note("Observed "..unit.." "..profile[1]) end
@@ -60,6 +67,32 @@ local function observe(unit,castID)
   end
  end
 end
+local function observeAura(unit,aura)
+ if not scope() or not data(aura) then return end
+ local id,name,expires,length=plain(aura.spellId),plain(aura.name),plain(aura.expirationTime),plain(aura.duration)
+ local key=identity(unit);if not key then return end
+ for _,profile in ipairs(profileFor(unit)) do
+  if (type(id)=="number" and id==profile[2]) or (type(name)=="string" and name==profile[1]) then
+   local token=plain(aura.auraInstanceID)
+   state.auraSeen=state.auraSeen or {};state.auraSeen[key]=state.auraSeen[key] or {}
+   local marker=type(expires)=="number" and expires>0 and expires or token
+   if marker and state.auraSeen[key][profile[1]]==marker then return end
+   state.observed[key]=state.observed[key] or {}
+   local old=state.observed[key][profile[1]]
+   local at=GetTime()
+   if type(expires)=="number" and type(length)=="number" and length>0 then at=math.min(at,expires-length) end
+   -- No public timestamp: record first sighting once, never restart every scan.
+   if not marker and old then return end
+   state.auraSeen[key][profile[1]]=marker
+   if not old or at>old.at+0.5 then
+    state.observed[key][profile[1]]={id=type(id)=="number" and id or profile[2],at=at,duration=profile[4],source="aura"}
+    state.stats.auras=state.stats.auras+1
+   end
+   return
+  end
+ end
+end
+state.observeAura=observeAura
 state.observe=observe
 local function observedEntries(unit)
  local result={};local key=identity(unit);local history=key and state.observed[key] or {}
@@ -95,11 +128,16 @@ local function senderUnit(sender)
  end
  if found then return found,identity(found) end
 end
+state.summary=function()
+ local peers=0;for _,peer in pairs(state.peers) do if GetTime()-peer.at<=15 then peers=peers+1 end end
+ return string.format("CD sync v2: %d peers; %d known; %d sent / %d received; %d casts / %d buffs; %d restricted casts",
+  peers,#(state.known or {}),state.stats.sent,state.stats.received,state.stats.casts,state.stats.auras,state.stats.restricted)
+end
 local function rebuild()
  local _,class=UnitClass("player"); class=plain(class)
  local wanted={}; for _,name in ipairs(lists[class] or {}) do wanted[name]=true end
  local known={}; local api=C_SpellBook
- if api and api.GetNumSpellBookSkillLines and api.GetSpellBookItemInfo then
+ if api and api.GetNumSpellBookSkillLines and api.GetSpellBookSkillLineInfo and api.GetSpellBookItemInfo then
   local bank=Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player or 0
   for line=1,api.GetNumSpellBookSkillLines() do
    local info=api.GetSpellBookSkillLineInfo(line)
@@ -108,7 +146,10 @@ local function rebuild()
      local item=api.GetSpellBookItemInfo(slot,bank)
      if data(item) then
       local name,id=plain(item.name),plain(item.spellID)
-      if type(name)=="string" and wanted[name] and type(id)=="number" then known[name]=id end
+      if type(name)~="string" and type(id)=="number" then name=plain(C_Spell.GetSpellName(id)) end
+      local kinds=Enum and Enum.SpellBookItemType
+      local future=kinds and kinds.FutureSpell and plain(item.itemType)==kinds.FutureSpell
+      if not future and type(name)=="string" and wanted[name] and type(id)=="number" and plain(item.isOffSpec)~=true then known[name]=id end
      end
     end
    end
@@ -138,15 +179,23 @@ local function sample()
   -- own-cast event invalidates readiness immediately; expiry never guesses ready.
   if state.used[known.id] and now-state.used[known.id]<0.5 then entry.status="U" end
   if entry.status~="U" then
-   state.confirmed[known.id]={status=entry.status,remaining=entry.remaining,duration=entry.duration,at=now}
+   state.confirmed[known.id]={status=entry.status,remaining=entry.remaining,duration=entry.duration,at=now,estimated=entry.estimated}
   else
    local previous=state.confirmed[known.id]
    if previous then
-    if previous.status=="R" then entry.status="R"
+    if previous.status=="R" then entry.status="R";entry.estimated=previous.estimated
     elseif previous.status=="C" then
      local remaining=math.max(0,previous.remaining-(now-previous.at))
-     if remaining>0 then entry.status="C";entry.remaining=remaining;entry.duration=previous.duration end
+     if remaining>0 then entry.status="C";entry.remaining=remaining;entry.duration=previous.duration;entry.estimated=previous.estimated end
     end
+   end
+  end
+  if entry.status=="U" then
+   local key=identity("player");local seen=key and state.observed[key] and state.observed[key][known.name]
+   if seen then
+    entry.remaining=math.max(0,seen.at+seen.duration-now);entry.duration=seen.duration
+    entry.status=entry.remaining>0 and "C" or "R";entry.estimated=true
+    entry.reason="Estimated from this player's own cast; live timing is restricted."
    end
   end
   out[#out+1]=entry
@@ -157,7 +206,7 @@ end
 local function payload(entries)
  local out={}
  for _,e in ipairs(entries) do
-  out[#out+1]=string.format("%d,%s,%d,%d",e.id,e.status,math.ceil((e.remaining or 0)*10),math.ceil((e.duration or 0)*10))
+  out[#out+1]=string.format("%d,%s,%d,%d",e.id,e.estimated and (e.status=="C" and "E" or e.status=="R" and "T" or "U") or e.status,math.ceil((e.remaining or 0)*10),math.ceil((e.duration or 0)*10))
  end
  return table.concat(out,";")
 end
@@ -166,10 +215,14 @@ local function channel()
 end
 local session=tostring(math.floor(GetTime()*1000));local sequence=0
 local function transmit(message)
- if C_ChatInfo and C_ChatInfo.SendAddonMessage then C_ChatInfo.SendAddonMessage(state.prefix,message,channel()) end
+ local c=DBagsAlertsDB and DBagsAlertsDB.partyDefensives
+ if not c or c.share==false then return end
+ if C_ChatInfo and C_ChatInfo.SendAddonMessage then
+  C_ChatInfo.SendAddonMessage(state.prefix,message,channel());state.stats.sent=state.stats.sent+1
+ end
 end
 local function readMessage(prefix,message,distribution,sender)
- if prefix~=state.prefix or not scope() or (distribution~="PARTY" and distribution~="INSTANCE_CHAT") then return end
+ if (prefix~=state.prefix and prefix~=state.legacyPrefix) or not scope() or (distribution~="PARTY" and distribution~="INSTANCE_CHAT") then return end
  if secret(message) or type(message)~="string" or #message>250 then return end
  local unit,key=senderUnit(sender)
  if not unit or unit=="player" then return end
@@ -181,13 +234,16 @@ local function readMessage(prefix,message,distribution,sender)
  local entries={};local seen={};local _,class=UnitClass(unit);class=plain(class)
  local allowed={};for _,name in ipairs(lists[class] or {}) do allowed[name]=true end
  for record in body:gmatch("[^;]+") do
-  local id,status,remaining,duration=record:match("^(%d+),([RCU]),(%d+),(%d+)$")
+  local id,status,remaining,duration=record:match("^(%d+),([RCUET]),(%d+),(%d+)$")
   id,remaining,duration=tonumber(id),tonumber(remaining),tonumber(duration)
   if not id or id<1 or id>10000000 or not remaining or remaining>864000 or duration>864000 or remaining>duration+1 or seen[id] or #entries>=6 then return end
   local name=plain(C_Spell.GetSpellName(id))
   if type(name)~="string" or not allowed[name] then return end
-  entries[#entries+1]={id=id,name=name,status=status,remaining=remaining/10,duration=duration/10,at=GetTime()};seen[id]=true
+  local estimated=status=="E" or status=="T"
+  entries[#entries+1]={id=id,name=name,status=status=="E" and "C" or status=="T" and "R" or status,
+   remaining=remaining/10,duration=duration/10,at=GetTime(),estimated=estimated};seen[id]=true
  end
+ state.stats.received=state.stats.received+1
  state.peers[key]={epoch=epoch,seq=seq,at=GetTime(),entries=entries}
  if DBagsAlertsState.partyDefensives then DBagsAlertsState.partyDefensives.update() end
 end
@@ -201,17 +257,18 @@ state.get=function(unit)
  for _,e in ipairs(observedEntries(unit)) do observations[e.name]=e end
  local result={}
  for _,e in ipairs(entries) do
-  local copy={id=e.id,name=e.name,status=e.status,duration=e.duration,remaining=e.remaining,at=e.at}
+  local copy={id=e.id,name=e.name,status=e.status,duration=e.duration,remaining=e.remaining,at=e.at,estimated=e.estimated,source="peer"}
   if GetTime()-at>15 then copy.status="U";copy.reason="Cooldown report expired."
   elseif copy.status=="C" then
    copy.remaining=math.max(0,e.remaining-(GetTime()-e.at))
-   if copy.remaining<=0 then copy.status="U";copy.reason="Waiting for readiness confirmation." end
+   if copy.remaining<=0 then copy.status=e.estimated and "R" or "U";copy.reason="Waiting for live readiness confirmation." end
   end
   local observation=observations[e.name]
   if observation and not observation.placeholder and
    (copy.status=="U" or (copy.status=="R" and observation.castAt and observation.castAt>=(e.at or 0))) then copy=observation end
-  result[#result+1]=copy
+  result[#result+1]=copy;observations[e.name]=nil
  end
+ for _,e in pairs(observations) do if not e.placeholder then result[#result+1]=e end end
  return result
 end
 local elapsed,lastSend,lastBody=0,-100,nil
@@ -234,7 +291,7 @@ frame:SetScript("OnEvent",function(_,event,...)
   end
  end
  if event=="PLAYER_LOGIN" then
-  if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then C_ChatInfo.RegisterAddonMessagePrefix(state.prefix) end
+  if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then C_ChatInfo.RegisterAddonMessagePrefix(state.prefix);C_ChatInfo.RegisterAddonMessagePrefix(state.legacyPrefix) end
  end
  if event=="PLAYER_LOGIN" or event=="SPELLS_CHANGED" or event=="PLAYER_ENTERING_WORLD" then
   state.rebuild=true;state.rebuildAt=event=="SPELLS_CHANGED" and GetTime()+0.5 or 0
@@ -253,7 +310,7 @@ end)
 frame:SetScript("OnUpdate",function(_,dt)
  elapsed=elapsed+dt;if elapsed<0.25 then return end;elapsed=0
  if not scope() then
-  state.peers={};state.own={};state.observed={};state.wasActive=false;return
+  state.peers={};state.own={};state.observed={};state.auraSeen={};state.wasActive=false;return
  end
  if not state.wasActive then state.wasActive=true;state.request=true;state.rebuild=true;state.rebuildAt=0;state.force=true end
  if state.rebuild and GetTime()>=(state.rebuildAt or 0) then rebuild();state.rebuild=false end

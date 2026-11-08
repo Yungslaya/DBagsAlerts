@@ -50,7 +50,7 @@ for cls in ("WARLOCK","HUNTER","WARRIOR","PALADIN","DRUID","MAGE","PRIEST"):
         chunk=lua.eval('function(s) return assert(loadstring(s)) end')((root/'DBagsAlerts'/name).read_text(encoding="utf-8"))
         lua.execute('local chunk=...;chunk("DBagsAlerts",{})',chunk)
     lua.execute("""
-      FIRE("PLAYER_LOGIN")
+      DBagsAlertsDB=DBagsAlertsDB or {};DBagsAlertsDB.petPanel={enabled=true};FIRE("PLAYER_LOGIN")
       local s=DBagsAlertsState.petPanel
       s.update()
       assert(s.frame.attrs.unit=="pet" and s.frame.attrs["*type2"]=="togglemenu","native pet menu missing")

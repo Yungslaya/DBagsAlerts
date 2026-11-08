@@ -8,7 +8,7 @@ local function config()
     DBagsAlertsDB=DBagsAlertsDB or {}
     if type(DBagsAlertsDB.petPanel)~="table" then DBagsAlertsDB.petPanel={} end
     local c=DBagsAlertsDB.petPanel
-    if c.enabled==nil then c.enabled=true end
+    if c.enabled==nil then c.enabled=false end
     if c.locked==nil then c.locked=true end
     if c.utilities==nil then c.utilities=true end
     c.scale=math.max(0.7,math.min(1.6,tonumber(c.scale) or 1))

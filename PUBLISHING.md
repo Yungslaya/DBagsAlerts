@@ -1,5 +1,6 @@
-# Publishing rules
+# Release channels
 
-The owner's instruction: "publish" means a GitHub release for the Dragbags Addon Updater.
-
-Never upload or publish a new CurseForge release unless the owner is asked specifically about CurseForge and explicitly clicks Approve. General publishing approval does not authorize CurseForge uploads. Existing moderation-status checks may continue without uploading changes.
+Family Beta Uploader means the existing Dragbags Addon Updater, which reads GitHub releases.
+A general "publish" request authorizes a Family Beta/GitHub release only.
+CurseForge file uploads require a separate, specific request and the owner's explicit Approve click.
+The owner authorized the current starter-setup releases for Family Beta. CurseForge uploads still require their separate Approve click.

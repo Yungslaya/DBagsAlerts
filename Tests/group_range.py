@@ -28,7 +28,7 @@ for name in ['DBagsAlerts.lua','GroupRange.lua']:
     chunk=lua.eval('function(s) return assert(loadstring(s)) end')((root/'DBagsAlerts'/name).read_text(encoding="utf-8"))
     lua.execute('local chunk=...;chunk("DBagsAlerts",{})',chunk)
 lua.execute("""
-FIRE("PLAYER_LOGIN")
+DBagsAlertsDB=DBagsAlertsDB or {};DBagsAlertsDB.partyDefensives={groupRange=true};FIRE("PLAYER_LOGIN")
 local s=DBagsAlertsState.groupRange
 local suppressed
 DBagsAlertsState.setHealerRangeProofs=function(p) suppressed=p~=nil and #p==0 end

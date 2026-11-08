@@ -60,7 +60,7 @@ local function config()
     DBagsAlertsDB = DBagsAlertsDB or {}
     DBagsAlertsDB.partyDefensives = DBagsAlertsDB.partyDefensives or {}
     local c = DBagsAlertsDB.partyDefensives
-    if c.groupRange == nil then c.groupRange = true end
+    if c.groupRange == nil then c.groupRange = false end
     c.muteSeconds = math.max(10,math.min(300,tonumber(c.muteSeconds) or 60))
     return c
 end

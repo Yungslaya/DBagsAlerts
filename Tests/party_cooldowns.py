@@ -37,7 +37,7 @@ def client(player, other, cls, othercls):
     for name in ('DBagsAlerts.lua','PartyCooldowns.lua','PartyDefensives.lua'):
         chunk=lua.eval('function(s) return assert(loadstring(s)) end')((root/'DBagsAlerts'/name).read_text(encoding='utf-8-sig'))
         lua.execute('local chunk=...;chunk("DBagsAlerts",{})',chunk)
-    lua.execute('FIRE("PLAYER_LOGIN");FIRE("PLAYER_ENTERING_WORLD");TICK();TICK()')
+    lua.execute('DBagsAlertsDB=DBagsAlertsDB or {};DBagsAlertsDB.partyDefensives={enabled=true,placeholders=true};FIRE("PLAYER_LOGIN");FIRE("PLAYER_ENTERING_WORLD");TICK();TICK()')
     return lua
 
 def deliver(source, target, sender):
@@ -57,6 +57,7 @@ healer.execute('''
  assert(row:IsShown() and row.icons[1].label._text=="RDY","ready icon missing on healer party frame")
 ''')
 tank.execute('''
+ DBagsAlertsDB.partyDefensives.enabled=false -- sender shares with its own display off
  TESTCD[22]={isActive=true,isOnGCD=false,startTime=GetTime(),duration=240}
  ADVANCE(1);TICK();TICK()
 ''')
@@ -87,7 +88,8 @@ healer.execute('''
 tank.execute('FIRE("UNIT_SPELLCAST_SUCCEEDED","player",nil,23);ADVANCE(1);TICK();TICK()')
 deliver(tank,healer,'Tank')
 healer.execute('''
- assert(DBagsAlertsState.partyCooldowns.get("party1")[2].status=="U","used defensive falsely remained ready")
+  local used=DBagsAlertsState.partyCooldowns.get("party1")[2]
+ assert(used.status=="C" and used.estimated and used.remaining>100,"restricted own cast failed to synchronize a labeled estimate")
  MODE.combat=true
  C_UnitAuras.GetAuraDataByIndex=function() error("aura read blocked") end
  DBagsAlertsState.partyDefensives.update()
@@ -106,7 +108,7 @@ healer.execute('''
  s.receive(s.prefix,"S:999:999:22,C,999999999,999999999","PARTY","Tank-TestRealm")
  assert(s.peers["tank-testrealm"].seq==seq,"accepted unbounded timer")
  ADVANCE(16)
- assert(s.get("party1")[1].status=="U","stale data displayed ready")
+ assert(s.get("party1")[1].status~="R" or s.get("party1")[1].estimated,"stale data displayed confirmed ready")
  DUNGEON=false;OUT={};ADVANCE(1);TICK();TICK()
  assert(#OUT==0 and next(s.peers)==nil,"scanned/sent outside five-player dungeon")
  DUNGEON=true;ADVANCE(1);TICK();TICK()
@@ -119,7 +121,7 @@ tank.execute('''
  HIDDEN=false;OUT={}
  for i=1,100 do ADVANCE(0.05);TICK() end
  assert(#OUT<=11,"message flood")
- DBagsAlertsDB.partyDefensives.enabled=false;OUT={};ADVANCE(1);TICK();TICK()
+ DBagsAlertsDB.partyDefensives.enabled=false;DBagsAlertsDB.partyDefensives.share=false;OUT={};ADVANCE(1);TICK();TICK()
  assert(#OUT==0,"disabled module still sends")
  for msg in pairs(ERRORS) do error(msg) end
 ''')

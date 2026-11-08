@@ -82,6 +82,7 @@ for cls in ("WARRIOR","PALADIN","DRUID","WARLOCK"):
         lua.execute('local chunk=...; chunk("DBagsAlerts",{});',chunk)
         if name=="DBagsAlerts.lua": lua.execute('FIRE("PLAYER_LOGIN")')
     lua.execute("""
+      DBagsAlertsDB.healerMana={enabled=true,range=true}
       local s=DBagsAlertsState.healerMana
       local function check() ADVANCE(3); s.check() end
       local function visible() return s.frame:IsShown() end

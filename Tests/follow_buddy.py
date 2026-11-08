@@ -46,7 +46,7 @@ for cls in ("WARRIOR","DRUID","PRIEST"):
         chunk=lua.eval("function(s) return assert(loadstring(s)) end")((root/"DBagsAlerts"/file).read_text(encoding="utf-8"))
         lua.execute('local chunk=...;chunk("DBagsAlerts",{})',chunk)
     lua.execute("""
-      FIRE("PLAYER_LOGIN")
+      DBagsAlertsDB=DBagsAlertsDB or {};DBagsAlertsDB.followBuddy={enabled=true,name=""};FIRE("PLAYER_LOGIN")
       local s=DBagsAlertsState.followBuddy
       assert(s.target==nil and #FOLLOW_CALLS==0,"unconfigured follow action")
       DBagsAlertsDB.followBuddy.name="Doc";assert(s.apply())

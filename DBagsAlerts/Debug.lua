@@ -19,8 +19,8 @@ local function context()
  return "class="..safe(class).." combat="..safe(InCombatLockdown()).." instance="..safe(kind).." grouped="..safe(IsInGroup())
   .." party="..safe(party and party.status)
 end
-function D.record(message,stack)
- local c=config();if not c.enabled then return end
+function D.record(message,stack,force)
+ local c=config();if not c.enabled and not force then return end
  message=safe(message)
  for _,entry in ipairs(c.errors) do
   if entry.message==message then entry.count=entry.count+1;entry.last=GetTime();return end
@@ -73,6 +73,8 @@ local function version()
 end
 function D.report()
  local c=config();local out={"DBagsAlerts "..safe(version()),context(),"Debug recording: "..safe(c.enabled)}
+ local cd=DBagsAlertsState and DBagsAlertsState.partyCooldowns
+ if cd and cd.summary then out[#out+1]=cd.summary() end
  for label,error in pairs(D.guards) do out[#out+1]="Guard "..label..": "..error end
  out[#out+1]="Recent events (bounded; no chat text):"
  for _,event in ipairs(c.events) do out[#out+1]=event end
@@ -142,12 +144,28 @@ end
 local frame=CreateFrame("Frame");D.driver=frame
 for _,event in ipairs({"PLAYER_LOGIN","PLAYER_REGEN_DISABLED","PLAYER_REGEN_ENABLED","GROUP_ROSTER_UPDATE","PLAYER_TARGET_CHANGED","ADDON_ACTION_BLOCKED","ADDON_ACTION_FORBIDDEN"}) do frame:RegisterEvent(event) end
 frame:SetScript("OnEvent",function(_,event,addon,functionName)
+ local blocked=event=="ADDON_ACTION_BLOCKED" or event=="ADDON_ACTION_FORBIDDEN"
+ if blocked then
+  local ours=not secret(addon) and (addon=="DBagsAlerts" or addon=="ProtAlerts")
+  if ours or config().enabled then
+   local entry={message=event..": "..safe(addon).." / "..safe(functionName),stack=debugstack and debugstack(2,12,4)}
+   if D.loginReady then D.record(entry.message,entry.stack,true)
+   else
+    -- SavedVariables are not guaranteed to be restored during file loading.
+    -- Keep load-time warnings in memory, then merge them after PLAYER_LOGIN.
+    D.startupBlocks=D.startupBlocks or {}
+    if #D.startupBlocks<20 then D.startupBlocks[#D.startupBlocks+1]=entry end
+   end
+  end
+ end
  if event=="PLAYER_LOGIN" then
+  D.loginReady=true
   if DBagsAlertsState then DBagsAlertsState.debug=D end
   install(config().enabled)
+  for _,entry in ipairs(D.startupBlocks or {}) do D.record(entry.message,entry.stack,true) end
+  D.startupBlocks=nil
  end
  local c=config();if not c.enabled then return end
  if #c.events>=40 then table.remove(c.events,1) end
  c.events[#c.events+1]=string.format("%.1f %s %s",GetTime(),event,context())
- if event=="ADDON_ACTION_BLOCKED" or event=="ADDON_ACTION_FORBIDDEN" then D.record(event..": "..safe(addon).." / "..safe(functionName)) end
 end)

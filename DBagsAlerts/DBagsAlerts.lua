@@ -66,22 +66,23 @@ local DEFAULTS = {
     sound = false,       -- raid-warning sound on danger alerts (only when not secret)
     durations = {},      -- learned buff/debuff lengths, by spell name
     tank = true,         -- paladin: tanking setup (Righteous Fury, Seal of Fury, Sanctuary)
+    lux = true,          -- standard floating HUD
     stack = true,        -- big-icon mode (one "press this" icon) instead of a row of icons
     names = false,       -- spell names under the big icon
     advice = false,      -- rage tip line under the rage bar
-    target = true,       -- our target frame (name, health, who it's hitting)
-    casts = true,        -- our cast bars (yours + your target's)
-    hideBlizz = true,    -- hide Blizzard's player frame, target frame and cast bar
+    target = false,       -- our target frame (name, health, who it's hitting)
+    casts = false,        -- our cast bars (yours + your target's)
+    hideBlizz = false,    -- hide Blizzard's player frame, target frame and cast bar
     style = "classic",   -- "classic" = WoW gold frames + glossy bars, "clean" = thin black lines
-    cursor = true,       -- ring around the mouse cursor
+    cursor = false,       -- ring around the mouse cursor
     cursorSize = 48,
     cursorCombat = false,
     buffNag = true,      -- missing Battle Shout reminder, also out of combat
-    stanceNag = true,    -- flashing "DEFENSIVE" in combat when you are in another stance
-    foodNag = true,      -- "EAT" button when Well Fed (+5% XP in Forever) is missing and you carry food
-    stoneNag = true,     -- weapon stone button when your main hand has no stone on it
-    stoneNeed = true,    -- ...and a grey "no stone" icon when you have none
-    range = true,        -- melee range ring around the big icon
+    stanceNag = false,    -- flashing "DEFENSIVE" in combat when you are in another stance
+    foodNag = false,      -- "EAT" button when Well Fed (+5% XP in Forever) is missing and you carry food
+    stoneNag = false,     -- weapon stone button when your main hand has no stone on it
+    stoneNeed = false,    -- ...and a grey "no stone" icon when you have none
+    range = false,       -- optional aggro dots over enemy nameplates
     lowMana = 20,        -- paladin: mana % for the LOW MANA warning
     dumpTank = 90,       -- warrior: spend line while you are getting hit a lot
     shardGoal = 5,       -- warlock: Soul Shards to keep (Drain Soul alert below this)
@@ -4897,6 +4898,32 @@ local function heading(parent, text, y)
     return fs
 end
 
+-- Starter setup only changes presentation/features, never spell history or macros.
+function DBagsAlertsState.starterSetup(restore)
+    if not DB or InCombatLockdown() then say("Change the setup after combat.");return false end
+    local keys={"scale","customSizes","locked","lux","off","stack","names","advice","target","casts","hideBlizz","cursor","buffNag","stanceNag","foodNag","stoneNag","stoneNeed","range","sound"}
+    local modules={healerMana={"enabled","range"},partyDefensives={"enabled","groupRange","placeholders"},petPanel={"enabled"},followBuddy={"enabled"}}
+    if restore then
+        local old=DB.starterBackup;if not old then say("No previous setup saved.");return false end
+        for key,value in pairs(old.fields) do DB[key]=value.value end
+        for name,fields in pairs(old.modules) do
+            DB[name]=DB[name] or {};for key,value in pairs(fields) do DB[name][key]=value.value end
+        end
+        DB.starterBackup=nil
+    else
+        local old={fields={},modules={}}
+        for _,key in ipairs(keys) do old.fields[key]={value=DB[key]};DB[key]=type(DEFAULTS[key])=="table" and CopyTable(DEFAULTS[key]) or DEFAULTS[key] end
+        for name,fields in pairs(modules) do
+            DB[name]=DB[name] or {};old.modules[name]={}
+            for _,key in ipairs(fields) do old.modules[name][key]={value=DB[name][key]};DB[name][key]=false end
+        end
+        -- Retain the first pre-review setup if Starter is pressed twice.
+        DB.starterBackup=DB.starterBackup or old
+    end
+    layout();DRU.applyHelperSize()
+    say("Setup changed. /reload to finish applying it.")
+    return true
+end
 local function buildSettings()
     local outer = CreateFrame("Frame", "DBagsAlertsSettings", UIParent, "BackdropTemplate")
     outer:SetSize(760, 580); outer:SetPoint("CENTER"); outer:SetFrameStrata("DIALOG")
@@ -4959,9 +4986,11 @@ local function buildSettings()
     check(display,"classic","Classic borders","Use WoW borders and glossy bars.",function() return DB.style~="clean" end,function(v) DB.style=v and "classic" or "clean";relayout() end)
     check(display,"sound","Alert sound","Play a sound for danger alerts.")
     button(display,"preview","Preview HUD",function() testUntil=GetTime()+8 end)
+    button(display,"starter","Use starter setup",function() DBagsAlertsState.starterSetup();refresh() end)
+    button(display,"restoreStarter","Restore my previous setup",function() DBagsAlertsState.starterSetup(true);refresh() end)
     local frames=page("frames","Frames")
     check(frames,"target","Target frame","Show the selected player's or enemy's health.")
-    check(frames,"targetOfTarget","Target of Target","Show who your target is targeting, with a small health bar. Off by default.")
+    check(frames,"targetOfTarget","Target of Target","Show who your target is targeting, with a small health bar. Off by default.",nil,function(v) DB.targetOfTarget=v;if v then DB.target=true end;relayout();refresh() end)
     check(frames,"casts","Cast bars","Show your casts and target casts.")
     check(frames,"range","Aggro dots","Green: on you. Yellow: threat at risk. Red: on someone else.")
     check(frames,"swing","Swing timer","Show melee or ranged attack timing.",function() return not DB.off.swing end,function(v) DB.off.swing=not v or nil;relayout() end)
@@ -5109,6 +5138,8 @@ SlashCmdList.DBAGSALERTS = function(msg)
     local cmd, rest = (msg or ""):lower():match("^(%S*)%s*(.-)$")
     if cmd == "" or cmd == "settings" or cmd == "options" then
         toggleSettings()
+    elseif cmd == "starter" or cmd == "restore" then
+        DBagsAlertsState.starterSetup(cmd=="restore")
     elseif cmd == "unlock" or cmd == "lock" then
         DB.locked = cmd == "lock"; layout()
         say(DB.locked and "locked." or "unlocked. Drag to move, scroll to resize.")

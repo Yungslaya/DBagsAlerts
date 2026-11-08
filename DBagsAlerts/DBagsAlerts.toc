@@ -1,8 +1,9 @@
 ## Interface: 16001
+## X-Curse-Project-ID: 1791030
 ## Title: |cffff7d0aDBags|r Alerts
 ## Notes: Alerts, bars and helpers for Warrior, Paladin, Druid (all forms) and Warlock. Was ProtAlerts.
 ## Author: Yungslaya
-## Version: 1.0.15
+## Version: 1.0.16
 ## SavedVariables: DBagsAlertsDB
 
 Debug.lua

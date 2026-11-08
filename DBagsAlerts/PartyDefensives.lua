@@ -10,11 +10,12 @@ local function config()
     DBagsAlertsDB = DBagsAlertsDB or {}
     local c = DBagsAlertsDB.partyDefensives
     if type(c) ~= "table" then c = {}; DBagsAlertsDB.partyDefensives = c end
-    if c.enabled == nil then c.enabled = true end
+    if c.enabled == nil then c.enabled = false end
+    if c.share == nil then c.share = true end
     c.size = math.max(20, math.min(44, tonumber(c.size) or 28))
     if c.left == nil then c.left = false end
-    if c.groupRange == nil then c.groupRange = true end
-    if c.placeholders == nil then c.placeholders = true end
+    if c.groupRange == nil then c.groupRange = false end
+    if c.placeholders == nil then c.placeholders = false end
     return c
 end
 local function eligible(c)
@@ -182,6 +183,7 @@ local function paint(unit, anchor, c)
     end
     local count, consumed = 0, {}
     local sync = DBagsAlertsState.partyCooldowns
+    if sync and sync.observeAura then for _,aura in ipairs(auras) do sync.observeAura(unit,aura) end end
     local entries = sync and sync.get(unit) or {}
     local function active(icon, aura)
         icon.auraID = plain(aura.auraInstanceID)
@@ -288,7 +290,7 @@ DBagsAlertsState.openPartyDefensives = function()
     local c = config()
     if not window then
         local w = CreateFrame("Frame", "DBagsAlertsPartyDefensiveSettings", UIParent)
-        window = w; w:SetSize(370, 350); w:SetPoint("CENTER"); w:SetFrameStrata("DIALOG")
+        window = w; w:SetSize(370, 430); w:SetPoint("CENTER"); w:SetFrameStrata("DIALOG")
         DBagsAlertsState.prepareSettingsWindow(w, "party")
         if DBagsAlertsState.alerts then
             DBagsAlertsState.settingsBackButton(w, function() SlashCmdList.DBAGSALERTS("") end)
@@ -331,17 +333,24 @@ DBagsAlertsState.openPartyDefensives = function()
         local rangeSettings=CreateFrame("Button",nil,w,"UIPanelButtonTemplate")
         rangeSettings:SetSize(178,26);rangeSettings:SetPoint("TOPLEFT",24,-218);rangeSettings:SetText("WAKE UP settings")
         rangeSettings:SetScript("OnClick",function() if DBagsAlertsState.openGroupRange then DBagsAlertsState.openGroupRange() end end)
-        w.status = text("", 18, -264, 12); w.status:SetWidth(324)
+        w.share=CreateFrame("CheckButton",nil,w,"UICheckButtonTemplate")
+        w.share:SetPoint("TOPLEFT",12,-254);text("Share my cooldowns with the group",46,-263,12)
+        w.share:SetScript("OnClick",function(self)
+            config().share=self:GetChecked() and true or false
+            if DBagsAlertsState.partyCooldowns then DBagsAlertsState.partyCooldowns.force=true end
+        end)
+        w.status = text("", 18, -300, 12); w.status:SetWidth(324)
         table.insert(UISpecialFrames, "DBagsAlertsPartyDefensiveSettings")
     end
     window.enabled:SetChecked(c.enabled); window.left:SetChecked(c.left); window.size:SetValue(c.size)
-    window.groupRange:SetChecked(c.groupRange); window.placeholders:SetChecked(c.placeholders)
-    refresh(); window.status:SetText(state.status); DBagsAlertsState.showSettingsWindow(window, "party")
+    window.groupRange:SetChecked(c.groupRange); window.placeholders:SetChecked(c.placeholders);window.share:SetChecked(c.share)
+    refresh();window.status:SetText(state.status.."\n"..(DBagsAlertsState.partyCooldowns and DBagsAlertsState.partyCooldowns.summary() or "")); DBagsAlertsState.showSettingsWindow(window, "party")
 end
 SLASH_DBAGSPARTY1 = "/dbaparty"
 SlashCmdList.DBAGSPARTY = function(msg)
     if msg and msg:lower():match("^status") then
         refresh()
+        if DBagsAlertsState.partyCooldowns then print(DBagsAlertsState.partyCooldowns.summary()) end
         print("DBagsAlerts: " .. state.status .. ". RDY = confirmed; RDY~ = estimated; UP = active. Dim = not observed.")
         return
     end

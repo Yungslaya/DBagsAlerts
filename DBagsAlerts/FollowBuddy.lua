@@ -7,9 +7,9 @@ _G.BINDING_HEADER_DBAGSALERTS = "DBagsAlerts"
 _G["BINDING_NAME_CLICK DBagsAlertsFollowButton:LeftButton"] = "Follow buddy"
 local function config()
     DBagsAlertsDB = DBagsAlertsDB or {}
-    if type(DBagsAlertsDB.followBuddy) ~= "table" then DBagsAlertsDB.followBuddy = {enabled=true,name=""} end
+    if type(DBagsAlertsDB.followBuddy) ~= "table" then DBagsAlertsDB.followBuddy = {enabled=false,name=""} end
     local c = DBagsAlertsDB.followBuddy
-    if c.enabled == nil then c.enabled = true end
+    if c.enabled == nil then c.enabled = false end
     if c.statusLocked == nil then c.statusLocked = false end
     if type(c.name) ~= "string" then c.name = "" end
     return c

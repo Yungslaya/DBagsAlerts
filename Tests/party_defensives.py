@@ -34,7 +34,7 @@ for cls in ("WARRIOR","PALADIN","DRUID","WARLOCK","PRIEST","SHAMAN","MAGE","ROGU
         chunk=lua.eval("function(s) return assert(loadstring(s)) end")((root/"DBagsAlerts"/file).read_text(encoding="utf-8"))
         lua.execute('local chunk=...;chunk("DBagsAlerts",{})',chunk)
     lua.execute("""
-      FIRE("PLAYER_LOGIN")
+      DBagsAlertsDB=DBagsAlertsDB or {};DBagsAlertsDB.partyDefensives={enabled=true,placeholders=true};FIRE("PLAYER_LOGIN")
       local s=DBagsAlertsState.partyDefensives
       s.update()
       assert(s.rows.player.anchor==CompactPartyFrameMember2,"sorted player frame mismatch")

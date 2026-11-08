@@ -8,9 +8,9 @@ local function config()
     if not DBagsAlertsDB then return end
     local c = DBagsAlertsDB.healerMana
     if type(c) ~= "table" then c = {}; DBagsAlertsDB.healerMana = c end
-    if c.enabled == nil then c.enabled = true end
+    if c.enabled == nil then c.enabled = false end
     if c.drinking == nil then c.drinking = true end
-    if c.range == nil then c.range = true end
+    if c.range == nil then c.range = false end
     c.threshold = math.max(5, math.min(90, tonumber(c.threshold) or 30))
     if type(c.name) ~= "string" then c.name = "" end
     return c
