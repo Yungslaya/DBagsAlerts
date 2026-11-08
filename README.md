@@ -6,6 +6,8 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 ## What's new
 
+- **1.0.12:** Independent width, height and left/right/up/down controls for the floating HUD's target, health, power, player/target cast, threat and swing bars, plus pet-frame width/health height/position. Spell cues, DoTs, cooldown icons and buff/stance/food/stone reminders have their own size and position controls; icons stay square. In `/dba` → Sizes, enable Separate sizes and use `<` / `>` to choose one component at a time. Pet controls also expose width, health height and position, including on Hunters. Narrow pet frames wrap action buttons into rows; protected changes wait until combat ends. Shared drag anchor remains fixed. `/reload` after updating. Simulated checks pass; live visual confirmation pending.
+
 - **1.0.11:** Fixed pet autocast right-clicks by delegating to Blizzard's native pet buttons instead of calling a protected function from addon Lua. Separate section sizes keep the shared HUD drag anchor fixed. Automated pet, sizing and layout checks pass; live confirmation pending. `/reload` after updating.
 
 - **1.0.10:** Rebuilt settings into Display, Frames, Sizes, Reminders, Alerts, Class settings, Group and Tools pages with native WoW buttons/borders. Added an optional target-of-target name/health strip, off by default. Separate section sizes are also off by default; the floating HUD reflows target, player bars, spell cues, DoTs, casts and cooldown icons independently. Helpers, party icons and cursor size have controls; pet sizing remains in Pet controls. Existing HUD scale is retained. /reload, then /dba. Tested with simulated plain/hidden values; live visual confirmation pending.

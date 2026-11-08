@@ -55,6 +55,8 @@ local DEFAULTS = {
     scale = 1,
     targetOfTarget = false,
     customSizes = false,
+    targetWidth = 280, targetHeight = 9, targetX = 0, targetY = 0,
+    geometry = {},
     partSizes = {target=1, player=1, alerts=1, dots=1, casts=1, cooldowns=1, helpers=1},
     locked = true,
     off = {},            -- alert key -> true when turned off
@@ -86,8 +88,32 @@ local DEFAULTS = {
 }
 
 function DRU.partScale(key)
-    if not DB or not DB.customSizes then return 1 end
-    return math.max(0.6, math.min(2, tonumber(DB.partSizes and DB.partSizes[key]) or 1))
+    local db=DB or DBagsAlertsDB
+    if not db or not db.customSizes then return 1 end
+    return math.max(0.6, math.min(2, tonumber(db.partSizes and db.partSizes[key]) or 1))
+end
+-- Geometry is separate from font/icon scale and from the shared HUD anchor.
+function DRU.targetGeometry(defaultWidth, defaultHeight)
+    if not DB or not DB.customSizes then return defaultWidth, defaultHeight, 0, 0 end
+    return math.max(120, math.min(600, tonumber(DB.targetWidth) or defaultWidth)),
+        math.max(3, math.min(80, tonumber(DB.targetHeight) or defaultHeight)),
+        math.max(-800, math.min(800, tonumber(DB.targetX) or 0)),
+        math.max(-600, math.min(600, tonumber(DB.targetY) or 0))
+end
+function DRU.geometry(key, width, height)
+    local db=DB or DBagsAlertsDB
+    local g=db and db.customSizes and db.geometry and db.geometry[key]
+    if type(g)~="table" then return width,height,0,0 end
+    return width and math.max(120,math.min(600,tonumber(g.width) or width)),
+        height and math.max(3,math.min(80,tonumber(g.height) or height)),
+        math.max(-800,math.min(800,tonumber(g.x) or 0)),
+        math.max(-600,math.min(600,tonumber(g.y) or 0))
+end
+function DRU.placePart(frame,key,width,height,x,y,scale)
+    local w,h,dx,dy=DRU.geometry(key,width,height)
+    frame:ClearAllPoints();frame:SetScale(scale);frame:SetSize(w,h)
+    frame:SetPoint("TOPLEFT",DBagsAlertsState.main,"TOPLEFT",(x+dx)/scale,(-y+dy)/scale)
+    return h
 end
 -- Fallback lengths when neither the aura nor the tooltip tells us.
 local DEFAULT_DURATION = {
@@ -568,7 +594,7 @@ end
 -- Alerts. Order inside a row = priority (left = most important).
 ---------------------------------------------------------------------------
 local ctx = {}
-DBagsAlertsState = { ctx = ctx, partScale = DRU.partScale }   -- read-only peek for /pa debug and testing
+DBagsAlertsState = { ctx = ctx, partScale = DRU.partScale, geometry = DRU.geometry }   -- read-only peek for /pa debug and testing
 DBagsAlertsState.tankSetup = function()
     if CLASS == "PALADIN" then return DB and DB.tank ~= false end
     if CLASS == "DRUID" then return ctx.form == "bear" end
@@ -3172,6 +3198,7 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
         shown = false; idle:Hide(); pips:Hide()
         for _, f in ipairs(tiles) do f:Hide() end
     end
+    DBagsAlertsState.layoutParts={health=healthBar,power=rageBar,threat=threatBar,swing=swingBar,playerCast=castPlayer,targetCast=tf.cast,cooldowns=cdIcons}
     DBagsAlertsState.dotTiles = used
     DBagsAlertsState.pips = pips
 end
@@ -3184,7 +3211,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
     styleText(shardText, 13, 0.76, 0.68, 0.92)
     shardText:SetPoint("TOPRIGHT", -PAD, -85) -- repositioned beside utility after layout
     local dots, used, dotY, castY, utilityY = {}, {}, 0, 0, 0
-    local dotScale, dotColumns = 1, 6
+    local dotScale, dotColumns, dotX = 1, 6, 0
     local function dotList()
         local names
         if CLASS == "WARRIOR" then names = {"Rend"}
@@ -3304,7 +3331,8 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         blockW = 280
         local width = math.max(W, blockW * math.max(targetScale, playerScale, castScale) + 2 * PAD)
         dotColumns = math.max(1, math.min(6, math.floor((width - 2 * PAD) / (46 * dotScale))))
-        local actionTop = math.max(42, 8 + (28 + (DB.targetOfTarget and 20 or 0)) * targetScale + 6)
+        local targetW, targetH, targetX, targetY = DRU.targetGeometry(blockW, 9)
+        local actionTop = math.max(42, 8 + (19 + targetH + (DB.targetOfTarget and 20 or 0)) * targetScale + 6)
         -- Keep the drag anchor fixed. Resizing a child must not resize its
         -- CENTER-anchored parent and shift the whole HUD on the screen.
         main:SetSize(W, 260)
@@ -3314,6 +3342,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         for _, f in pairs(cdIcons) do f:Hide() end
         applyStyle()
         -- Put action cues beside the resource strip, leaving the world open above it.
+        local _,_,cueX,cueY=DRU.geometry("alerts")
         local pos = { next = {PAD - NEXT * alertScale - 10, -actionTop, NEXT}, danger = {width + 2, -actionTop, 28},
                       extra = {width + 2, -actionTop - 34 * alertScale, 28}, buff = {width + 2, -actionTop - 68 * alertScale, 28} }
         local byKey = {}
@@ -3333,7 +3362,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                     a.hudSpot, a.inSpot = spot, true
                     a.root:ClearAllPoints(); a.root:SetSize(p[3], p[3])
                     a.root:SetScale(alertScale)
-                    a.root:SetPoint("TOPLEFT", main, "TOPLEFT", p[1] / alertScale, p[2] / alertScale)
+                    a.root:SetPoint("TOPLEFT", main, "TOPLEFT", (p[1]+cueX) / alertScale, (p[2]+cueY) / alertScale)
                     setLevels(a, main:GetFrameLevel() + 10 + (#keys - i + 1) * 8)
                     a.c.text:Hide(); a.c.plate:Hide()
                     if spot == "next" and DB.names then
@@ -3375,27 +3404,28 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         wipe(used)
         local list = dotList()
         local y = actionTop
-        dotY = y
+        local _,_,dotsX,dotsY=DRU.geometry("dots")
+        dotX=PAD+dotsX;dotY=y-dotsY
         for i, name in ipairs(list) do
             local f = tile(i); f.name = name
             f:SetSize(40, 40); f:ClearAllPoints()
             f:SetScale(dotScale)
-            f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / dotScale + ((i - 1) % dotColumns) * 46, -y / dotScale - math.floor((i - 1) / dotColumns) * 47)
+            f:SetPoint("TOPLEFT", main, "TOPLEFT", dotX / dotScale + ((i - 1) % dotColumns) * 46, -dotY / dotScale - math.floor((i - 1) / dotColumns) * 47)
             f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name])); f:Show()
             used[#used + 1] = f
         end
         if #list > 0 or CLASS == "DRUID" then
             y = y + math.ceil((CLASS == "DRUID" and 6 or #list) / dotColumns) * 47 * dotScale
         end
-        healthBar:SetHeight(14); healthBar:SetWidth(blockW)
-        healthBar:ClearAllPoints(); healthBar:SetScale(playerScale); healthBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / playerScale, -y / playerScale)
+        local healthScale=playerScale*DRU.partScale("health")
+        local healthH=DRU.placePart(healthBar,"health",blockW,14,PAD,y,healthScale)
         healthBar:SetStatusBarTexture(BAR_TEX); healthBar:SetStatusBarColor(0.19, 0.55, 0.38)
         healthBar.frame:Hide(); styleText(healthBar.text, 12, 1, 1, 1)
         healthBar.left:SetText("")
         healthBar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.5)
-        y = y + 17 * playerScale
-        rageBar:SetHeight(18); rageBar:SetWidth(blockW)
-        rageBar:ClearAllPoints(); rageBar:SetScale(playerScale); rageBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / playerScale, -y / playerScale)
+        y = y + (healthH+3) * healthScale
+        local powerScale=playerScale*DRU.partScale("power")
+        local powerH=DRU.placePart(rageBar,"power",blockW,18,PAD,y,powerScale)
         rageBar:SetStatusBarTexture(BAR_TEX); rageBar.frame:Hide(); rageBar.tick:Hide()
         if POWER == RAGE then rageBar:SetStatusBarColor(0.85, 0.12, 0.12)
         elseif POWER == DRU.ENERGY then rageBar:SetStatusBarColor(1, 0.85, 0.1)
@@ -3403,14 +3433,16 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         rageBar.left:SetText("")
         rageBar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.5)
         styleText(rageBar.text, 14, 1, 1, 1)
-        y = y + 24 * playerScale
+        y = y + (powerH+6) * powerScale
         -- Melee keeps useful timing/threat as quiet 3 px strips, instead of bulky bars.
         if not DRU.caster then
-            threatBar:ClearAllPoints(); threatBar:SetScale(playerScale); threatBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / playerScale, -y / playerScale)
-            threatBar:SetSize(blockW, 3); threatBar.frame:Hide(); threatBar:Show()
-            swingBar:ClearAllPoints(); swingBar:SetScale(playerScale); swingBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / playerScale, -y / playerScale - 5)
-            swingBar:SetSize(blockW, 3); swingBar.frame:Hide()
-            y = y + 13 * playerScale
+            local threatScale=playerScale*DRU.partScale("threat")
+            local swingScale=playerScale*DRU.partScale("swing")
+            local threatH=DRU.placePart(threatBar,"threat",blockW,3,PAD,y,threatScale)
+            threatBar.frame:Hide();threatBar:Show()
+            local swingH=DRU.placePart(swingBar,"swing",blockW,3,PAD,y+threatH*threatScale+2,swingScale)
+            swingBar.frame:Hide()
+            y=y+threatH*threatScale+swingH*swingScale+7*playerScale
         end
         castY = y
         local cc = CLASS == "PALADIN" and {0.80, 0.54, 0.62}
@@ -3419,14 +3451,16 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         castPlayer.col = cc
         castPlayer:SetStatusBarColor(cc[1], cc[2], cc[3])
         castPlayer:SetStatusBarTexture(BAR_TEX); castPlayer.frame:Hide()
-        castPlayer:SetHeight(26); castPlayer:SetWidth(blockW - 27)
-        castPlayer.icon:SetSize(26, 26)
-        castPlayer:ClearAllPoints(); castPlayer:SetScale(castScale); castPlayer:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / castScale + 27, -y / castScale)
+        local playerCastScale=castScale*DRU.partScale("playerCast")
+        local _,playerCastH=DRU.geometry("playerCast",blockW-27,26)
+        DRU.placePart(castPlayer,"playerCast",blockW-27,26,PAD+(playerCastH+1)*playerCastScale,y,playerCastScale)
+        castPlayer.icon:SetSize(playerCastH,playerCastH)
         styleText(castPlayer.name, 14, 1, 1, 1); styleText(castPlayer.left, 14, 1, 1, 1)
-        if DB.casts then y = y + 32 * castScale end
+        if DB.casts then y = y + (playerCastH+6) * playerCastScale end
         utilityY = y
         shardText:ClearAllPoints(); shardText:SetPoint("TOPRIGHT", main, "TOPLEFT", width - PAD, -(y + 6))
         local n = 0
+        local _,_,cdX,cdY=DRU.geometry("cooldowns")
         local cdColumns = math.max(1, math.min(6, math.floor((width - 2 * PAD) / (31 * cdScale))))
         if not DB.off.cooldowns then
             for _, name in ipairs(CD_SPELLS) do
@@ -3434,7 +3468,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                     local f = cdIcons[name] or makeCD(name); cdIcons[name] = f
                     f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
                     f:ClearAllPoints(); f:SetSize(26, 26)
-                    f:SetScale(cdScale); f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / cdScale + (n % cdColumns) * 31, -y / cdScale - math.floor(n / cdColumns) * 31)
+                    f:SetScale(cdScale); f:SetPoint("TOPLEFT", main, "TOPLEFT", (PAD+cdX) / cdScale + (n % cdColumns) * 31, (-y+cdY) / cdScale - math.floor(n / cdColumns) * 31)
                     f.glow:SetSize(26, 26); f.glow:SetAlpha(0) -- no duplicate glowing suggestions
                     f:Show(); n = n + 1
                 end
@@ -3446,19 +3480,22 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         main:ClearAllPoints(); main:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
         main:EnableMouse(not DB.locked); main:EnableMouseWheel(not DB.locked); main.bg:SetShown(not DB.locked)
         -- Target is a compact header attached to the same column.
-        tf:ClearAllPoints(); tf:SetScale(targetScale); tf:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / targetScale, -8 / targetScale)
-        tf:SetSize(blockW, 30)
-        tf.name:ClearAllPoints(); tf.name:SetPoint("TOPLEFT"); tf.name:SetWidth(blockW - 34); styleText(tf.name, 14, 0.9, 0.9, 0.94)
+        tf:ClearAllPoints(); tf:SetScale(targetScale); tf:SetPoint("TOPLEFT", main, "TOPLEFT", (PAD + targetX) / targetScale, (-8 + targetY) / targetScale)
+        tf:SetSize(targetW, 21 + targetH)
+        tf.name:ClearAllPoints(); tf.name:SetPoint("TOPLEFT"); tf.name:SetWidth(targetW - 34); styleText(tf.name, 14, 0.9, 0.9, 0.94)
         tf.level:ClearAllPoints(); tf.level:SetPoint("TOPRIGHT"); styleText(tf.level, 12, 0.8, 0.77, 0.63)
         tf.hp:ClearAllPoints(); tf.hp:SetPoint("TOPLEFT", tf, "TOPLEFT", 0, -19)
-        tf.hp:SetSize(blockW, 9); styleText(tf.hp.text, 10, 1, 1, 1)
+        tf.hp:SetSize(targetW, targetH); styleText(tf.hp.text, 10, 1, 1, 1)
         tf.hp:SetStatusBarTexture(BAR_TEX); tf.hp.frame:Hide()
         tf.pw:Hide(); tf.tot:SetShown(DB.targetOfTarget and true or false)
         tf.totBar:ClearAllPoints(); tf.totBar:SetPoint("TOPLEFT",tf.hp,"BOTTOMLEFT",0,-4)
-        tf.totBar:SetWidth(blockW); tf.totBar:SetShown(DB.targetOfTarget and plain(UnitExists("targettarget"), false) and true or false)
+        tf.totBar:SetWidth(targetW); tf.tot:SetWidth(targetW - 8); tf.totBar:SetShown(DB.targetOfTarget and plain(UnitExists("targettarget"), false) and true or false)
         -- Target casts get a separate lane above the header, clear of helper icons.
-        tf.cast:ClearAllPoints(); tf.cast:SetPoint("BOTTOMLEFT", tf, "TOPLEFT", 23, 12)
-        tf.cast:SetScale(castScale / targetScale); tf.cast:SetSize(blockW - 23, 20); tf.cast.icon:SetSize(20, 20); tf.cast.frame:Hide()
+        local targetCastScale=castScale*DRU.partScale("targetCast")
+        local tcW,tcH,tcX,tcY=DRU.geometry("targetCast",blockW-23,20)
+        tf.cast:ClearAllPoints();tf.cast:SetScale(targetCastScale/targetScale)
+        tf.cast:SetPoint("BOTTOMLEFT",tf,"TOPLEFT",tcH+3+tcX/targetCastScale,12+tcY/targetCastScale)
+        tf.cast:SetSize(tcW,tcH);tf.cast.icon:SetSize(tcH,tcH);tf.cast.frame:Hide()
         tDirty.all = true
         DBagsAlertsState.dotTiles = used
         DBagsAlertsState.casterHUD = {width=width, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck, frameless=true, class=CLASS, form=ctx.form, power=POWER, melee=not DRU.caster}
@@ -3489,7 +3526,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                                 f.auraID = id
                                 f:SetSize(40,40); f:ClearAllPoints()
                                 f:SetScale(dotScale)
-                                f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD / dotScale + ((i - 1) % dotColumns) * 46, -dotY / dotScale - math.floor((i - 1) / dotColumns) * 47)
+                                f:SetPoint("TOPLEFT", main, "TOPLEFT", dotX / dotScale + ((i - 1) % dotColumns) * 46, -dotY / dotScale - math.floor((i - 1) / dotColumns) * 47)
                                 f.icon:SetTexture(aura.icon)
                                 f.icon:SetDesaturated(false); f.shade:SetAlpha(0); f:SetAlpha(1)
                                 f.num:SetText(""); f.bar:SetValue(0)
@@ -3726,8 +3763,10 @@ do   -- missing buff reminder (own block: Lua's 200 top-level locals limit)
             if floatingAnchor ~= floating then
                 floatingAnchor = floating
                 f:ClearAllPoints()
-                if floating then f:SetPoint("BOTTOMLEFT", main, "TOPRIGHT", 12, 8)
-                else f:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, 0) end
+                local _,_,x,y=DRU.geometry("buff")
+                local scale=DRU.partScale("helpers")*DRU.partScale("buff")
+                if floating then f:SetPoint("BOTTOMLEFT", main, "TOPRIGHT", (12+x)/scale, (8+y)/scale)
+                else f:SetPoint("TOPRIGHT", main, "TOPLEFT", (-10+x)/scale, y/scale) end
             end
             if not cfg or not DB or DB.buffNag == false or not spell[cfg.buff] or UnitIsDeadOrGhost("player") or IsMounted()
                or (IsResting() and not ctx.combat) then
@@ -4175,17 +4214,25 @@ end
 function DRU.applyHelperSize()
     if not DB then return end
     local relative=DRU.partScale("helpers")
-    for _,key in ipairs({"buffNag","stanceNag"}) do
-        local frame=DBagsAlertsState[key]
-        if frame then frame:SetScale(relative) end
+    for _,entry in ipairs({{"buffNag","buff","TOPRIGHT","TOPLEFT",-10,0},{"stanceNag","stance","CENTER","CENTER",0,190},
+        {"eatButton","food","TOPRIGHT","TOPLEFT",-10,-72},{"stoneButton","stone","TOPRIGHT","TOPLEFT",-10,-144}}) do
+        local frame=DBagsAlertsState[entry[1]]
+        if frame and ((entry[2]~="food" and entry[2]~="stone") or not InCombatLockdown()) then
+            local _,_,x,y=DRU.geometry(entry[2])
+            local scale=relative*DRU.partScale(entry[2])
+            if entry[2]=="food" or entry[2]=="stone" or entry[2]=="stance" then scale=scale*(DB.scale or 1) end
+            frame:SetScale(scale);frame:ClearAllPoints()
+            if entry[2]=="buff" and DRU.lux then
+                frame:SetPoint("BOTTOMLEFT",main,"TOPRIGHT",(12+x)/scale,(8+y)/scale)
+            else
+                frame:SetPoint(entry[3],entry[2]=="stance" and UIParent or main,entry[4],(entry[5]+x)/scale,(entry[6]+y)/scale)
+            end
+        end
     end
     local follow=DBagsAlertsState.followBuddy
     if follow and follow.frame then follow.frame:SetScale((DB.scale or 1)*relative) end
-    if not InCombatLockdown() then
-        for _,name in ipairs({"DBagsAlertsEatButton","DBagsAlertsStoneButton"}) do
-            if _G[name] then _G[name]:SetScale((DB.scale or 1)*relative) end
-        end
-    end
+    local pet=DBagsAlertsState.petPanel
+    if pet and pet.configure then pet.configure() end
 end
 
 do   -- click buttons (own block: Lua's 200 top-level locals limit)
@@ -4225,7 +4272,7 @@ do   -- click buttons (own block: Lua's 200 top-level locals limit)
     local function place()
         if InCombatLockdown() then wanted = true return end   -- Blizzard rule: move them after combat
         wanted = false
-        cover(tClick, tf, DRU.lux and 30 or (18 + 9 + 28 + 9 + 8))
+        cover(tClick, tf, DRU.lux and ((tf:GetHeight() or 30) + (DB.targetOfTarget and 20 or 0)) or (18 + 9 + 28 + 9 + 8))
         cover(pClick, healthBar)
         pClick:SetShown(DB.target ~= false)
         if DB.target == false then
@@ -4428,6 +4475,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         readAll()
         hideBlizzard()
         if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end
+        DRU.applyHelperSize()
         say("%s loaded. /pa for settings.",
             CLASS == "PALADIN" and (DB.tank and "Paladin (tank)" or "Paladin (damage)")
             or CLASS == "DRUID" and "Druid" or CLASS == "WARLOCK" and "Warlock" or "Warrior")
@@ -4886,17 +4934,71 @@ local function buildSettings()
     local sizes=page("sizes","Sizes")
     slider(sizes,"scale","Whole HUD",0.6,2,0.05,"%.2fx",function() return DB.scale end,function(v) DB.scale=v;relayout() end)
     check(sizes,"customSizes","Separate sizes","Off by default. Turn on to resize each part.",nil,function(v) DB.customSizes=v;relayout();refresh() end)
-    for _,part in ipairs({{"target","Target frame"},{"player","Health and power"},{"alerts","Spell cues"},{"dots","Debuff timers"},{"casts","Cast bars"},{"cooldowns","Cooldown row"},{"helpers","Reminders and helper text"}}) do
-        local key,label=part[1],part[2]
-        slider(sizes,"size_"..key,label,0.6,2,0.05,"%.2fx",function() return DB.partSizes[key] or 1 end,
-            function(v) if DB.customSizes then DB.partSizes[key]=v;relayout() end end,true)
+    -- One selected component at a time, rather than a wall of sliders.
+    local parts={
+        {"target","Target frame",280,9},{"health","Health bar",280,14},{"power","Power bar",280,18},
+        {"playerCast","Your cast bar",253,26},{"targetCast","Target cast bar",257,20},
+        {"threat","Threat bar",280,3},{"swing","Swing timer",280,3},{"pet","Pet frame",356,19},
+        {"alerts","Spell cues"},{"dots","Debuff timers"},{"cooldowns","Cooldown row"},
+        {"buff","Buff reminder"},{"stance","Stance reminder"},{"food","Food reminder"},{"stone","Weapon stone"},
+        {"player","All player bars",false},{"casts","Both cast bars",false},{"helpers","All reminders",false},
+    }
+    local partLabel=sizes.body:CreateFontString(nil,"OVERLAY");styleText(partLabel,16,1,0.82,0.2)
+    partLabel:SetPoint("TOP",sizes.body,"TOP",0,sizes.y-6)
+    local partGroups={};outer.partGroups=partGroups;local selected=1
+    local function selectPart(key)
+        for i,entry in ipairs(parts) do if entry[1]==key then selected=i end end
+        for i,group in ipairs(partGroups) do group.body:SetShown(i==selected) end
+        partLabel:SetText(parts[selected][2]);DB.layoutPart=parts[selected][1]
     end
+    outer.selectPart=selectPart
+    local previous=makeButton(sizes.body,"<",38,function() selectPart(parts[(selected-2)%#parts+1][1]) end)
+    previous:SetPoint("TOPLEFT",8,sizes.y)
+    local nextPart=makeButton(sizes.body,">",38,function() selectPart(parts[selected%#parts+1][1]) end)
+    nextPart:SetPoint("TOPRIGHT",-8,sizes.y)
+    sizes.y=sizes.y-50
+    for i,entry in ipairs(parts) do
+        local key,label,w,h=unpack(entry)
+        local frame=CreateFrame("Frame",nil,sizes.body);frame:SetSize(490,350);frame:SetPoint("TOPLEFT",0,sizes.y)
+        local group={body=frame,y=0};partGroups[i]=group
+        slider(group,"size_"..key,"Size",0.6,2,0.05,"%.2fx",function() return DB.partSizes[key] or 1 end,
+            function(v) if DB.customSizes then DB.partSizes[key]=v;relayout() end end,true)
+        if w then
+            for _,field in ipairs({{"width","Width",120,600,5,w},{"height",key=="pet" and "Pet health height" or "Health bar height",3,80,1,h}}) do
+                local fieldKey,fieldLabel,lo,hi,step,default=unpack(field)
+                if fieldKey=="height" and key~="target" and key~="pet" then fieldLabel="Height" end
+                local dbKey=key=="target" and (fieldKey=="width" and "targetWidth" or "targetHeight")
+                slider(group,dbKey or ("geometry_"..key.."_"..fieldKey),fieldLabel,lo,hi,step,"%d px",function()
+                    return dbKey and DB[dbKey] or (DB.geometry[key] and DB.geometry[key][fieldKey]) or default
+                end,function(v)
+                    if not DB.customSizes then return end
+                    if dbKey then DB[dbKey]=v else DB.geometry[key]=DB.geometry[key] or {};DB.geometry[key][fieldKey]=v end
+                    relayout()
+                end,true)
+            end
+        end
+        if w~=false then
+            for _,axis in ipairs({{"x","Left / right",-800,800},{"y","Up / down",-600,600}}) do
+                local field,label,lo,hi=unpack(axis)
+                local dbKey=key=="target" and (field=="x" and "targetX" or "targetY")
+                slider(group,dbKey or ("geometry_"..key.."_"..field),label,lo,hi,5,"%d px",function()
+                    return dbKey and DB[dbKey] or (DB.geometry[key] and DB.geometry[key][field]) or 0
+                end,function(v)
+                    if not DB.customSizes then return end
+                    if dbKey then DB[dbKey]=v else DB.geometry[key]=DB.geometry[key] or {};DB.geometry[key][field]=v end
+                    relayout()
+                end,true)
+            end
+        end
+    end
+    selectPart(DB.layoutPart or "target")
+    sizes.y=sizes.y-350
     slider(sizes,"partySize","Party cooldown icons",20,44,2,"%d px",function() return DB.partyDefensives and DB.partyDefensives.size or 28 end,
         function(v) DB.partyDefensives=DB.partyDefensives or {};DB.partyDefensives.size=v;if DBagsAlertsState.partyDefensives then DBagsAlertsState.partyDefensives.update() end end)
     slider(sizes,"cursorSize","Cursor ring",24,120,4,"%d px",function() return DB.cursorSize or 48 end,
         function(v) DB.cursorSize=v;if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end end)
     button(sizes,"petSize","Pet size and position",function() if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end end)
-    button(sizes,"resetSizes","Reset separate sizes",function() for key in pairs(DB.partSizes) do DB.partSizes[key]=1 end;relayout();refresh() end)
+    button(sizes,"resetSizes","Reset separate sizes",function() for key in pairs(DB.partSizes) do DB.partSizes[key]=1 end;DB.targetWidth=280;DB.targetHeight=9;DB.targetX=0;DB.targetY=0;DB.geometry={};relayout();refresh() end)
     local reminders=page("reminders","Reminders")
     for _,entry in ipairs({{"buffNag","Missing buff","Remind me about Battle Shout and other upkeep buffs."},
         {"stanceNag","Defensive Stance","Warn when tanking in the wrong stance."},{"foodNag","Food buff","Show food I can eat for the XP buff."},

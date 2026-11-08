@@ -20,7 +20,11 @@ panel:SetAttribute("unit","pet");panel:SetAttribute("*type1","target");panel:Set
 panel:RegisterForClicks("AnyUp");panel:SetMovable(true);panel:SetClampedToScreen(true);panel:RegisterForDrag("LeftButton")
 panel:SetScript("OnDragStart",function(self) if not InCombatLockdown() and not config().locked then self:StartMoving() end end)
 panel:SetScript("OnDragStop",function(self)
-    self:StopMovingOrSizing();local p,_,rp,x,y=self:GetPoint();config().point={p,rp,x,y}
+    self:StopMovingOrSizing();local p,_,rp,x,y=self:GetPoint()
+    local dx,dy=0,0
+    if DBagsAlertsState.geometry then local w,h;w,h,dx,dy=DBagsAlertsState.geometry("pet",356,19) end
+    local scale=config().scale*(DBagsAlertsState.partScale and DBagsAlertsState.partScale("pet") or 1)
+    config().point={p,rp,x-dx/scale,y-dy/scale}
 end)
 panel:SetScript("OnEnter",function(self) GameTooltip:SetOwner(self,"ANCHOR_RIGHT");GameTooltip:SetUnit("pet");GameTooltip:Show() end)
 panel:SetScript("OnLeave",function() GameTooltip:Hide() end)
@@ -136,7 +140,20 @@ local function configure()
         b:SetAttribute("clickbutton2",native)
     end
     local c=config();local pos=c.point or {"CENTER","CENTER",-440,-160}
-    panel:ClearAllPoints();panel:SetPoint(pos[1],UIParent,pos[2],pos[3],pos[4]);panel:SetScale(c.scale);tools:SetScale(c.scale)
+    local width,height,dx,dy=356,19,0,0
+    if DBagsAlertsState.geometry then width,height,dx,dy=DBagsAlertsState.geometry("pet",width,height) end
+    local scale=c.scale*(DBagsAlertsState.partScale and DBagsAlertsState.partScale("pet") or 1)
+    panel:ClearAllPoints();panel:SetScale(scale);tools:SetScale(scale)
+    panel:SetPoint(pos[1],UIParent,pos[2],pos[3]+dx/scale,pos[4]+dy/scale)
+    health:SetSize(width,height);power:SetWidth(width);power:ClearAllPoints();power:SetPoint("TOPLEFT",0,-22-height)
+    name:SetWidth(width-50)
+    local cols=math.max(1,math.floor(width/36));local actionY=34+height
+    for i,b in ipairs(state.actions) do
+        b:ClearAllPoints();b:SetPoint("TOPLEFT",panel,"TOPLEFT",((i-1)%cols)*36,-actionY-math.floor((i-1)/cols)*36)
+    end
+    panel:SetSize(width,actionY+math.ceil(10/cols)*36-1)
+    tools:SetWidth(width);care:SetWidth(width)
+    local utilityCols=math.max(1,math.floor(width/52))
     if RegisterStateDriver then RegisterStateDriver(panel,"visibility",c.enabled and "[pet] show; hide" or "hide") end
     readKnown();local _,class=UnitClass("player");class=plain(class)
     state.class=class
@@ -148,11 +165,14 @@ local function configure()
             if id then
                 n=n+1;local b=utility(n);b.spellID=id;b.spellName=a[1]
                 b:SetAttribute("spell1",id);b.icon:SetTexture(C_Spell.GetSpellTexture(id));b.label:SetText(a[2])
-                b:ClearAllPoints();b:SetPoint("TOPLEFT",tools,"TOPLEFT",(n-1)*52,0);b:Show()
+                b:ClearAllPoints();b:SetPoint("TOPLEFT",tools,"TOPLEFT",((n-1)%utilityCols)*52,-math.floor((n-1)/utilityCols)*49);b:Show()
             end
         end
     end
     if RegisterStateDriver then RegisterStateDriver(tools,"visibility",c.enabled and n>0 and "show" or "hide") end
+    local toolRows=math.max(1,math.ceil(n/utilityCols))
+    care:ClearAllPoints();care:SetPoint("TOPLEFT",0,-toolRows*49)
+    tools:SetHeight(toolRows*49+14)
     state.utilityCount=n
 end
 state.configure=configure
@@ -261,7 +281,7 @@ DBagsAlertsState.openPetSettings=function()
     local c=config()
     if not window then
         local w=CreateFrame("Frame","DBagsAlertsPetSettings",UIParent);window=w
-        w:SetSize(390,326);w:SetPoint("CENTER");w:SetFrameStrata("DIALOG")
+        w:SetSize(390,590);w:SetPoint("CENTER");w:SetFrameStrata("DIALOG")
         DBagsAlertsState.prepareSettingsWindow(w,"pet")
         if DBagsAlertsState.alerts then DBagsAlertsState.settingsBackButton(w,function() SlashCmdList.DBAGSALERTS("") end) end
         local bg=w:CreateTexture(nil,"BACKGROUND");bg:SetAllPoints();bg:SetColorTexture(0.055,0.055,0.065,1)
@@ -287,12 +307,36 @@ DBagsAlertsState.openPetSettings=function()
             if InCombatLockdown() then return end
             config().scale=v;sizeLabel:SetFormattedText("Size: %.2fx",v);configure()
         end)
-        text("Right-click pet: menu. Right-click ability: autocast.",18,-222,12)
-        text("Shift-drag abilities out of combat to move them.",18,-242,12)
-        w.status=text("",18,-270,12);w.status:SetWidth(350)
+        w.geometry={}
+        for i,entry in ipairs({{"width","Width",120,600,5,356},{"height","Health bar height",3,80,1,19},
+            {"x","Left / right",-800,800,5,0},{"y","Up / down",-600,600,5,0}}) do
+            local key,label,lo,hi,step,default=unpack(entry)
+            local t=text(label,18,-226-(i-1)*62)
+            local slider=CreateFrame("Slider",nil,w,"OptionsSliderTemplate")
+            slider:SetSize(285,18);slider:SetPoint("TOPLEFT",24,-250-(i-1)*62)
+            slider:SetMinMaxValues(lo,hi);slider:SetValueStep(step);slider:SetObeyStepOnDrag(true)
+            local value=text("",320,-250-(i-1)*62)
+            slider:SetScript("OnValueChanged",function(self,v)
+                if self.refreshing or InCombatLockdown() then return end
+                v=math.floor(v/step+0.5)*step
+                DBagsAlertsDB.customSizes=true;DBagsAlertsDB.geometry=DBagsAlertsDB.geometry or {}
+                DBagsAlertsDB.geometry.pet=DBagsAlertsDB.geometry.pet or {};DBagsAlertsDB.geometry.pet[key]=v
+                value:SetFormattedText("%d",v);configure()
+            end)
+            slider.refresh=function()
+                local g=DBagsAlertsDB.geometry and DBagsAlertsDB.geometry.pet or {}
+                local v=DBagsAlertsDB.customSizes and g[key] or default;v=v or default
+                slider.refreshing=true;slider:SetValue(v);slider.refreshing=false;value:SetFormattedText("%d",v)
+            end
+            w.geometry[key]=slider
+        end
+        text("Right-click ability: autocast. Shift-drag: move.",18,-500,12)
+        text("Layout changes apply after combat.",18,-520,12)
+        w.status=text("",18,-548,12);w.status:SetWidth(350)
         table.insert(UISpecialFrames,"DBagsAlertsPetSettings")
     end
     window.enabled:SetChecked(c.enabled);window.locked:SetChecked(c.locked);window.utilities:SetChecked(c.utilities)
+    for _,slider in pairs(window.geometry) do slider.refresh() end
     window.scale:SetValue(c.scale);window.status:SetText(state.status);DBagsAlertsState.showSettingsWindow(window,"pet")
 end
 SLASH_DBAGSPET1="/dbapet"

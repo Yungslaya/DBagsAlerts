@@ -73,6 +73,17 @@ for cls in ("WARLOCK","HUNTER","WARRIOR","PALADIN","DRUID","MAGE","PRIEST"):
               OWNER_HP=200;s.update();assert(s.utilities[2].warn._alpha==0,"Funnel encouraged at low owner health")
           end
       else assert(s.utilityCount==0,"class received unrelated pet summons") end
+      DBagsAlertsDB.customSizes=true
+      DBagsAlertsDB.geometry=DBagsAlertsDB.geometry or {}
+      DBagsAlertsDB.geometry.pet={width=180,height=30,x=100,y=-50}
+      s.configure()
+      assert(s.health._w==180 and s.health._h==30,"pet dimensions not applied")
+      assert(s.frame._w==180 and s.frame._h>100,"narrow pet actions did not wrap")
+      MODE.combat=true
+      DBagsAlertsDB.geometry.pet.width=240
+      s.configure();assert(s.frame._w==180,"protected pet layout changed in combat")
+      MODE.combat=false;FIRE("PLAYER_REGEN_ENABLED")
+      assert(s.frame._w==240,"deferred pet layout did not apply")
       MODE.combat=true;s.configure();s.update()
       s.actions[4]._OnDragStart(s.actions[4]);assert(PICKUPS==1,"action dragged in combat")
       MODE.combat=false;FIRE("PLAYER_REGEN_ENABLED")
