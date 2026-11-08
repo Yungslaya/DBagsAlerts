@@ -15,6 +15,21 @@ function seterrorhandler(fn) handler=fn end
 local create=CreateFrame
 CreateFrame=function(...)
  local f=create(...)
+ if select(1,...)=="EditBox" then
+  f.GetStringHeight=function() error("EditBox has no GetStringHeight") end
+  f.GetText=function(self) return self._text or "" end
+  f.GetWidth=function(self) return self._w end
+  f.SetText=function(self,value)
+   self._text=value
+   local callback=rawget(self,"_OnTextChanged")
+   if callback then callback(self,false) end
+  end
+ end
+ f.CreateFontString=function(self)
+  local text=newObjPublic()
+  text.GetStringHeight=function(self) return #(self._text or "")*2 end
+  return text
+ end
  f.GetScript=function(self,script) return rawget(self,"_"..script) end
  return f
 end
@@ -49,6 +64,11 @@ assert(DBagsAlertsDebug.report():find("combat=true",1,true),"missing combat cont
 SlashCmdList.DBAGSDEBUG("")
 assert(DBagsAlertsState.settingsWindows.debug:IsShown(),"report window missing")
 assert(DBagsAlertsState.settingsWindows.debug.edit._text:find("Errors:",1,true),"report text missing")
+local edit=DBagsAlertsState.settingsWindows.debug.edit
+assert(edit._h>300,"long debug report cannot scroll fully")
+edit:SetText("short");assert(edit._h==300,"short debug report did not shrink")
+DBagsAlertsDebug.open()
+assert(edit._h>300 and edit._text:find("Errors:",1,true),"refresh failed to resize long report")
 SlashCmdList.DBAGSDEBUG("off")
 local before=#c.errors;geterrorhandler()("after disabling")
 assert(#c.errors==before,"debug capture did not stop")

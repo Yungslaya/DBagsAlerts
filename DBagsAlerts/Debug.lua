@@ -107,7 +107,15 @@ local function open()
   local edit=CreateFrame("EditBox",nil,scroll);w.edit=edit
   edit:SetMultiLine(true);edit:SetAutoFocus(false);edit:SetFontObject(ChatFontNormal);edit:SetWidth(550);edit:SetHeight(300)
   edit:SetScript("OnEscapePressed",function(self) self:ClearFocus() end)
-  edit:SetScript("OnTextChanged",function(self) local h=self:GetStringHeight();if h then self:SetHeight(math.max(300,h+24)) end end)
+  -- EditBox has no GetStringHeight. Measure wrapped text on a FontString
+  -- using the same font and width, then size the scroll child to fit it.
+  local measure=scroll:CreateFontString(nil,"OVERLAY")
+  measure:SetFontObject(ChatFontNormal);measure:SetWidth(550);measure:SetWordWrap(true);measure:Hide()
+  edit:SetScript("OnTextChanged",function(self)
+   measure:SetWidth(self:GetWidth() or 550);measure:SetText(self:GetText() or "")
+   local height=measure:GetStringHeight()
+   if type(height)=="number" then self:SetHeight(math.max(300,height+24)) end
+  end)
   scroll:SetScrollChild(edit)
   button("Refresh",18,-438,110,function() edit:SetText(D.report());edit:ClearFocus() end)
   button("Select report",138,-438,140,function() edit:SetFocus();edit:HighlightText() end)
