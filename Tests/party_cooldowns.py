@@ -77,9 +77,24 @@ healer.execute('''
  C_UnitAuras.GetUnitAuraInstanceIDs=function() return {} end
 ''')
 # Never serialize hidden values or carry a previous ready state through restrictions.
-tank.execute('HIDDEN=true;ADVANCE(1);TICK();TICK()')
+tank.execute('MODE.combat=true;HIDDEN=true;ADVANCE(1);TICK();TICK()')
 deliver(tank,healer,'Tank')
-healer.execute('assert(DBagsAlertsState.partyCooldowns.get("party1")[1].status=="U","restricted cooldown falsely ready")')
+healer.execute('''
+ local entries=DBagsAlertsState.partyCooldowns.get("party1")
+ assert(entries[1].status=="C","public cooldown observation lost in combat")
+ assert(entries[2].status=="R","confirmed unused ready defensive disappeared in combat")
+''')
+tank.execute('FIRE("UNIT_SPELLCAST_SUCCEEDED","player",nil,23);ADVANCE(1);TICK();TICK()')
+deliver(tank,healer,'Tank')
+healer.execute('''
+ assert(DBagsAlertsState.partyCooldowns.get("party1")[2].status=="U","used defensive falsely remained ready")
+ MODE.combat=true
+ C_UnitAuras.GetAuraDataByIndex=function() error("aura read blocked") end
+ DBagsAlertsState.partyDefensives.update()
+ assert(DBagsAlertsState.partyDefensives.rows.party1:IsShown(),"combat aura failure hid cooldown row")
+ C_UnitAuras.GetAuraDataByIndex=nil
+ for msg in pairs(ERRORS) do if msg:find("aura read blocked",1,true) then ERRORS[msg]=nil end end
+''')
 # Validate sender, protocol ordering, stale reports and scope.
 healer.execute('''
  local s=DBagsAlertsState.partyCooldowns
@@ -95,7 +110,9 @@ healer.execute('''
  DUNGEON=false;OUT={};ADVANCE(1);TICK();TICK()
  assert(#OUT==0 and next(s.peers)==nil,"scanned/sent outside five-player dungeon")
  DUNGEON=true;ADVANCE(1);TICK();TICK()
- assert(s.get("party1")[1].id==0,"missing addon guessed ready")
+ assert(s.get("party1")[1].placeholder and s.get("party1")[1].status=="U","unobserved class spell guessed ready")
+ DBagsAlertsState.partyDefensives.update()
+ assert(DBagsAlertsState.partyDefensives.rows.party1:IsShown(),"class placeholders missing without peer addon")
 ''')
 # Heartbeat is bounded, and disabling the existing party setting stops it.
 tank.execute('''

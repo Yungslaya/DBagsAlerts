@@ -5,6 +5,7 @@
 ## Version: 1.0.9
 ## SavedVariables: DBagsAlertsDB
 
+Debug.lua
 DBagsAlerts.lua
 HealerMana.lua
 PartyCooldowns.lua

@@ -3445,7 +3445,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                     for _, id in ipairs(ids) do
                         if not secret(id) and type(id) == "number" and #used < 6 then
                             local aura = api.GetAuraDataByAuraInstanceID("target", id)
-                            if aura and not secret(aura) and not sectable(aura) then
+                            if not secret(aura) and not sectable(aura) and aura then
                                 local i = #used + 1
                                 local f = tile(i)
                                 f.name = plain(aura.name, nil)
@@ -3459,7 +3459,9 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                                 local threshold = f.name and refreshAt[f.name] or 0
                                 setRefreshGlow(f, ctx.combat and exp and duration and duration > 0
                                     and exp > now and exp - now <= duration * threshold)
-                                f.nativeCD:SetCooldownFromDurationObject(api.GetAuraDuration("target", id))
+                                local ok, durationObject = pcall(api.GetAuraDuration, "target", id)
+                                if ok and durationObject then f.nativeCD:SetCooldownFromDurationObject(durationObject)
+                                else f.nativeCD:Clear() end
                                 f.nativeCD:Show(); f:Show()
                                 used[#used + 1] = f
                             end
@@ -3512,6 +3514,10 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
             end
         end
     end)
+    if DBagsAlertsDebug then
+        local callback = driver:GetScript("OnUpdate")
+        if callback then driver:SetScript("OnUpdate", DBagsAlertsDebug.guard("DoT HUD", callback)) end
+    end
 end
 
 local REACTION = { [1] = { 0.85, 0.1, 0.1 }, [2] = { 0.85, 0.1, 0.1 }, [3] = { 0.85, 0.35, 0.1 },
@@ -4232,6 +4238,7 @@ local spellsDirty, spellsAt = false, 0
 
 local function run(f)
     local ok, err = pcall(f)
+    if not ok and DBagsAlertsDebug then DBagsAlertsDebug.record("Core update: " .. tostring(err)) end
     if not ok and not errShown then   -- report once, never spam
         errShown = true
         say("|cffff5555error:|r %s", tostring(err))
@@ -4865,6 +4872,10 @@ local function buildSettings()
         if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end
     end)
     pets:SetPoint("TOPLEFT", 220, -376)
+    local debugButton = makeButton(w, "Debug", 200, function()
+        if DBagsAlertsDebug then DBagsAlertsDebug.open() end
+    end)
+    debugButton:SetPoint("TOPLEFT", 20, -376)
     if CLASS_MACROS[CLASS] then
         local mk = makeButton(w, "Create macros", 200, makeMacros)
         mk:SetPoint("TOPLEFT", 20, -348)
@@ -5031,7 +5042,9 @@ SlashCmdList.DBAGSALERTS = function(msg)
         local d = DB.rangeDebug
         if d then say("range %s: bar=%s book=%s 10yd=%s", tostring(d.spell), d.bar, d.book, d.close)
         else say("range: target an enemy first.") end
-    elseif cmd == "debug" then
+    elseif cmd == "debug" and DBagsAlertsDebug then
+        SlashCmdList.DBAGSDEBUG(rest)
+    elseif cmd == "debug" or cmd == "diagnostics" then
         -- Run this once out of combat and once IN combat; it shows what Forever lets addons read.
         say("combat=%s  enemies=%s  loose=%s", tostring(InCombatLockdown()), tostring(ctx.enemies), tostring(ctx.loose))
         say("%s UnitPower=%s max=%s", POWER == MANA and "mana" or "rage", desc(UnitPower("player", POWER)), desc(UnitPowerMax("player", POWER)))

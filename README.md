@@ -6,7 +6,7 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 ## What's new
 
-- **1.0.9:** Party defensive icons now show cooldown-ready (RDY), active (UP), and real cooldown countdowns in five-player dungeons. Party members share only their own readable cooldown data through Blizzard addon messages. Both players need this update for readiness reports. Missing, restricted or stale data is marked ?. Cooldown ready does not guarantee the required stance, equipment or resources. Uses learned spells only, with bounded messages and no scans outside dungeon parties. A full restart is required for the new module.
+- **1.0.9:** Five-player dungeon party cooldowns now work without other players installing DBagsAlerts. Dim class/level spell placeholders become estimated countdowns after a public observed cast; RDY~ means estimated ready, RDY means confirmed from a current addon report, UP means active buff. No generic question-mark tiles. Unknown training/talents are not claimed ready. Optional reports improve accuracy. Existing public observations stay visible in combat; blocked aura reads cannot hide the cooldown row. /dbaparty has a Placeholders toggle. Baseline timers may differ with talents, resets and missed casts. Restart WoW for the new modules. Debug adds Record debug log, Show Lua errors, and a copyable bounded report. Run /dbadebug on before reproducing a problem, then /dbadebug to select and copy the report.
 
 - **1.0.8:** Druid timers now display your actual current-target harmful auras through native icons and countdowns, including combat-restricted aura fields. No spell-name lookup or target GUID is needed for this row. Existing DoTs survive target and form changes. Readable refresh glows remain; hidden timing is displayed without guessing a refresh window. Automated restricted-aura tests pass; live confirmation is pending. `/reload` after updating.
 
@@ -56,7 +56,10 @@ Coming from ProtAlerts? Install DBagsAlerts, start WoW once (it turns ProtAlerts
 - `/dbapet` - pet frame and controls (including Hunter pet support; no Hunter rotation)
 - `/dbafollow` - follow name, key and movable status
 - `/dbagroup` - group distance warning and pause key
-- `/dbaparty` - active defensive icons in five-player dungeons
+- `/dbaparty` - party defensive placeholders, observed cooldowns and active buffs in five-player dungeons
+- `/dbadebug` - error recording, Show Lua errors and copyable report
+- `/dbadebug on` - start bounded debug recording
+- `/dbadebug errors on` - show native Lua error popups
 
 ## Rules it follows
 
@@ -66,3 +69,11 @@ Alerts use Blizzard's addon API. Pet commands, spell buttons and Follow require 
 
 Swing timer technique from AKForeverCombatTimers (MIT). Textures are made by the scripts in `tools/`.
 
+
+## Party cooldown estimates
+
+Other players do not need the addon. Class spell placeholders are filtered by level and stay unconfirmed until observed. Public successful casts start base-cooldown estimates; higher ranks match by readable spell name. RDY~ means estimated ready, not confirmed availability. Training, talents, resets, pet availability, Forbearance and missed/restricted casts can affect actual use. Current self-reports from another DBagsAlerts user can improve accuracy, but are optional. A generic question-mark icon is never used for an absent addon.
+
+Baseline sources: [Icy Veins Forever Warrior guide](https://www.icy-veins.com/wow-forever/protection-warrior-tank-pve-rotation-cooldowns-abilities), and its Forever spell database entries for [Divine Protection](https://db.icy-veins.com/wow-forever/spells/498), [Barkskin](https://db.icy-veins.com/wow-forever/spells/22812), [Death Coil](https://db.icy-veins.com/wow-forever/spells/6789), [Deterrence](https://db.icy-veins.com/wow-forever/spells/19263), [Fade](https://db.icy-veins.com/wow-forever/spells/10942), [Nature's Swiftness](https://db.icy-veins.com/wow-forever/spells/16188), [Ice Block](https://db.icy-veins.com/wow-forever/spells/11958) and [Evasion](https://db.icy-veins.com/wow-forever/spells/5277).
+
+Debug records are opt-in and saved in DBagsAlertsDB.debugLog (30 grouped errors and 40 recent events). They include stack traces and addon/game context, with no chat-message collection or secret-value decoding. Error capture can identify other addons too; a generic error warning alone does not identify its source. Disabling recording restores the previous error handler when safe. Guarded timer failures back off and report once instead of throwing every frame.

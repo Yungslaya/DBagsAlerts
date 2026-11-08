@@ -14,6 +14,7 @@ local function config()
     c.size = math.max(20, math.min(44, tonumber(c.size) or 28))
     if c.left == nil then c.left = false end
     if c.groupRange == nil then c.groupRange = true end
+    if c.placeholders == nil then c.placeholders = true end
     return c
 end
 local function eligible(c)
@@ -107,7 +108,7 @@ local function rowFor(unit)
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
                 GameTooltip:AddLine(self.entry.name or "Defensive", 1, 0.82, 0.25)
                 local status = self.entry.status
-                GameTooltip:AddLine(status == "R" and "Cooldown ready" or status == "C" and "On cooldown" or "Unknown", 1, 1, 1)
+                GameTooltip:AddLine(self.entry.placeholder and "Not observed yet" or status == "R" and (self.entry.estimated and "Estimated ready" or "Cooldown ready") or status == "C" and (self.entry.estimated and "Estimated cooldown" or "On cooldown") or "Unknown", 1, 1, 1)
                 GameTooltip:AddLine(self.entry.reason or "Readiness is cooldown only. Stance, equipment and resources may still be required.", 0.8, 0.8, 0.8, true)
                 GameTooltip:Show()
             end
@@ -174,7 +175,11 @@ local function paint(unit, anchor, c)
         row.anchor, row.size, row.left = anchor, c.size, c.left
     end
     local api = C_UnitAuras
-    local auras = api and api.GetUnitAuraInstanceIDs and api.GetAuraDataByAuraInstanceID and defensiveAuras(unit, api) or {}
+    local auras = {}
+    if api and api.GetUnitAuraInstanceIDs and api.GetAuraDataByAuraInstanceID then
+        local ok, result = pcall(defensiveAuras, unit, api)
+        if ok then auras = result else state.auraStatus = "Active aura read unavailable" end
+    end
     local count, consumed = 0, {}
     local sync = DBagsAlertsState.partyCooldowns
     local entries = sync and sync.get(unit) or {}
@@ -184,24 +189,29 @@ local function paint(unit, anchor, c)
         icon.edge:SetColorTexture(1, 0.82, 0.25, 1); icon.label:SetText("UP")
         icon.label:SetTextColor(1, 0.82, 0.25); icon.cd:SetReverse(true)
         if api.GetAuraDuration and icon.cd.SetCooldownFromDurationObject then
-            icon.cd:SetCooldownFromDurationObject(api.GetAuraDuration(unit, icon.auraID))
+            local ok, duration = pcall(api.GetAuraDuration, unit, icon.auraID)
+            if ok and duration then icon.cd:SetCooldownFromDurationObject(duration)
+            else icon.cd:Clear() end
         else
             local duration, expires = plain(aura.duration), plain(aura.expirationTime)
             if type(duration)=="number" and type(expires)=="number" and duration>0 then icon.cd:SetCooldown(expires-duration,duration)
             else icon.cd:Clear() end
         end
     end
-    for _, entry in ipairs(entries) do
+    -- Missing addon reports do not create empty question-mark tiles.
+    local reported = {}
+    for _, entry in ipairs(entries) do if entry.id > 0 then reported[#reported + 1] = entry end end
+    for _, entry in ipairs(reported) do
         if count >= 6 then break end
         count = count + 1
         local icon = row.icons[count]
         icon.auraID = nil; icon.entry = entry; icon.cd:Clear(); icon.cd:SetReverse(false)
         icon.tex:SetTexture(entry.id > 0 and C_Spell.GetSpellTexture(entry.id) or 134400)
         local ready = entry.status == "R"
-        icon.tex:SetDesaturated(not ready); icon:SetAlpha(ready and 1 or 0.65)
+        icon.tex:SetDesaturated(not ready); icon:SetAlpha(entry.placeholder and 0.35 or ready and 1 or 0.65)
         icon.edge:SetColorTexture(ready and 0.25 or 0.3, ready and 0.85 or 0.3, 0.3, 1)
-        icon.label:SetText(ready and "RDY" or entry.status == "U" and "?" or "")
-        icon.label:SetTextColor(ready and 0.4 or 1, 1, ready and 0.4 or 1)
+        icon.label:SetText(ready and (entry.estimated and "RDY~" or "RDY") or entry.estimated and "~" or "")
+        icon.label:SetTextColor(entry.estimated and 1 or ready and 0.4 or 1, entry.estimated and 0.82 or 1, entry.estimated and 0.3 or ready and 0.4 or 1)
         if entry.status == "C" and entry.remaining and entry.duration and entry.duration > 0 then
             icon.cd:SetCooldown(GetTime() + entry.remaining - entry.duration, entry.duration)
         end
@@ -300,6 +310,9 @@ DBagsAlertsState.openPartyDefensives = function()
         w.left = CreateFrame("CheckButton", nil, w, "UICheckButtonTemplate")
         w.left:SetPoint("TOPLEFT", 12, -80); text("Icons on the left", 46, -89)
         w.left:SetScript("OnClick", function(self) config().left = self:GetChecked() and true or false; refresh() end)
+        w.placeholders = CreateFrame("CheckButton", nil, w, "UICheckButtonTemplate")
+        w.placeholders:SetPoint("TOPLEFT", 174, -80); text("Placeholders", 208, -89, 12)
+        w.placeholders:SetScript("OnClick", function(self) config().placeholders = self:GetChecked() and true or false; refresh() end)
         local label = text("", 18, -124)
         w.size = CreateFrame("Slider", nil, w, "OptionsSliderTemplate")
         w.size:SetPoint("TOPLEFT", 24, -151); w.size:SetSize(290, 18)
@@ -322,14 +335,14 @@ DBagsAlertsState.openPartyDefensives = function()
         table.insert(UISpecialFrames, "DBagsAlertsPartyDefensiveSettings")
     end
     window.enabled:SetChecked(c.enabled); window.left:SetChecked(c.left); window.size:SetValue(c.size)
-    window.groupRange:SetChecked(c.groupRange)
+    window.groupRange:SetChecked(c.groupRange); window.placeholders:SetChecked(c.placeholders)
     refresh(); window.status:SetText(state.status); DBagsAlertsState.showSettingsWindow(window, "party")
 end
 SLASH_DBAGSPARTY1 = "/dbaparty"
 SlashCmdList.DBAGSPARTY = function(msg)
     if msg and msg:lower():match("^status") then
         refresh()
-        print("DBagsAlerts: " .. state.status .. ". RDY = cooldown ready; UP = active; ? = no readable report.")
+        print("DBagsAlerts: " .. state.status .. ". RDY = confirmed; RDY~ = estimated; UP = active. Dim = not observed.")
         return
     end
     DBagsAlertsState.openPartyDefensives()
