@@ -2,8 +2,12 @@
 ## Title: |cffff7d0aDBags|r Alerts
 ## Notes: Alerts, bars and helpers for Warrior, Paladin, Druid (all forms) and Warlock. Was ProtAlerts.
 ## Author: Yungslaya
-## Version: 1.0.5
+## Version: 1.0.6
 ## SavedVariables: DBagsAlertsDB
 
 DBagsAlerts.lua
 HealerMana.lua
+PartyDefensives.lua
+GroupRange.lua
+FollowBuddy.lua
+PetPanel.lua

@@ -153,6 +153,44 @@ local function outsideRange(unit)
     if not secret(inside) then out = not inside end
     return out, true, outAlpha, checkedAlpha
 end
+-- Each clause is an alternate native proof that WAKE UP is not active.
+-- Only the range badge is gated; drinking and low-mana reminders keep working.
+local rangeProofVariants = {}
+state.rangeProofVariants = rangeProofVariants
+DBagsAlertsState.setHealerRangeProofs = function(proofs)
+    local simple = proofs == nil or (#proofs == 1 and #proofs[1] == 0)
+    rangeIcon:SetShown(simple); rangeTitle:SetShown(simple); rangeName:SetShown(simple)
+    if simple then for _, v in ipairs(rangeProofVariants) do v.gates[1]:Hide() end; return end
+    for i, proof in ipairs(proofs) do
+        local v = rangeProofVariants[i]
+        if not v then
+            v = {gates={}}
+            local parent = rangeGate
+            for j = 1, 2 do
+                local gate = CreateFrame("Frame", nil, parent); gate:SetAllPoints(rangeFrame)
+                v.gates[j] = gate; parent = gate
+            end
+            local icon = parent:CreateTexture(nil, "ARTWORK")
+            icon:SetSize(28, 28); icon:SetPoint("LEFT")
+            icon:SetTexture("Interface\\Icons\\Ability_Hunter_Pathfinding"); icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            local label = parent:CreateFontString(nil, "OVERLAY")
+            label:SetFont(FONT, 16, "OUTLINE"); label:SetTextColor(1, 0.4, 0.2)
+            label:SetPoint("TOPLEFT", 36, 0); label:SetText("TOO FAR")
+            v.name = parent:CreateFontString(nil, "OVERLAY")
+            v.name:SetFont(FONT, 12, "OUTLINE"); v.name:SetTextColor(0.92, 0.92, 0.92)
+            v.name:SetPoint("TOPLEFT", 36, -19); v.name:SetWidth(174)
+            v.name:SetJustifyH("LEFT"); v.name:SetWordWrap(false)
+            rangeProofVariants[i] = v
+        end
+        for j = 1, 2 do
+            local value = proof[j]
+            if not secret(value) and value == nil then value = 1 end
+            v.gates[j]:SetAlpha(value)
+        end
+        v.name:SetText(selectedName or "Healer"); v.gates[1]:Show()
+    end
+    for i = #proofs + 1, #rangeProofVariants do rangeProofVariants[i].gates[1]:Hide() end
+end
 local drinkName
 local function drinking(unit)
     local api = C_UnitAuras
@@ -240,7 +278,15 @@ local function check()
     if c.range then out, rangeValid, outAlpha, checkedAlpha = outsideRange(selected) end
     local drink = c.drinking and drinking(selected) or nil
     state.outOfRange, state.drinking = out, drink
-    local mana, maximum = plain(UnitPower(selected, 0)), plain(UnitPowerMax(selected, 0))
+    -- Remote Druids may expose only their current form resource. Never feed
+    -- Cat energy or Bear rage into either the numeric or native mana warning.
+    local okPower, currentPower = pcall(UnitPowerType, selected)
+    local manaForm = okPower and plain(currentPower) == 0
+    state.manaForm = manaForm
+    local mana, maximum
+    if manaForm then
+        mana, maximum = plain(UnitPower(selected, 0)), plain(UnitPowerMax(selected, 0))
+    end
     local pct
     if type(mana) == "number" and type(maximum) == "number" and maximum > 0 then
         pct = math.max(0, math.min(100, mana / maximum * 100))
@@ -248,7 +294,7 @@ local function check()
     state.percent = pct
     low = pct ~= nil and pct < (c.threshold + (low and 5 or 0)) or false
     local native, lowAlpha = false, nil
-    if pct == nil then native, lowAlpha = nativeLowMana(selected, c.threshold) end
+    if manaForm and pct == nil then native, lowAlpha = nativeLowMana(selected, c.threshold) end
     local title
     if drink then title = "DRINKING"
     elseif low or native then title = "LOW MANA" end
@@ -256,7 +302,8 @@ local function check()
     if pct then detail = detail .. string.format("  %.0f%%", pct) end
     state.status = (native and not drink) and ("Watching " .. selectedName .. ": native mana threshold")
         or (title and (title .. ": " .. detail))
-        or (pct and string.format("%s: %.0f%% mana", selectedName, pct) or "Healer mana unavailable")
+        or (pct and string.format("%s: %.0f%% mana", selectedName, pct)
+            or (not manaForm and "Healer using a non-mana resource: mana warning paused" or "Healer mana unavailable"))
     if rangeValid then
         rangeFrame:ClearAllPoints()
         if title then rangeFrame:SetPoint("TOPLEFT", f, "TOPRIGHT", 12, -4)
@@ -316,8 +363,10 @@ DBagsAlertsState.openHealerSettings = function()
     local c = config(); if not c then return end
     if not window then
         local w = CreateFrame("Frame", "DBagsAlertsHealerSettings", UIParent)
-        window = w; w:SetSize(370, 356); w:SetPoint("CENTER"); w:SetFrameStrata("DIALOG")
-        local bg = w:CreateTexture(nil, "BACKGROUND"); bg:SetAllPoints(); bg:SetColorTexture(0.05, 0.07, 0.11, 0.98)
+        window = w; w:SetSize(370, 400); w:SetPoint("CENTER"); w:SetFrameStrata("DIALOG")
+        DBagsAlertsState.prepareSettingsWindow(w, "healer")
+        DBagsAlertsState.settingsBackButton(w, function() SlashCmdList.DBAGSALERTS("") end)
+        local bg = w:CreateTexture(nil, "BACKGROUND"); bg:SetAllPoints(); bg:SetColorTexture(0.055, 0.055, 0.065, 1)
         text(w, "Healer checks", 21, 18, -16)
         local function button(label, x, y, width, action)
             local b = CreateFrame("Button", nil, w, "UIPanelButtonTemplate")
@@ -327,7 +376,7 @@ DBagsAlertsState.openHealerSettings = function()
         button("X", 326, -10, 30, function() w:Hide() end)
         button("Test", 254, -10, 64, function() state.previewUntil = GetTime() + 5; refresh() end)
         local enabled = CreateFrame("CheckButton", nil, w, "UICheckButtonTemplate")
-        enabled:SetPoint("TOPLEFT", 14, -49); text(w, "Warn before pulling (tanks only)", 13, 48, -58)
+        enabled:SetPoint("TOPLEFT", 14, -49); text(w, "Enable healer checks", 13, 48, -58)
         enabled:SetScript("OnClick", function(self) config().enabled = self:GetChecked() and true or false; check() end)
         w.enabled = enabled
         text(w, "Healer name (blank = automatic)", 14, 18, -98)
@@ -353,8 +402,8 @@ DBagsAlertsState.openHealerSettings = function()
             b:SetScript("OnClick", function(self) config()[key] = self:GetChecked() and true or false; check() end)
             return b
         end
-        w.drinking = toggle("Warn while healer drinks", "drinking", -217)
-        w.range = toggle("Warn if healer is out of group range", "range", -248)
+        w.drinking = toggle("Drinking reminder", "drinking", -217)
+        w.range = toggle("Healer distance reminder", "range", -248)
         local status = text(w, "", 12, 18, -287); status:SetWidth(332)
         state.statusText = status
         text(w, "Pre-pull only. Range does not check line of sight.", 11, 18, -329)
@@ -363,7 +412,7 @@ DBagsAlertsState.openHealerSettings = function()
     window.enabled:SetChecked(c.enabled); window.entry:SetText(c.name)
     window.drinking:SetChecked(c.drinking); window.range:SetChecked(c.range)
     window.slider:SetValue(c.threshold); check()
-    state.statusText:SetText(state.status); window:Show()
+    state.statusText:SetText(state.status); DBagsAlertsState.showSettingsWindow(window, "healer")
 end
 SLASH_DBAGSHEALER1 = "/dbahealer"
 SlashCmdList.DBAGSHEALER = function(msg)

@@ -9,6 +9,12 @@ for cls in ("WARRIOR","PALADIN","DRUID","WARLOCK"):
       GROUPED=true; RAID=false; ROLE="TANK"; SPEC_ROLE="TANK"; MANA=20; MAX_MANA=100
       CONNECTED=true; HEALER_DEAD=false; MULTI=false; HIDDEN_MANA=false
       MANUAL=false; FORM=5
+      HEALER_POWER=0; MANA_READS=0; NATIVE_READS=0
+      local oldPowerType=UnitPowerType
+      function UnitPowerType(u)
+          if u and (u:find("party") or u:find("raid")) then return HEALER_POWER end
+          return oldPowerType(u)
+      end
       function IsInGroup() return GROUPED end
       function IsInRaid() return RAID end
       function GetNumGroupMembers() return RAID and 3 or 2 end
@@ -54,6 +60,7 @@ for cls in ("WARRIOR","PALADIN","DRUID","WARLOCK"):
       local oldPower=UnitPower
       function UnitPower(u,p)
           if u:find("party") or u:find("raid") then
+              MANA_READS=MANA_READS+1
               if HIDDEN_MANA then MODE.secret=true; local v=oldPower(); MODE.secret=false; return v end
               return MANA
           end
@@ -62,6 +69,7 @@ for cls in ("WARRIOR","PALADIN","DRUID","WARLOCK"):
       function UnitPowerMax() return MAX_MANA end
       NATIVE_SECRET=false
       function UnitPowerPercent(unit, power, predicted, curve)
+          NATIVE_READS=NATIVE_READS+1
           assert(power==0 and curve.p[2][1]==0.3 and curve.p[1][2]==1 and curve.p[2][2]==0,"wrong native mana curve")
           if NATIVE_SECRET then MODE.secret=true; local v=oldPower(); MODE.secret=false; return v end
           return MANA/MAX_MANA < curve.p[2][1] and 1 or 0
@@ -83,10 +91,28 @@ for cls in ("WARRIOR","PALADIN","DRUID","WARLOCK"):
       assert(visible() and s.unit=="party1","low healer not detected")
       assert(s.frame.title._text=="LOW MANA","warning wording")
       assert(s.frame.detail._text=="Doc-Home  20%","wrong healer details")
+      for _,formPower in ipairs({3,1}) do
+          HEALER_POWER=formPower;MANA=0;HIDDEN_MANA=true
+          local reads,native=MANA_READS,NATIVE_READS
+          check();assert(not visible(),"Cat energy/Bear rage caused LOW MANA")
+          assert(reads==MANA_READS and native==NATIVE_READS,"non-mana form queried mana threshold")
+          RANGE_INSIDE=false;check();assert(rangeVisible(),"form suppressed healer range")
+          DRINK=true;check();assert(visible() and s.frame.title._text=="DRINKING","form suppressed Drink aura")
+          DRINK=false;RANGE_INSIDE=true
+      end
+      HEALER_POWER=0;HIDDEN_MANA=false;MANA=20;check()
+      assert(visible() and s.frame.title._text=="LOW MANA","caster mana warning did not return")
       MANA=80;DRINK=true;check()
       assert(visible() and s.frame.title._text=="DRINKING","drinking at high mana not shown")
       RANGE_INSIDE=false;check()
       assert(visible() and s.frame.title._text=="DRINKING" and rangeVisible(),"drinking and range must show together")
+      DBagsAlertsState.setHealerRangeProofs({{0,1},{1,0}})
+      assert(#s.rangeProofVariants>=2,"suppression variants not created")
+      assert(s.rangeProofVariants[1].gates[1]._alpha==0 and s.rangeProofVariants[2].gates[2]._alpha==0,"suppression gates not applied")
+      DBagsAlertsState.setHealerRangeProofs({})
+      assert(visible() and s.frame.title._text=="DRINKING","WAKE UP hid drinking reminder")
+      DBagsAlertsState.setHealerRangeProofs(nil)
+      assert(not s.rangeProofVariants[1].gates[1]:IsShown(),"suppression not reset")
       DRINK=false;check();assert(not visible() and rangeVisible(),"independent out-of-range warning")
       HIDDEN_MANA=true;check();assert(s.frame._alpha==0 and rangeVisible(),"range inherited high-mana alpha")
       HIDDEN_MANA=false

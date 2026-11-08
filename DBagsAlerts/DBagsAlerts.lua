@@ -1421,6 +1421,42 @@ end
 ---------------------------------------------------------------------------
 local main = CreateFrame("Frame", "DBagsAlertsFrame", UIParent)
 DBagsAlertsState.main = main
+
+do -- Shared settings behavior: one opaque window at a time, draggable and remembered.
+    local windows = {}
+    DBagsAlertsState.settingsWindows = windows
+    DBagsAlertsState.prepareSettingsWindow = function(w, key)
+        windows[key] = w
+        w:SetMovable(true); w:SetClampedToScreen(true); w:EnableMouse(true)
+        w:RegisterForDrag("LeftButton")
+        w:SetScript("OnDragStart", function(self) self:StartMoving() end)
+        w:SetScript("OnDragStop", function(self)
+            self:StopMovingOrSizing()
+            local point, _, relative, x, y = self:GetPoint()
+            DBagsAlertsDB.windows = DBagsAlertsDB.windows or {}
+            DBagsAlertsDB.windows[key] = {point, relative, x, y}
+        end)
+        local pos = DBagsAlertsDB and DBagsAlertsDB.windows and DBagsAlertsDB.windows[key]
+        if type(pos) == "table" and type(pos[1]) == "string" then
+            w:ClearAllPoints(); w:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4])
+        end
+    end
+    DBagsAlertsState.showSettingsWindow = function(w, key)
+        for name, other in pairs(windows) do if name ~= key then other:Hide() end end
+        w:Show(); w:Raise()
+    end
+    DBagsAlertsState.isSettingsOpen = function()
+        for _, w in pairs(windows) do if w:IsShown() then return true end end
+        return false
+    end
+    DBagsAlertsState.settingsBackButton = function(w, callback)
+        local b = CreateFrame("Button", nil, w, "UIPanelButtonTemplate")
+        b:SetSize(80, 24); b:SetPoint("BOTTOMLEFT", 14, 14); b:SetText("Back")
+        b:SetScript("OnClick", function() w:Hide(); callback() end)
+        return b
+    end
+end
+
 main:SetSize(10, 10)
 main:SetMovable(true)
 main:SetClampedToScreen(true)
@@ -3357,8 +3393,9 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         tf.hp:SetSize(blockW, 9); styleText(tf.hp.text, 10, 1, 1, 1)
         tf.hp:SetStatusBarTexture(BAR_TEX); tf.hp.frame:Hide()
         tf.pw:Hide(); tf.tot:Hide()
-        tf.cast:ClearAllPoints(); tf.cast:SetPoint("TOPLEFT", tf, "TOPRIGHT", 12, -19)
-        tf.cast:SetSize(160, 20); tf.cast.frame:Hide()
+        -- Target casts get a separate lane above the header, clear of helper icons.
+        tf.cast:ClearAllPoints(); tf.cast:SetPoint("BOTTOMLEFT", tf, "TOPLEFT", 23, 12)
+        tf.cast:SetSize(blockW - 23, 20); tf.cast.icon:SetSize(20, 20); tf.cast.frame:Hide()
         tDirty.all = true
         DBagsAlertsState.dotTiles = used
         DBagsAlertsState.casterHUD = {width=W, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck, frameless=true, class=CLASS, form=ctx.form, power=POWER, melee=not DRU.caster}
@@ -4645,7 +4682,7 @@ end
 
 local function buildSettings()
     local w = CreateFrame("Frame", "DBagsAlertsSettings", UIParent)
-    w:SetSize(360, 662)
+    w:SetSize(390, 662)
     w:SetPoint("CENTER")
     w:SetFrameStrata("DIALOG")
     w:SetMovable(true); w:EnableMouse(true); w:SetClampedToScreen(true)
@@ -4653,7 +4690,7 @@ local function buildSettings()
     w:SetScript("OnDragStart", w.StartMoving)
     w:SetScript("OnDragStop", w.StopMovingOrSizing)
     w.bg = w:CreateTexture(nil, "BACKGROUND")
-    w.bg:SetAllPoints(); w.bg:SetColorTexture(0.06, 0.06, 0.08, 0.96)
+    w.bg:SetAllPoints(); w.bg:SetColorTexture(0.055, 0.055, 0.065, 1)
     addBorder(w, 0, 0, 0, 1, 1)
     local accent = w:CreateTexture(nil, "ARTWORK")
     accent:SetPoint("TOPLEFT"); accent:SetPoint("TOPRIGHT"); accent:SetHeight(3)
@@ -4670,6 +4707,16 @@ local function buildSettings()
     sub:SetText("")
     local close = makeButton(w, "X", 24, function() w:Hide() end)
     close:SetPoint("TOPRIGHT", -8, -8)
+    local outer = w
+    DBagsAlertsState.prepareSettingsWindow(outer, "main")
+    outer.opened = false
+    local scroll = CreateFrame("ScrollFrame", "DBagsAlertsSettingsScroll", outer, "UIPanelScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", outer, "TOPLEFT", 0, -44)
+    scroll:SetPoint("BOTTOMRIGHT", outer, "BOTTOMRIGHT", -26, 12)
+    local page = CreateFrame("Frame", nil, scroll); page:SetWidth(360)
+    scroll:SetScrollChild(page)
+    local w = CreateFrame("Frame", nil, page)
+    w:SetWidth(360); w:SetPoint("TOPLEFT", page, "TOPLEFT", 0, 44)
 
     local items = {}
     local function add(x) table.insert(items, x) return x end
@@ -4734,6 +4781,14 @@ local function buildSettings()
         if DBagsAlertsState.openHealerSettings then DBagsAlertsState.openHealerSettings() end
     end)
     healer:SetPoint("TOPLEFT", 230, -320)
+    local party = makeButton(w, "Party helpers", 130, function()
+        if DBagsAlertsState.openPartyDefensives then DBagsAlertsState.openPartyDefensives() end
+    end)
+    party:SetPoint("TOPLEFT", 220, -348)
+    local pets = makeButton(w, "Pet controls", 130, function()
+        if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end
+    end)
+    pets:SetPoint("TOPLEFT", 220, -376)
     if CLASS_MACROS[CLASS] then
         local mk = makeButton(w, "Create macros", 200, makeMacros)
         mk:SetPoint("TOPLEFT", 20, -348)
@@ -4748,8 +4803,8 @@ local function buildSettings()
     end
 
     -- WARNINGS
-    heading(w, "Thresholds", -384)
-    local y = -424
+    heading(w, "Thresholds", -416)
+    local y = -456
     local hp = add(makeSlider(w, "Low health", 10, 80, 5, "%d%%", function() return DB.lowHp end,
         function(v) DB.lowHp = v end))
     hp:SetPoint("TOPLEFT", 20, y)
@@ -4813,10 +4868,12 @@ local function buildSettings()
         if col == 2 then col = 0; y = y - 22 end
     end
     if col == 1 then y = y - 22 end
-    w:SetHeight(-y + 16)
-
-    w.refresh = function() for _, it in ipairs(items) do it.refresh() end end
-    return w
+    local fullHeight = -y + 16
+    w:SetHeight(fullHeight); page:SetHeight(fullHeight - 44)
+    outer:SetHeight(math.min(fullHeight, 820, math.max(420, (UIParent:GetHeight() or 900) - 80)))
+    outer.refresh = function() for _, it in ipairs(items) do it.refresh() end end
+    DBagsAlertsState.settingsFrame = outer
+    return outer
 end
 
 toggleSettings = function()
@@ -4824,7 +4881,7 @@ toggleSettings = function()
     if settings:IsShown() and settings.opened then settings:Hide() return end
     settings.opened = true
     settings.refresh()
-    settings:Show()
+    DBagsAlertsState.showSettingsWindow(settings, "main")
 end
 
 end   -- settings + macro block
@@ -4841,7 +4898,13 @@ end
 SLASH_DBAGSALERTS1 = "/pa"
 SLASH_DBAGSALERTS2 = "/dba"
 SlashCmdList.DBAGSALERTS = function(msg)
-    if not DB then say("warriors and paladins only.") return end
+    if not DB then
+        local option = (msg or ""):lower():match("^%s*(%S*)")
+        if (option=="" or option=="settings" or option=="options") and DBagsAlertsState.openPetSettings then
+            DBagsAlertsState.openPetSettings()
+        else say("Use /dbapet for pet controls on this class.") end
+        return
+    end
     local cmd, rest = (msg or ""):lower():match("^(%S*)%s*(.-)$")
     if cmd == "" or cmd == "settings" or cmd == "options" then
         toggleSettings()

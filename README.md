@@ -6,6 +6,8 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 ## What's new
 
+- **1.0.6:** Pet support: independent movable pet health/resource frame, right-click pet menu, 10 native action slots, right-click autocast and Shift-drag rearranging. Warlock demon summons/Health Funnel and Hunter Call/Revive/Mend/Feed/Train/Dismiss buttons show only when learned. Hunter happiness, loyalty, training points and food tooltip; Growl/Torment reminder in dungeons. /dbapet opens settings, including on Hunters. Follow status is independently draggable above center; lock/move controls in /dbafollow. Cleaner, draggable settings with one window at a time and scrolling. Party defensive icons for five-player dungeons. WAKE UP uses confirmed 40-yard measurements on your map, explicitly hides when the majority is nearby, and waits two seconds before showing; slow red edges pause during settings. Set a timed pause key and 10–300 second duration in /dbagroup. Follow buddy now calls Blizzard's native FollowUnit only from your keypress; set the name and key in /dbafollow, with confirmed/failed/stopped status. Druid Cat/Bear resources no longer trigger healer LOW MANA. Target cast bar stays above the target header. Restart WoW for new modules/bindings.
+
 - **1.0.5:** Tank-only healer checks: LOW MANA (default 30%), DRINKING, and a separate TOO FAR badge that can show alongside either warning. Compact gold-pulsing helper above your HUD. Automatic healer-role detection or manual name; separate toggles, threshold, Test button and status under /pa → Healer checks or /dbahealer. Handles native hidden mana/range values and low-level Protection Warriors. Shows SET HEALER when selection is unresolved. Pre-pull only; range is the native group check, not exact yards or line of sight. Restart WoW after updating.
 
 - **1.0.4:** Separate glowing Cleave helper for 2+ engaged enemies, with a 40-rage buffer (60 with Shield Slam or heavy hits). Hides when queued; toggle Cleave in /pa. Added PA Retaliation: Battle Stance, then Retaliation, with auto-attack. Run /pa macros after /reload. The existing swing bar follows gun/bow/crossbow shots in blue and returns to melee on your next main-hand swing. Uses Forever's native swing type, ignores offhand swings, and handles ranged speed changes. Timing starts after a real shot event. /reload.
@@ -45,11 +47,16 @@ Coming from ProtAlerts? Install DBagsAlerts, start WoW once (it turns ProtAlerts
 - `/pa macros` - make the macros
 - `/pa unlock` - move it
 - `/pa food` - why the EAT button is or isn't showing
+- `/dbapet` - pet frame and controls (including Hunter pet support; no Hunter rotation)
+- `/dbafollow` - follow name, key and movable status
+- `/dbagroup` - group distance warning and pause key
+- `/dbaparty` - active defensive icons in five-player dungeons
 
 ## Rules it follows
 
-Display only. It never presses buttons, casts or moves for you. It only shows what Blizzard's addon API lets it read.
+Alerts use Blizzard's addon API. Pet commands, spell buttons and Follow require your click or keypress; the addon never starts them on a timer. Follow uses the game's normal follow behavior.
 
 ## Credits
 
 Swing timer technique from AKForeverCombatTimers (MIT). Textures are made by the scripts in `tools/`.
+
