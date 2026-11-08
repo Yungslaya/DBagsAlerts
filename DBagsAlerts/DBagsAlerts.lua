@@ -3273,6 +3273,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         tf.pw:Show(); tf.tot:Show()
     end
     DRU.layoutCaster = function()
+        DRU.targetAuraCache = {}
         DRU.hideOldCaster()
         deck:Show()
         blockW = W - 2 * PAD
@@ -3351,7 +3352,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
             f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name])); f:Show()
             used[#used + 1] = f
         end
-        if #list > 0 then y = y + 47 end
+        if #list > 0 or CLASS == "DRUID" then y = y + 47 end
         healthBar:SetHeight(14); healthBar:SetWidth(blockW)
         healthBar:ClearAllPoints(); healthBar:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, -y)
         healthBar:SetStatusBarTexture(BAR_TEX); healthBar:SetStatusBarColor(0.19, 0.55, 0.38)
@@ -3427,6 +3428,48 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end
     end
     local elapsed, shardAt = 0, 0
+    -- Native own-aura display: no spell-name lookup or target GUID required.
+    -- Secret icons/timing pass straight to Blizzard display widgets.
+    local nativeAt, nativeCache = -1, nil
+    local function nativeDruidDots(now)
+        if CLASS ~= "DRUID" then return false end
+        local api = C_UnitAuras
+        if not (api and api.GetUnitAuraInstanceIDs and api.GetAuraDataByAuraInstanceID and api.GetAuraDuration) then return false end
+        if nativeCache ~= DRU.targetAuraCache or now - nativeAt >= 0.5 then
+            nativeAt, nativeCache = now, DRU.targetAuraCache
+            for _, f in ipairs(dots) do f:Hide() end
+            wipe(used)
+            if ctx.hostile then
+                local ids = api.GetUnitAuraInstanceIDs("target", "HARMFUL|PLAYER", 6)
+                if not secret(ids) and not sectable(ids) and type(ids) == "table" then
+                    for _, id in ipairs(ids) do
+                        if not secret(id) and type(id) == "number" and #used < 6 then
+                            local aura = api.GetAuraDataByAuraInstanceID("target", id)
+                            if aura and not secret(aura) and not sectable(aura) then
+                                local i = #used + 1
+                                local f = tile(i)
+                                f.name = plain(aura.name, nil)
+                                f.auraID = id
+                                f:SetSize(40,40); f:ClearAllPoints()
+                                f:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + (i - 1) * 46, -dotY)
+                                f.icon:SetTexture(aura.icon)
+                                f.icon:SetDesaturated(false); f.shade:SetAlpha(0); f:SetAlpha(1)
+                                f.num:SetText(""); f.bar:SetValue(0)
+                                local exp, duration = plain(aura.expirationTime, nil), plain(aura.duration, nil)
+                                local threshold = f.name and refreshAt[f.name] or 0
+                                setRefreshGlow(f, ctx.combat and exp and duration and duration > 0
+                                    and exp > now and exp - now <= duration * threshold)
+                                f.nativeCD:SetCooldownFromDurationObject(api.GetAuraDuration("target", id))
+                                f.nativeCD:Show(); f:Show()
+                                used[#used + 1] = f
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return true
+    end
     local driver = CreateFrame("Frame")
     driver:SetScript("OnUpdate", function(_, dt)
         if not DRU.lux or not DB then return end
@@ -3441,6 +3484,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         end
         -- The unit frame shows every target; combat helpers still require an enemy.
         tf:SetShown(DB.target and plain(UnitExists("target"), false) and true or false)
+        if nativeDruidDots(now) then return end
         local key = ctx.hostile and targetKey()
         for _, f in ipairs(used) do
             f:SetShown(ctx.hostile and true or false)
