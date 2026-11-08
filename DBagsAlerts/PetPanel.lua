@@ -65,13 +65,9 @@ for i=1,10 do
     b.cd=CreateFrame("Cooldown",nil,b,"CooldownFrameTemplate");b.cd:SetAllPoints();b.cd:SetDrawBling(false);b.cd:SetHideCountdownNumbers(false)
     b:SetScript("OnEnter",function(self) GameTooltip:SetOwner(self,"ANCHOR_RIGHT");if GameTooltip.SetPetAction then GameTooltip:SetPetAction(self.slot) end;GameTooltip:Show() end)
     b:SetScript("OnLeave",function() GameTooltip:Hide() end)
-    -- Preserve SecureActionButtonTemplate's left-click handler.
-    b:HookScript("OnClick",function(self,button,down)
-        if button=="RightButton" and down~=false and GetPetActionInfo and TogglePetAutocast then
-            local _,_,_,_,allowed=GetPetActionInfo(self.slot)
-            if plain(allowed)==true then TogglePetAutocast(self.slot) end
-        end
-    end)
+    -- Right-click is delegated by the secure click action to Blizzard's own
+    -- pet button. Its trusted handler toggles autocast; addon Lua never calls
+    -- TogglePetAutocast (which is protected even from an OnClick hook).
     b:RegisterForDrag("LeftButton")
     local function pickup(self)
         if not InCombatLockdown() and IsShiftKeyDown and IsShiftKeyDown() and PickupPetAction then PickupPetAction(self.slot) end
@@ -134,6 +130,11 @@ local pending=true
 local function configure()
     if InCombatLockdown() then pending=true;return end
     pending=false
+    for i,b in ipairs(state.actions) do
+        local native=_G["PetActionButton"..i]
+        b:SetAttribute("type2",native and "click" or nil)
+        b:SetAttribute("clickbutton2",native)
+    end
     local c=config();local pos=c.point or {"CENTER","CENTER",-440,-160}
     panel:ClearAllPoints();panel:SetPoint(pos[1],UIParent,pos[2],pos[3],pos[4]);panel:SetScale(c.scale);tools:SetScale(c.scale)
     if RegisterStateDriver then RegisterStateDriver(panel,"visibility",c.enabled and "[pet] show; hide" or "hide") end

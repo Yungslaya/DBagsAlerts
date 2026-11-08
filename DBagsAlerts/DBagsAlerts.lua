@@ -3305,7 +3305,9 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         local width = math.max(W, blockW * math.max(targetScale, playerScale, castScale) + 2 * PAD)
         dotColumns = math.max(1, math.min(6, math.floor((width - 2 * PAD) / (46 * dotScale))))
         local actionTop = math.max(42, 8 + (28 + (DB.targetOfTarget and 20 or 0)) * targetScale + 6)
-        main:SetSize(width, 260)
+        -- Keep the drag anchor fixed. Resizing a child must not resize its
+        -- CENTER-anchored parent and shift the whole HUD on the screen.
+        main:SetSize(W, 260)
         deck:ClearAllPoints(); deck:SetAllPoints()
         ring:Hide(); advice:Hide(); threatBar:Hide(); swingBar:Hide(); panel:Hide()
         for _, f in pairs(slotBG) do f:Hide() end
@@ -3423,7 +3425,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         styleText(castPlayer.name, 14, 1, 1, 1); styleText(castPlayer.left, 14, 1, 1, 1)
         if DB.casts then y = y + 32 * castScale end
         utilityY = y
-        shardText:ClearAllPoints(); shardText:SetPoint("TOPRIGHT", main, "TOPRIGHT", -PAD, -(y + 6))
+        shardText:ClearAllPoints(); shardText:SetPoint("TOPRIGHT", main, "TOPLEFT", width - PAD, -(y + 6))
         local n = 0
         local cdColumns = math.max(1, math.min(6, math.floor((width - 2 * PAD) / (31 * cdScale))))
         if not DB.off.cooldowns then
@@ -3440,7 +3442,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         end
         if n > 0 then y = y + math.ceil(n / cdColumns) * 31 * cdScale end
         if CLASS ~= "WARLOCK" then shardText:SetText("") end
-        main:SetSize(width, y + 8); main:SetScale(DB.scale)
+        main:SetSize(W, 260); main:SetScale(DB.scale)
         main:ClearAllPoints(); main:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
         main:EnableMouse(not DB.locked); main:EnableMouseWheel(not DB.locked); main.bg:SetShown(not DB.locked)
         -- Target is a compact header attached to the same column.

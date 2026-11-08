@@ -25,7 +25,8 @@ for cls in ("WARLOCK","HUNTER","WARRIOR","PALADIN","DRUID","MAGE","PRIEST"):
           return "Pet action "..i,123,false,i==2,false,false,99
       end
       function GetPetActionCooldown() return 0,0,0 end
-      function TogglePetAutocast(slot) assert(slot==4);AUTO=not AUTO;AUTO_CALLS=AUTO_CALLS+1 end
+      function TogglePetAutocast() error("insecure protected autocast call") end
+      for i=1,10 do _G["PetActionButton"..i]={nativeSlot=i} end
       function IsShiftKeyDown() return true end
       function PickupPetAction(slot) PICKUPS=PICKUPS+1 end
       C_PetInfo={GetPetHappiness=function() return 1 end,GetPetLoyalty=function() return "Best Friend" end,
@@ -57,10 +58,10 @@ for cls in ("WARLOCK","HUNTER","WARRIOR","PALADIN","DRUID","MAGE","PRIEST"):
       assert(s.actions[4].attrs.type1=="pet" and s.actions[4].attrs.action1==4,"native action not configured")
       assert(AUTO_CALLS==0 and PICKUPS==0,"pet actions automated by update")
       assert(rawget(s.actions[4],"_OnClick")==nil,"native secure pet action click handler replaced")
-      s.actions[4]._hookOnClick(s.actions[4],"RightButton",true)
-      assert(AUTO_CALLS==1,"right-click autocast not invoked")
-      s.actions[4]._hookOnClick(s.actions[4],"RightButton",false)
-      assert(AUTO_CALLS==1,"release toggled autocast twice")
+      assert(rawget(s.actions[4],"_hookOnClick")==nil,"insecure click hook installed")
+      assert(s.actions[4].attrs.type2=="click","right-click not secure delegated")
+      assert(s.actions[4].attrs.clickbutton2==PetActionButton4,"wrong native action slot")
+      assert(AUTO_CALLS==0,"addon called protected autocast")
       s.actions[4]._OnDragStart(s.actions[4]);assert(PICKUPS==1,"shift-drag action not picked up")
       if MODE_CLASS=="HUNTER" then
           assert(s.utilityCount==6,"Hunter controls missing")

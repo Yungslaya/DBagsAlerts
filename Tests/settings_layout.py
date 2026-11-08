@@ -54,6 +54,7 @@ for cls in ('WARRIOR','PALADIN','DRUID','WARLOCK'):
   w.selectPage("sizes")
   local enabled=w.controls.customSizes
   enabled.GetChecked=function() return true end;enabled._OnClick(enabled)
+  local anchorW,anchorH=state.main._w,state.main._h
   w.controls.size_target._OnValueChanged(w.controls.size_target,1.6)
   assert(state.targetFrame:GetScale()==1.6,"target size slider did not resize target")
   assert(db.scale==1,"target size changed entire HUD")
@@ -62,6 +63,7 @@ for cls in ('WARRIOR','PALADIN','DRUID','WARLOCK'):
   w.controls.size_alerts._OnValueChanged(w.controls.size_alerts,1.25)
   w.controls.size_cooldowns._OnValueChanged(w.controls.size_cooldowns,1.5)
   assert(state.targetFrame:GetScale()==1.6,"other part resize changed target size")
+  assert(state.main._w==anchorW and state.main._h==anchorH,"individual size changed shared drag anchor")
   assert(state.casterHUD.dotY>=8+48*1.6,"larger target/ToT overlaps DoTs")
   local first=state.dotTiles[1]
   if first then assert(first:GetScale()==2,"DoT size slider unused") end
