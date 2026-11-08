@@ -1,5 +1,13 @@
 # DBagsAlerts (work in progress)
 
+## 1.0.17
+
+- Added a wand timer that starts after a shot, keeps counting while you move, and shows when the next shot is ready.
+- The Warlock wand timer sits with the combat bars. Mage and Priest characters get a separate movable timer.
+- Removed the stray "No Text" wording from readable interaction cast names.
+
+Restart WoW after updating to load the new timer file. The timer needs a readable shot duration or weapon speed; it stays hidden when neither is available.
+
 Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Paladin, Druid** (Bear, Cat, Balance and Restoration) **and Warlock** (Affliction, Demonology, Destruction). This was **ProtAlerts**.
 
 > **WIP:** it's being built and tested while leveling. Expect changes and rough edges.

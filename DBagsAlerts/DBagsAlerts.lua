@@ -2897,7 +2897,12 @@ local function refreshCast(cb, unit, isTarget)
     local dir = channel and DIR_DOWN or DIR_UP
     if not (dur and cb.SetTimerDuration and pcall(cb.SetTimerDuration, cb, dur, TIMER_NOW, dir)) then cb:Hide() return end
     pcall(cb.lock.SetTimerDuration, cb.lock, dur, TIMER_NOW, dir)
-    pcall(cb.name.SetText, cb.name, name)
+    local displayName=name
+    if not secret(name) and type(name)=="string" then
+        -- Some interaction spells expose an internal "No Text" suffix.
+        displayName=name=="No Text" and "Interacting" or name:gsub("%s+%-%s+No Text$","")
+    end
+    pcall(cb.name.SetText, cb.name, displayName)
     pcall(cb.icon.SetTexture, cb.icon, tex)
     if isTarget then boolAlpha(cb.lock, notInt, 1, 0) else cb.lock:SetAlpha(0) end
     cb:Show()
@@ -3464,6 +3469,10 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
             local swingH=DRU.placePart(swingBar,"swing",blockW,3,PAD,y+threatH*threatScale+2,swingScale)
             swingBar.frame:Hide()
             y=y+threatH*threatScale+swingH*swingScale+7*playerScale
+        elseif CLASS=="WARLOCK" and not DB.off.swing then
+            local scale=playerScale*DRU.partScale("swing")
+            local height=DRU.placePart(swingBar,"swing",blockW,10,PAD,y,scale)
+            y=y+(height+4)*scale
         end
         castY = y
         local cc = CLASS == "PALADIN" and {0.80, 0.54, 0.62}
