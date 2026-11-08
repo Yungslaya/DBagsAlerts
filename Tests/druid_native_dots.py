@@ -6,6 +6,9 @@ lua.execute('MODE_CLASS="DRUID";CAST_IDS={}')
 lua.execute((root/'Tests/harness.lua').read_text(encoding='utf-8'))
 lua.execute('''
 FORM_ID=0;PTYPE=0;WHICH="A";MODE.secret=true
+-- Hidden fields may still be displayable when aura access is permitted.
+-- Permission and field secrecy are separate; the old mock missed this.
+C_Secrets.ShouldAurasBeSecret=function() return false end
 UnitGUID=function() return nil end
 C_UnitAuras.GetUnitAuraInstanceIDs=function(unit,filter,maxCount)
     assert(unit=="target" and filter=="HARMFUL|PLAYER" and maxCount==6)
@@ -33,6 +36,36 @@ FORM_ID=1;PTYPE=3;FIRE("UPDATE_SHAPESHIFT_FORM");ADVANCE(0.6);step()
 assert(#tiles==2 and tiles[1].auraID==101,"changing form lost existing caster DoTs")
 WHICH="B";FIRE("UNIT_AURA","target");step()
 assert(#tiles==0,"removed native DoTs not cleared")
+-- Reported failure: enumeration itself is forbidden, even if pcall is used.
+local reads=0
+local getIDs=C_UnitAuras.GetUnitAuraInstanceIDs
+local getData=C_UnitAuras.GetAuraDataByAuraInstanceID
+local getDuration=C_UnitAuras.GetAuraDuration
+C_UnitAuras.GetUnitAuraInstanceIDs=function() reads=reads+1;error('forbidden aura enumeration') end
+C_UnitAuras.GetAuraDataByAuraInstanceID=function() error('forbidden aura data') end
+C_UnitAuras.GetAuraDuration=function() error('forbidden aura duration') end
+C_Secrets.ShouldAurasBeSecret=function() return true end
+WHICH="A";FIRE("PLAYER_TARGET_CHANGED");step()
+assert(reads==0,'queried forbidden aura API')
+for _,tile in ipairs(tiles) do assert(rawget(tile,'auraID')==nil,'stale native aura ID retained') end
+FIRE('UNIT_SPELLCAST_SUCCEEDED','player','cast',63);ADVANCE(0.5);step()
+local ownTimer=false
+for _,tile in ipairs(tiles) do
+ if tile.name=='Rake' and type(tile.num._text)=='string' and tile.num._text:match('^%d+$') then ownTimer=true end
+end
+assert(ownTimer,'readable own-cast timer lost when aura access blocked')
+-- Restriction outlives combat: must still obey it after combat ends.
+MODE.combat=false;FIRE('PLAYER_REGEN_ENABLED');step();assert(reads==0)
+-- Unknown/secret permission also means no aura access.
+MODE.secret=true;C_Secrets.ShouldAurasBeSecret=function() return UnitPower() end
+step();assert(reads==0)
+C_Secrets.ShouldAurasBeSecret=function() return false end
+C_UnitAuras.GetUnitAuraInstanceIDs=getIDs
+C_UnitAuras.GetAuraDataByAuraInstanceID=getData
+C_UnitAuras.GetAuraDuration=getDuration
+UnitCanAttack=function() return true end
+FIRE('UNIT_AURA','target');step()
+assert(#tiles==2 and tiles[1].auraID==101,'native auras did not recover: count='..#tiles..' id='..tostring(tiles[1] and rawget(tiles[1],'auraID')))
 for msg in pairs(ERRORS) do error(msg) end
 ''',chunk)
 print('Restricted Druid auras: native hidden icons/countdowns, target switching, form switching and removal PASS')

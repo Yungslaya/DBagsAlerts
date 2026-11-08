@@ -6,6 +6,8 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 ## What's new
 
+- **1.0.15:** Fixed the Druid DoT display querying aura IDs when Forever blocks aura access. Restricted mode uses readable own-cast timers; native auras resume when permitted. HUD layout changes, including form changes, wait until combat ends because secure helper buttons protect the shared anchor. Regression checks now forbid aura API calls while restricted and protected anchor changes in combat. `/reload` after updating; in-game confirmation pending.
+
 - **1.0.14:** A small Legacy picks guide attaches beside the Legacy talent page. Shows current ranks, next recommended rank and a short reason; follows staged purchases and refunds without spending points. Outdoor leveling: Thrill of Adventure 5, Well Rested 5, Talented 5, Field Medicine 1. Switch to Dungeon leveling to prioritize Well Rested and Talented. Missing/hidden ranks show ?; level 60 stops leveling advice. Uses Blizzard's read-only trait API. Restart WoW once for the new file. Automated Legacy and four-class checks pass; the latest in-game debug report recorded zero errors. Exact Legacy panel appearance still needs in-game confirmation.
 
 - **1.0.13:** Fixed the debug report window throwing a Lua error when opened or refreshed. Long reports now measure wrapped text correctly and remain scrollable. Regression checks pass; a fresh in-game report showed zero errors. `/reload` after updating. Old saved errors can be removed with `/dbadebug` → Clear log.

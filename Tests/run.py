@@ -260,6 +260,8 @@ do
 end
 -- Shared floating layout across all four classes.
 do
+    -- Settings/form layouts are applied only outside protected combat lockdown.
+    MODE.combat=false; FIRE("PLAYER_REGEN_ENABLED")
     DBagsAlertsDB.stack=true; DBagsAlertsDB.casts=true
     SlashCmdList.DBAGSALERTS("newlook"); ADVANCE(1); TICK()
     local function hud()
@@ -332,10 +334,12 @@ if MODE_CLASS == "WARLOCK" then
             if a.hudSpot == "next" then assert(a.root._w == 60, "main cue not large")
             elseif a.hudSpot then assert(a.root._w == 28, "helper not small") end
         end
+        MODE.combat = false; FIRE("PLAYER_REGEN_ENABLED")
         SlashCmdList.DBAGSALERTS("oldlook")
         assert(h.frame._shown == false, "new HUD still visible in oldlook")
         SlashCmdList.DBAGSALERTS("newlook")
         assert(h.frame._shown == true, "new HUD not restored")
+        MODE.combat = true
         print("HUD: 300px, frameless, side action cue, 28px helpers, 26px cast, old/new toggle PASS")
     end
     PET = false; step()

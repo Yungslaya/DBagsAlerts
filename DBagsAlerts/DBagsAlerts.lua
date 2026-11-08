@@ -2047,6 +2047,10 @@ local function layoutStack()
 end
 
 local function layout()
+    -- Secure helper buttons are anchored to this HUD. Their anchor cannot be
+    -- resized/repositioned by addon code during combat, including form changes.
+    if InCombatLockdown() then DRU.layoutPending = true; return end
+    DRU.layoutPending = nil
     local width = BAR_W + 12
     local y = 0
     if CLASS == "DRUID" then
@@ -3274,6 +3278,20 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         if want then f.refreshGlow:Show(); f.refreshPulse:Play()
         else f.refreshPulse:Stop(); f.refreshGlow:Hide() end
     end
+    local function trackedDots()
+        for _, f in ipairs(dots) do f:Hide() end
+        wipe(used)
+        for i, name in ipairs(dotList()) do
+            local f = tile(i)
+            f.name, f.auraID = name, nil
+            f:SetSize(40, 40); f:ClearAllPoints(); f:SetScale(dotScale)
+            f:SetPoint("TOPLEFT", main, "TOPLEFT", dotX / dotScale + ((i - 1) % dotColumns) * 46, -dotY / dotScale - math.floor((i - 1) / dotColumns) * 47)
+            f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
+            f.nativeCD:Clear(); f.nativeCD:Hide(); setRefreshGlow(f, false)
+            used[#used + 1] = f
+        end
+        DRU.nativeDotsMode = false
+    end
     DRU.targetAuraCache = {}
     local function dotLeft(name, now, key)
         -- Re-read the current target, including DoTs applied before switching away.
@@ -3322,6 +3340,8 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         tf.pw:Show(); tf.tot:SetShown(DB.targetOfTarget and true or false)
     end
     DRU.layoutCaster = function()
+        if InCombatLockdown() then DRU.layoutPending = true; return end
+        DRU.nativeDotsMode = nil
         DRU.targetAuraCache = {}
         DRU.hideOldCaster()
         deck:Show()
@@ -3507,8 +3527,22 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
     local nativeAt, nativeCache = -1, nil
     local function nativeDruidDots(now)
         if CLASS ~= "DRUID" then return false end
+        -- Secret aura access can be forbidden outright, not merely return
+        -- hidden fields. Check permission BEFORE enumerating any aura IDs.
+        local allowed = not InCombatLockdown()
+        if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+            local ok, restricted = pcall(C_Secrets.ShouldAurasBeSecret)
+            allowed = ok and not secret(restricted) and restricted == false
+        end
+        if not allowed then
+            if DRU.nativeDotsMode ~= false then trackedDots() end
+            nativeAt, nativeCache = -1, nil
+            return false -- use readable own-cast timers, never inspect hidden auras
+        end
         local api = C_UnitAuras
         if not (api and api.GetUnitAuraInstanceIDs and api.GetAuraDataByAuraInstanceID and api.GetAuraDuration) then return false end
+        if DRU.nativeDotsMode ~= true then nativeAt = -1 end
+        DRU.nativeDotsMode = true
         if nativeCache ~= DRU.targetAuraCache or now - nativeAt >= 0.5 then
             nativeAt, nativeCache = now, DRU.targetAuraCache
             for _, f in ipairs(dots) do f:Hide() end
@@ -4538,6 +4572,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         if ... == "target" then DRU.targetAuraCache = {} end
         auraDirty = true          -- read once on the next tick, not on every aura event
     elseif event == "PLAYER_REGEN_ENABLED" then
+        if DRU.layoutPending then layout() end
         if DRU.applyHelperSize then DRU.applyHelperSize() end
         readAll()
         if event == "PLAYER_REGEN_ENABLED" then readSpeed() end
