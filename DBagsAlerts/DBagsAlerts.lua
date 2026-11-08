@@ -562,6 +562,15 @@ end
 ---------------------------------------------------------------------------
 local ctx = {}
 DBagsAlertsState = { ctx = ctx }   -- read-only peek for /pa debug and testing
+DBagsAlertsState.tankSetup = function()
+    if CLASS == "PALADIN" then return DB and DB.tank ~= false end
+    if CLASS == "DRUID" then return ctx.form == "bear" end
+    if CLASS == "WARRIOR" then
+        return spell["Shield Slam"] ~= nil or DRU.passive["Defiance"] == true
+            or DRU.passive["Improved Revenge"] == true or DRU.passive["Shield Specialization"] == true
+    end
+    return false
+end
 
 local WARRIOR_ALERTS = {
     -- DANGER ROW
@@ -1411,6 +1420,7 @@ end
 -- UI
 ---------------------------------------------------------------------------
 local main = CreateFrame("Frame", "DBagsAlertsFrame", UIParent)
+DBagsAlertsState.main = main
 main:SetSize(10, 10)
 main:SetMovable(true)
 main:SetClampedToScreen(true)
@@ -4720,6 +4730,10 @@ local function buildSettings()
     stn2:SetPoint("TOPLEFT", 16, -290)
     local test = makeButton(w, "Preview", 200, function() testUntil = GetTime() + 8 end)
     test:SetPoint("TOPLEFT", 20, -320)
+    local healer = makeButton(w, "Healer checks", 106, function()
+        if DBagsAlertsState.openHealerSettings then DBagsAlertsState.openHealerSettings() end
+    end)
+    healer:SetPoint("TOPLEFT", 230, -320)
     if CLASS_MACROS[CLASS] then
         local mk = makeButton(w, "Create macros", 200, makeMacros)
         mk:SetPoint("TOPLEFT", 20, -348)

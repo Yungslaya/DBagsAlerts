@@ -6,6 +6,8 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 ## What's new
 
+- **1.0.5:** Tank-only healer checks: LOW MANA (default 30%), DRINKING, and a separate TOO FAR badge that can show alongside either warning. Compact gold-pulsing helper above your HUD. Automatic healer-role detection or manual name; separate toggles, threshold, Test button and status under /pa → Healer checks or /dbahealer. Handles native hidden mana/range values and low-level Protection Warriors. Shows SET HEALER when selection is unresolved. Pre-pull only; range is the native group check, not exact yards or line of sight. Restart WoW after updating.
+
 - **1.0.4:** Separate glowing Cleave helper for 2+ engaged enemies, with a 40-rage buffer (60 with Shield Slam or heavy hits). Hides when queued; toggle Cleave in /pa. Added PA Retaliation: Battle Stance, then Retaliation, with auto-attack. Run /pa macros after /reload. The existing swing bar follows gun/bow/crossbow shots in blue and returns to melee on your next main-hand swing. Uses Forever's native swing type, ignores offhand swings, and handles ranged speed changes. Timing starts after a real shot event. /reload.
 
 - **1.0.3:** Upkeep timer icons glow gold when missing or due for refresh. Rend lights at 30% remaining and stops glowing when reapplied. Other spells keep their existing refresh timing. Restored the single Battle Shout reminder above the helper icons in the floating HUD. Shield Block gets its own glowing BLOCK cue when your target is attacking you and the spell is ready and usable. Friendly players and NPCs now show in the target frame too; its right-click area fits the compact header. /reload.
