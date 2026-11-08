@@ -6,6 +6,8 @@ Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Pala
 
 ## What's new
 
+- **1.0.9:** Party defensive icons now show cooldown-ready (RDY), active (UP), and real cooldown countdowns in five-player dungeons. Party members share only their own readable cooldown data through Blizzard addon messages. Both players need this update for readiness reports. Missing, restricted or stale data is marked ?. Cooldown ready does not guarantee the required stance, equipment or resources. Uses learned spells only, with bounded messages and no scans outside dungeon parties. A full restart is required for the new module.
+
 - **1.0.8:** Druid timers now display your actual current-target harmful auras through native icons and countdowns, including combat-restricted aura fields. No spell-name lookup or target GUID is needed for this row. Existing DoTs survive target and form changes. Readable refresh glows remain; hidden timing is displayed without guessing a refresh window. Automated restricted-aura tests pass; live confirmation is pending. `/reload` after updating.
 
 - **1.0.7:** DoT timers restore from your own current-target auras after switching targets, with immediate refresh/removal updates and a short cache. Added Retaliation to the Warrior cooldown row. Dungeon defensive icons now recognize readable Forever defensive buffs that lack the native category and find nested party frames. These icons show active buffs, not ready cooldowns. `/dbaparty status` reports tracker status. Automated checks pass; live confirmation is pending. `/reload` after updating.

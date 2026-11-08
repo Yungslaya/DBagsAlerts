@@ -1,5 +1,4 @@
--- Active party defensives using Blizzard's native aura category and duration objects.
--- No spellcast inference, addon messages, combat automation, or hidden-value comparisons.
+-- Party readiness from public self-reports, plus native active defensive auras.
 local secret = issecretvalue or function() return false end
 local function plain(v) if not secret(v) then return v end end
 local function readable(t)
@@ -86,20 +85,31 @@ local function rowFor(unit)
     -- These are independent, non-secure display frames. Never modify the party frame.
     local row = CreateFrame("Frame", nil, UIParent)
     row:SetFrameStrata("HIGH"); row:Hide(); row.icons = {}; row.unit = unit
-    for i = 1, 3 do
+    for i = 1, 6 do
         local icon = CreateFrame("Frame", nil, row)
         icon.tex = icon:CreateTexture(nil, "ARTWORK"); icon.tex:SetAllPoints()
         icon.tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
         local edge = icon:CreateTexture(nil, "BACKGROUND")
         edge:SetPoint("TOPLEFT", -1, 1); edge:SetPoint("BOTTOMRIGHT", 1, -1)
         edge:SetColorTexture(1, 0.82, 0.25, 0.9)
+        icon.edge = edge
         icon.cd = CreateFrame("Cooldown", nil, icon, "CooldownFrameTemplate")
         icon.cd:SetAllPoints(); icon.cd:SetDrawEdge(false); icon.cd:SetDrawBling(false)
         icon.cd:SetHideCountdownNumbers(false); icon.cd:SetReverse(true)
+        icon.label = icon:CreateFontString(nil, "OVERLAY")
+        icon.label:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        icon.label:SetPoint("BOTTOM", 0, -2)
         icon:SetScript("OnEnter", function(self)
             if self.auraID and GameTooltip.SetUnitAuraByAuraInstanceID then
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
                 GameTooltip:SetUnitAuraByAuraInstanceID(row.unit, self.auraID); GameTooltip:Show()
+            elseif self.entry then
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:AddLine(self.entry.name or "Defensive", 1, 0.82, 0.25)
+                local status = self.entry.status
+                GameTooltip:AddLine(status == "R" and "Cooldown ready" or status == "C" and "On cooldown" or "Unknown", 1, 1, 1)
+                GameTooltip:AddLine(self.entry.reason or "Readiness is cooldown only. Stance, equipment and resources may still be required.", 0.8, 0.8, 0.8, true)
+                GameTooltip:Show()
             end
         end)
         icon:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -131,7 +141,7 @@ local function defensiveAuras(unit, api)
         for _, id in ipairs(ids) do
             if not secret(id) and type(id) == "number" then
                 local aura = api.GetAuraDataByAuraInstanceID(unit, id)
-                if readable(aura) then result[#result + 1] = {auraInstanceID=id, icon=aura.icon, duration=aura.duration, expirationTime=aura.expirationTime}; seen[id] = true end
+                if readable(aura) then result[#result + 1] = {auraInstanceID=id, icon=aura.icon, duration=aura.duration, expirationTime=aura.expirationTime, name=aura.name, spellId=aura.spellId}; seen[id] = true end
             end
         end
     end
@@ -156,7 +166,7 @@ local function paint(unit, anchor, c)
         row:ClearAllPoints()
         if c.left then row:SetPoint("RIGHT", anchor, "LEFT", -8, 0)
         else row:SetPoint("LEFT", anchor, "RIGHT", 8, 0) end
-        row:SetSize(3 * c.size + 6, c.size)
+        row:SetSize(6 * (c.size + 3), c.size)
         for i, icon in ipairs(row.icons) do
             icon:ClearAllPoints(); icon:SetSize(c.size, c.size)
             icon:SetPoint(c.left and "RIGHT" or "LEFT", row, c.left and "RIGHT" or "LEFT", (i - 1) * (c.size + 3) * (c.left and -1 or 1), 0)
@@ -164,39 +174,62 @@ local function paint(unit, anchor, c)
         row.anchor, row.size, row.left = anchor, c.size, c.left
     end
     local api = C_UnitAuras
-    local auras = defensiveAuras(unit, api)
-    local count = 0
-    for _, aura in ipairs(auras) do
-        if count >= 3 then break end
-        local id = plain(aura.auraInstanceID)
-        if type(id) == "number" then
-            if readable(aura) then
-                count = count + 1
-                local icon = row.icons[count]
-                icon.auraID = id
-                -- Textures and duration objects go directly to native display sinks.
-                icon.tex:SetTexture(aura.icon)
-                if api.GetAuraDuration and icon.cd.SetCooldownFromDurationObject then
-                    icon.cd:SetCooldownFromDurationObject(api.GetAuraDuration(unit, id))
-                else
-                    local duration, expires = plain(aura.duration), plain(aura.expirationTime)
-                    if type(duration) == "number" and type(expires) == "number" and duration > 0 then
-                        icon.cd:SetCooldown(expires - duration, duration)
-                    else icon.cd:Clear() end
-                end
-                icon:Show()
-            end
+    local auras = api and api.GetUnitAuraInstanceIDs and api.GetAuraDataByAuraInstanceID and defensiveAuras(unit, api) or {}
+    local count, consumed = 0, {}
+    local sync = DBagsAlertsState.partyCooldowns
+    local entries = sync and sync.get(unit) or {}
+    local function active(icon, aura)
+        icon.auraID = plain(aura.auraInstanceID)
+        icon.tex:SetTexture(aura.icon); icon.tex:SetDesaturated(false); icon:SetAlpha(1)
+        icon.edge:SetColorTexture(1, 0.82, 0.25, 1); icon.label:SetText("UP")
+        icon.label:SetTextColor(1, 0.82, 0.25); icon.cd:SetReverse(true)
+        if api.GetAuraDuration and icon.cd.SetCooldownFromDurationObject then
+            icon.cd:SetCooldownFromDurationObject(api.GetAuraDuration(unit, icon.auraID))
+        else
+            local duration, expires = plain(aura.duration), plain(aura.expirationTime)
+            if type(duration)=="number" and type(expires)=="number" and duration>0 then icon.cd:SetCooldown(expires-duration,duration)
+            else icon.cd:Clear() end
         end
     end
-    for i = count + 1, 3 do row.icons[i].auraID = nil; row.icons[i]:Hide() end
+    for _, entry in ipairs(entries) do
+        if count >= 6 then break end
+        count = count + 1
+        local icon = row.icons[count]
+        icon.auraID = nil; icon.entry = entry; icon.cd:Clear(); icon.cd:SetReverse(false)
+        icon.tex:SetTexture(entry.id > 0 and C_Spell.GetSpellTexture(entry.id) or 134400)
+        local ready = entry.status == "R"
+        icon.tex:SetDesaturated(not ready); icon:SetAlpha(ready and 1 or 0.65)
+        icon.edge:SetColorTexture(ready and 0.25 or 0.3, ready and 0.85 or 0.3, 0.3, 1)
+        icon.label:SetText(ready and "RDY" or entry.status == "U" and "?" or "")
+        icon.label:SetTextColor(ready and 0.4 or 1, 1, ready and 0.4 or 1)
+        if entry.status == "C" and entry.remaining and entry.duration and entry.duration > 0 then
+            icon.cd:SetCooldown(GetTime() + entry.remaining - entry.duration, entry.duration)
+        end
+        for i, aura in ipairs(auras) do
+            local id, name = plain(aura.spellId), plain(aura.name)
+            if not consumed[i] and ((type(id)=="number" and id==entry.id) or (type(name)=="string" and name==entry.name)) then
+                active(icon,aura); consumed[i] = true; break
+            end
+        end
+        icon:Show()
+    end
+    for i, aura in ipairs(auras) do
+        if count >= 6 then break end
+        if not consumed[i] and type(plain(aura.auraInstanceID))=="number" then
+            count = count + 1
+            local icon = row.icons[count]; icon.entry = nil
+            active(icon,aura); icon:Show()
+        end
+    end
+    for i = count + 1, 6 do row.icons[i].auraID = nil; row.icons[i].entry = nil; row.icons[i]:Hide() end
     row:SetShown(count > 0)
-    return count
+    return #auras
 end
 local function update()
     local c = config()
     if not eligible(c) then hideAll(); state.status = c.enabled and "Five-player dungeons only" or "Off"; return end
     local api = C_UnitAuras
-    if not api or not api.GetUnitAuraInstanceIDs or not api.GetAuraDataByAuraInstanceID then
+    if not DBagsAlertsState.partyCooldowns and (not api or not api.GetUnitAuraInstanceIDs or not api.GetAuraDataByAuraInstanceID) then
         hideAll(); state.status = "Native defensive-aura API unavailable"; return
     end
     local anchors, active = 0, 0
@@ -262,7 +295,7 @@ DBagsAlertsState.openPartyDefensives = function()
         local close = CreateFrame("Button", nil, w, "UIPanelButtonTemplate")
         close:SetSize(28, 24); close:SetPoint("TOPRIGHT", -10, -10); close:SetText("X"); close:SetScript("OnClick", function() w:Hide() end)
         w.enabled = CreateFrame("CheckButton", nil, w, "UICheckButtonTemplate")
-        w.enabled:SetPoint("TOPLEFT", 12, -48); text("Active defensives (dungeons)", 46, -57, 12)
+        w.enabled:SetPoint("TOPLEFT", 12, -48); text("Party cooldowns (dungeons)", 46, -57, 12)
         w.enabled:SetScript("OnClick", function(self) config().enabled = self:GetChecked() and true or false; refresh() end)
         w.left = CreateFrame("CheckButton", nil, w, "UICheckButtonTemplate")
         w.left:SetPoint("TOPLEFT", 12, -80); text("Icons on the left", 46, -89)
@@ -296,7 +329,7 @@ SLASH_DBAGSPARTY1 = "/dbaparty"
 SlashCmdList.DBAGSPARTY = function(msg)
     if msg and msg:lower():match("^status") then
         refresh()
-        print("DBagsAlerts: " .. state.status .. ". Active buffs only; not ready cooldowns.")
+        print("DBagsAlerts: " .. state.status .. ". RDY = cooldown ready; UP = active; ? = no readable report.")
         return
     end
     DBagsAlertsState.openPartyDefensives()
