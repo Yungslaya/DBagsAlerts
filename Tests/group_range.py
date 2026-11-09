@@ -57,6 +57,15 @@ w.bind._OnClick();w.bindingCapture._OnKeyDown(nil,"F8")
 assert(BINDINGS.F8=="CLICK DBagsAlertsMuteWakeButton:LeftButton" and SAVED==1,"mute key not saved in addon")
 w:Hide();RAID=true;settle();assert(not s.frame:IsShown(),"raid warning")
 RAID=false;GROUPED=false;settle();assert(not s.frame:IsShown(),"solo warning")
+GROUPED=true;RAID=false;FAR={true,true,true,false};CHECKED={};MAPS.player=1440
+RESTING=true;function IsResting() return RESTING end
+settle();assert(not s.frame:IsShown() and s.status=="Paused in a resting area","rest area warning")
+RESTING=false
+for city=1453,1458 do
+ MAPS.player=city;settle();assert(not s.frame:IsShown() and s.status=="Paused in a capital city","capital warning")
+end
+MAPS.player=1440;s.update();assert(not s.frame:IsShown(),"leaving town bypassed confirmation")
+ADVANCE(2.1);s.update();assert(s.frame:IsShown(),"warning did not resume outside town")
 for msg in pairs(ERRORS) do error(msg) end
 """)
 print('Group range: explicit visibility, 16 majorities, same-map exclusion, unknown distance, debounce, timed mute and key capture PASS')

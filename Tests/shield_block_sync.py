@@ -17,7 +17,7 @@ tank.execute(r"""
  C_Spell.GetSpellName=function(id) if id==2565 then return 'Shield Block' end return getName(id) end
  TESTCD[2565]={isActive=true,isOnGCD=false,startTime=GetTime(),duration=5}
  FIRE('UNIT_SPELLCAST_SUCCEEDED','player','cast',2565)
- ADVANCE(.6);TICK();TICK()
+ ADVANCE(1.1);TICK();TICK()
  local found
  for _,e in ipairs(s.own) do if e.name=='Shield Block' then found=e end end
  assert(found and found.status=='C' and found.remaining>0,'Shield Block not shared in combat')

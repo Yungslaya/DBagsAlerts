@@ -143,7 +143,9 @@ state.summary=function()
  return string.format("CD sync v2: %d peers; %d known; %d sent / %d received; %d casts / %d buffs; %d restricted casts",
   peers,#(state.known or {}),state.stats.sent,state.stats.received,state.stats.casts,state.stats.auras,state.stats.restricted)
   .."; send result="..tostring(state.lastSendResult or "not attempted")
+  .."; attempts="..tostring(state.sendAttempts or 0)
   .."; failures="..tostring(state.sendFailures or 0)
+  .."; retry in="..tostring(math.max(0,math.ceil((state.retryAt or 0)-GetTime())))
   .."; prefix="..tostring(state.prefixResult or "not registered")
   .."; outgoing restricted="..tostring(state.outgoingRestricted)
   .."; incoming="..tostring(state.incoming or 0).."; unmatched sender="..tostring(state.unmatchedSender or 0)
@@ -233,18 +235,42 @@ local session=tostring(math.floor(GetTime()*1000));local sequence=0
 local function transmit(message)
  local c=DBagsAlertsDB and DBagsAlertsDB.partyDefensives
  if not c or c.share==false then return end
+ if state.retryAt and GetTime()<state.retryAt then return end
  if C_ChatInfo and C_ChatInfo.SendAddonMessage then
   if C_ChatInfo.AreOutgoingAddonChatMessagesRestricted then
    local ok,restricted=pcall(C_ChatInfo.AreOutgoingAddonChatMessagesRestricted)
-   state.outgoingRestricted=ok and plain(restricted) or nil
-   if state.outgoingRestricted==true then state.lastSendResult="Restricted by game";return end
+   state.outgoingRestricted=nil
+   if ok then state.outgoingRestricted=plain(restricted) end
+   local wasRestricted=state.wasOutgoingRestricted
+   if wasRestricted==true and state.outgoingRestricted==false then state.sendBlocked=nil end
+   state.wasOutgoingRestricted=state.outgoingRestricted
+   -- The realm flag alone did not prove an actual message was rejected.
+   -- Permit one normal API attempt; a rejection blocks further attempts while
+   -- that restriction remains. No alternate channel or restricted-data encoding.
+   if state.sendBlocked then return end
   end
   local ok,result=pcall(C_ChatInfo.SendAddonMessage,state.prefix,message,channel())
-  state.lastSendResult=ok and (plain(result) or "no result") or "send failed"
+  state.sendAttempts=(state.sendAttempts or 0)+1
+  local publicResult=plain(result)
+  local resultName
+  if type(publicResult)=="number" and Enum and Enum.SendAddonMessageResult then
+   for name,value in pairs(Enum.SendAddonMessageResult) do if value==publicResult then resultName=name;break end end
+  end
+  state.lastSendResult=not ok and "API error" or resultName or publicResult or "no result (unconfirmed)"
   local success=Enum and Enum.SendAddonMessageResult and Enum.SendAddonMessageResult.Success
   if ok and (result==nil or (not secret(result) and (result==true or result==success or result==0))) then
    state.stats.sent=state.stats.sent+1
-  else state.sendFailures=(state.sendFailures or 0)+1 end
+   state.throttleDelay=nil;state.retryAt=nil
+   if state.outgoingRestricted==true and result==nil then state.sendBlocked=true end
+  else
+   state.sendFailures=(state.sendFailures or 0)+1
+   if publicResult==3 or publicResult==8 then
+    -- A temporary rate limit is not permission denial. Back off on this same
+    -- normal channel, without retry loops or alternate transports.
+    state.throttleDelay=math.min(30,(state.throttleDelay or 1)*2)
+    state.retryAt=GetTime()+state.throttleDelay
+   elseif publicResult==11 or not ok then state.sendBlocked=true end
+  end
  end
 end
 local function readMessage(prefix,message,distribution,sender)
@@ -337,6 +363,7 @@ frame:SetScript("OnEvent",function(_,event,...)
    end
   end
  end
+ if event=="PLAYER_REGEN_ENABLED" then state.sendBlocked=nil end
  if event=="PLAYER_LOGIN" then
   if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
    state.prefixResult=plain(C_ChatInfo.RegisterAddonMessagePrefix(state.prefix))
@@ -367,7 +394,8 @@ frame:SetScript("OnUpdate",function(_,dt)
  -- spellbook rather than replacing the shared list with a restricted/empty scan.
  if state.rebuild and not InCombatLockdown() and GetTime()>=(state.rebuildAt or 0) then rebuild();state.rebuild=false end
  local now=GetTime();local body=payload(sample())
- if now-lastSend<0.5 then return end
+ if state.retryAt and now<state.retryAt then return end
+ if now-lastSend<1 then return end
  if state.request then transmit("Q");state.request=false end
  if state.force or body~=lastBody or now-lastSend>=3 then
   sequence=sequence+1;transmit("S:"..session..":"..sequence..":"..body)

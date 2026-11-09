@@ -103,10 +103,14 @@ local function update()
     end
     if DBagsAlertsState.isSettingsOpen and DBagsAlertsState.isSettingsOpen() then quiet("Paused while settings are open");return end
     if not c.groupRange or not IsInGroup() or IsInRaid() then quiet(c.groupRange and "Small parties only" or "Off");return end
+    -- Rest areas cover capitals, inns and resting parts of towns. No distance
+    -- scans or screen pulse while the player is taking a break there.
+    if IsResting and plain(IsResting())==true then quiet("Paused in a resting area");return end
     local count=plain(GetNumGroupMembers())
     if not count or count<2 or count>5 or plain(UnitIsDeadOrGhost("player")) then quiet("Not eligible");return end
     local playerMap=mapFor("player");state.mapID=playerMap
     if not playerMap then quiet("Current map unavailable");return end
+    if playerMap>=1453 and playerMap<=1458 then quiet("Paused in a capital city");return end
     local total,far,unknown=0,0,0
     state.snapshot={}
     for i=1,4 do
