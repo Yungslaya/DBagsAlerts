@@ -76,6 +76,10 @@ local DEFAULTS = {
     style = "classic",   -- "classic" = WoW gold frames + glossy bars, "clean" = thin black lines
     cursor = false,       -- ring around the mouse cursor
     cursorSize = 48,
+    characterRing = false,
+    characterRingSize = 80,
+    characterRingZoom = true,
+    characterRingHeight = -45,
     cursorCombat = false,
     buffNag = true,      -- missing Battle Shout reminder, also out of combat
     stanceNag = false,    -- flashing "DEFENSIVE" in combat when you are in another stance
@@ -531,6 +535,9 @@ local function scanEnemies()   -- counting nameplates 3x a second is plenty
     return scanN, scanLoose
 end
 scanEnemiesNow = function()
+    DRU.mockPlate, DRU.mockUnit, DRU.mockLabel, DRU.shoutCount = nil, nil, nil, 0
+    DRU.mockHint = nil
+    DRU.recoveryPlate, DRU.recoveryUnit = nil, nil
     if not (C_NamePlate and C_NamePlate.GetNamePlates) then return nil, nil end
     local ok, plates = pcall(C_NamePlate.GetNamePlates)
     if not ok or type(plates) ~= "table" or sectable(plates) then return nil, nil end
@@ -551,6 +558,28 @@ scanEnemiesNow = function()
             for i = 1, 4 do mates[#mates + 1] = "party" .. i end
         end
     end
+    local rescue = CLASS == "WARRIOR" and grouped and plain(UnitAffectingCombat("player"), false)
+        and ready("Taunt") ~= true
+    local mock = rescue and not DB.off.mocking and spell["Mocking Blow"]
+        and ready("Mocking Blow") ~= false
+    local mockLabel
+    if mock then
+        if plain(usable("Mocking Blow")) ~= false then
+            mockLabel = "MOCKING BLOW"
+        else
+            local stance = GetShapeshiftForm and plain(GetShapeshiftForm())
+            local rage = plain(UnitPower("player", RAGE))
+            if type(stance) == "number" and stance > 1 then
+                mockLabel = "BATTLE STANCE"
+            elseif type(rage) == "number" and rage < 10 then
+                mockLabel = "NEED 10 RAGE"
+            else
+                mockLabel = "CHECK STANCE / RAGE"
+            end
+        end
+    end
+    local shout = rescue and not DB.off.rescueShout and spell["Challenging Shout"]
+        and ready("Challenging Shout") ~= false and plain(usable("Challenging Shout")) ~= false
     local n, loose, unknown = 0, 0, false
     for _, p in ipairs(plates) do
         local u = p.namePlateUnitToken or (p.UnitFrame and p.UnitFrame.unit)
@@ -580,12 +609,59 @@ scanEnemiesNow = function()
                 -- Loose = attacking someone in your group (they have its aggro), not you.
                 if grouped then
                     for _, m in ipairs(mates) do
-                        local ms = UnitThreatSituation(m, u)
-                        if not secret(ms) and ms and ms >= 2 then loose = loose + 1; break end
+                        local ms = plain(UnitThreatSituation(m, u))
+                        local victim = plain(UnitIsUnit(u .. "target", m)) == true
+                        if not victim and plain(UnitIsUnit(u, "target")) == true then
+                            victim = plain(UnitIsUnit("targettarget", m)) == true
+                        end
+                        if victim or (ms and ms >= 2) then
+                            loose = loose + 1
+                            if CLASS == "WARRIOR" and (victim or (not secret(s) and (s == nil or s < 2))) then
+                                if not DRU.recoveryPlate or plain(UnitIsUnit(u, "target")) == true then
+                                    DRU.recoveryPlate, DRU.recoveryUnit = p, u
+                                end
+                            end
+                            if rescue and (victim or (not secret(s) and (s == nil or s < 2))) then
+                                if mockLabel then
+                                    DRU.mockHint = mockLabel == "MOCKING BLOW" and "CHECK MELEE RANGE" or mockLabel
+                                end
+                                if mockLabel and C_Spell.IsSpellInRange then
+                                    local okRange, inRange = pcall(C_Spell.IsSpellInRange, spell["Mocking Blow"], u)
+                                    local inMelee = okRange and plain(inRange) == true
+                                    if not inMelee and melee and mockLabel ~= "MOCKING BLOW" then
+                                        local okMelee, result = pcall(C_Spell.IsSpellInRange, melee, u)
+                                        inMelee = okMelee and plain(result) == true
+                                    end
+                                    if inMelee and
+                                        (not DRU.mockPlate or plain(UnitIsUnit(u, "target")) == true) then
+                                        DRU.mockPlate, DRU.mockUnit, DRU.mockLabel = p, u, mockLabel
+                                    end
+                                end
+                                if shout then
+                                    local okDistance, squared, checked = pcall(UnitDistanceSquared, u)
+                                    squared, checked = plain(squared), plain(checked)
+                                    local close = okDistance and checked == true and type(squared) == "number"
+                                        and squared >= 0 and squared <= 100
+                                    if not (okDistance and checked == true and type(squared) == "number")
+                                        and melee and C_Spell.IsSpellInRange then
+                                        local okMelee, inMelee = pcall(C_Spell.IsSpellInRange, melee, u)
+                                        close = okMelee and plain(inMelee) == true
+                                    end
+                                    if close then
+                                        DRU.shoutCount = DRU.shoutCount + 1
+                                    end
+                                end
+                            end
+                            break
+                        end
                     end
                 end
             end
         end
+    end
+    if CLASS == "WARRIOR" and DBagsAlertsDebug and DBagsAlertsDebug.warriorScan and InCombatLockdown() then
+        DBagsAlertsDebug.warriorScan(plates, loose, DRU.mockPlate ~= nil, DRU.shoutCount, rescue,
+            spell, ready, usable, DB)
     end
     if unknown and n == 0 then return nil, nil end
     return n, grouped and loose or 0
@@ -627,6 +703,23 @@ local WARRIOR_ALERTS = {
           if not st.ok then return end
           local isTanking = UnitDetailedThreatSituation("player", "target")
           need(st, isTanking, true)
+      end },
+    { key = "mocking", row = 1, label = "MOCKING BLOW", danger = true, icon = "Mocking Blow",
+      test = function(st)
+          need(st, ctx.combat and ctx.group and DRU.mockHint ~= nil)
+          need(st, ready("Taunt"), true)
+          need(st, ready("Mocking Blow"))
+          if DRU.mockLabel == "MOCKING BLOW" then need(st, usable("Mocking Blow")) end
+          if st.ok then return "Mocking Blow", DRU.mockLabel or DRU.mockHint end
+      end },
+    { key = "rescueShout", row = 1, label = "CHALLENGING SHOUT", danger = true, icon = "Challenging Shout",
+      test = function(st)
+          need(st, ctx.combat and ctx.group
+              and (DRU.shoutCount or 0) >= (DB.shoutMinimum or 3))
+          need(st, ready("Taunt"), true)
+          need(st, ready("Challenging Shout"))
+          need(st, usable("Challenging Shout"))
+          if DRU.mockPlate and DRU.mockLabel == "MOCKING BLOW" then need(st, ready("Mocking Blow"), true) end
       end },
     { key = "kick", row = 1, label = "INTERRUPT", danger = true, icon = "Shield Bash",
       test = function(st)
@@ -1382,15 +1475,167 @@ do
     }
 end
 
+-- Priest priorities for Forever. Keep one next action per HUD slot.
+do
+    local function canCast(name, unit)
+        local id = spell[name]
+        if not id or ready(name) ~= true or plain(usable(name)) ~= true then return false end
+        if not unit or unit == "player" then return true end
+        if not C_Spell.IsSpellInRange then return false end
+        local ok, inRange = pcall(C_Spell.IsSpellInRange, id, unit)
+        return ok and plain(inRange) == true
+    end
+
+    local function aura(unit, name, filter)
+        if not C_UnitAuras or not C_UnitAuras.GetAuraDataBySpellName then return nil end
+        if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+            local ok, restricted = pcall(C_Secrets.ShouldAurasBeSecret)
+            if not ok or plain(restricted) ~= false then return nil end
+        end
+        local ok, data = pcall(C_UnitAuras.GetAuraDataBySpellName, unit, name, filter)
+        if not ok or secret(data) or sectable(data) then return nil end
+        return data ~= nil
+    end
+
+    local function moving()
+        local speed = GetUnitSpeed and plain(GetUnitSpeed("player"))
+        return type(speed) == "number" and speed > 0
+    end
+
+    local function casting()
+        local cast, channel = UnitCastingInfo("player"), UnitChannelInfo("player")
+        if secret(cast) or secret(channel) then return true end
+        return cast ~= nil or channel ~= nil
+    end
+
+    local function hp(unit)
+        local current, maximum = plain(UnitHealth(unit)), plain(UnitHealthMax(unit))
+        if type(current) == "number" and type(maximum) == "number" and maximum > 0 and current > 0 then
+            return current / maximum * 100
+        end
+    end
+
+    local function mode()
+        if DB.priestMode and DB.priestMode ~= "Auto" then return DB.priestMode end
+        if spell["Shadowform"] then return "Shadow" end
+        if spell["Penance"] then return "Discipline" end
+        if spell["Prayer of Mending"] then return "Holy" end
+        if ctx.group and UnitGroupRolesAssigned and plain(UnitGroupRolesAssigned("player")) == "HEALER" then return "Holy" end
+        return "Shadow"
+    end
+
+    local function patient()
+        local result, lowest, hurt = "player", hp("player") or 101, 0
+        if lowest <= 70 then hurt = 1 end
+        if not ctx.group then return result, lowest, hurt end
+        local raid = IsInRaid()
+        local prefix = raid and "raid" or "party"
+        for i = 1, raid and GetNumGroupMembers() or 4 do
+            local unit = prefix .. i
+            if plain(UnitExists(unit)) == true and plain(UnitIsUnit(unit, "player")) == false then
+                local near, checked
+                if UnitInRange then near, checked = UnitInRange(unit) end
+                if plain(near) == true and plain(checked) == true then
+                    local value = hp(unit)
+                    if value then
+                        if value <= 70 then hurt = hurt + 1 end
+                        if value < lowest then result, lowest = unit, value end
+                    end
+                end
+            end
+        end
+        return result, lowest, hurt
+    end
+
+    local function heal()
+        if casting() or aura("player", "Shadowform", "HELPFUL") == true then return end
+        local spec = mode()
+        local unit, health, hurt
+        if spec == "Shadow" then unit, health, hurt = "player", hp("player") or 101, 0
+        else unit, health, hurt = patient() end
+        if health > (spec == "Shadow" and 40 or 85) then return end
+        local target = unit == "player" and "SELF" or plain(UnitName(unit), "ALLY") or "ALLY"
+        local function pick(name)
+            if canCast(name, unit) then return name, name .. " → " .. target end
+        end
+        if spec == "Discipline" and health <= 55 then
+            if aura(unit, "Weakened Soul", "HARMFUL") == false
+                and aura(unit, "Power Word: Shield", "HELPFUL") == false and canCast("Power Word: Shield", unit) then
+                return pick("Power Word: Shield")
+            end
+            if not moving() and canCast("Penance", unit) then return pick("Penance") end
+        end
+        if health <= 40 and not moving() then
+            for _, name in ipairs({ "Flash Heal", "Lesser Heal", "Heal" }) do
+                if canCast(name, unit) then return pick(name) end
+            end
+        end
+        if hurt >= 3 and not IsInRaid() and not moving() and canCast("Prayer of Healing") then
+            return "Prayer of Healing", "Prayer of Healing → PARTY"
+        end
+        if spec == "Holy" and ctx.combat and health <= 70 and canCast("Prayer of Mending", unit) then
+            return pick("Prayer of Mending")
+        end
+        if health <= 65 and not moving() then
+            for _, name in ipairs({ "Greater Heal", "Heal", "Lesser Heal" }) do
+                if canCast(name, unit) then return pick(name) end
+            end
+        end
+        if aura(unit, "Renew", "HELPFUL|PLAYER") == false then return pick("Renew") end
+    end
+
+    local function damage()
+        if not ctx.combat or not ctx.hostile or casting() then return end
+        local spec = mode()
+        if spec ~= "Shadow" and ctx.group then
+            local _, health = patient()
+            if health <= 85 then return end
+        end
+        local health = hp("target")
+        if health and health <= 15 and canCast("Shoot", "target") then return "Shoot", "FINISH WITH WAND" end
+        if targetDebuff("Shadow Word: Pain") == "off" and canCast("Shadow Word: Pain", "target") then
+            return "Shadow Word: Pain", "APPLY PAIN"
+        end
+        if spec == "Shadow" and health and health >= 35 and targetDebuff("Devouring Plague") == "off"
+            and canCast("Devouring Plague", "target") then return "Devouring Plague", "APPLY PLAGUE" end
+        if not moving() then
+            local choices = spec == "Shadow" and { "Mind Blast", "Mind Flay", "Smite" }
+                or { "Holy Fire", "Smite" }
+            for _, name in ipairs(choices) do
+                if canCast(name, "target") then return name, name end
+            end
+        end
+        if canCast("Shoot", "target") then return "Shoot", "USE WAND" end
+    end
+
+    DRU.PRIEST_ALERTS = {
+        { key = "priestHeal", row = 1, label = "HEAL", icon = "Lesser Heal", danger = true,
+          test = function(st) local name, label = heal(); need(st, name ~= nil); return name, label end },
+        { key = "priestDamage", row = 2, label = "ATTACK", icon = "Shadow Word: Pain",
+          test = function(st) local name, label = damage(); need(st, name ~= nil); return name, label end },
+        { key = "priestBuff", row = 2, label = "BUFF", icon = "Power Word: Fortitude",
+          test = function(st)
+              if not ctx.combat then
+                  for _, name in ipairs({ "Power Word: Fortitude", "Inner Fire", "Divine Spirit" }) do
+                      if canCast(name) and aura("player", name, "HELPFUL") == false then return name, "BUFF: " .. name end
+                  end
+              end
+              need(st, false)
+          end },
+        { key = "lowmana", row = 2, label = "LOW MANA", icon = "Inner Focus",
+          test = function(st) needRage(st, DB.lowMana, true); if st.ok then return firstKnown({ "Inner Focus", "Power Word: Shield" }), "LOW MANA" end end },
+    }
+end
+
 local CLASS_ALERTS = { WARRIOR = WARRIOR_ALERTS, PALADIN = PALADIN_ALERTS, DRUID = DRUID_ALERTS,
-    WARLOCK = DRU.WARLOCK_ALERTS }
+    WARLOCK = DRU.WARLOCK_ALERTS, PRIEST = DRU.PRIEST_ALERTS }
 
 -- Big-icon mode: every alert of a spot sits in one place, stacked. First in the list
 -- is on top, so you only ever see the most important lit one. Order: Icy Veins
 -- Forever Prot Warrior / Prot Paladin leveling + tank rotation pages (Nov 2026).
 local SPOT = {
     WARRIOR = {
-        danger = { "lowhp", "kick", "taunt", "loose" },
+        danger = { "lowhp", "kick", "taunt", "rescueShout", "mocking", "loose" },
         next   = { "slam", "revenge", "vrush", "clap", "sunder", "execute" },
         buff   = { "demo", "rend", "shout" },               -- upkeep: never buried under the rotation
         extra  = { "block", "cleave", "dump", "bloodrage" },   -- off the global cooldown: press any time
@@ -1416,6 +1661,7 @@ local SPOT = {
         extra  = { "lifetap", "funnel", "rof", "lowmana" },
     },
 }
+SPOT.PRIEST = { danger = { "priestHeal" }, next = { "priestDamage" }, buff = { "priestBuff" }, extra = { "lowmana" } }
 local SPOT_SIZE = { danger = 64, next = 64, buff = 44, extra = 64 }   -- big, easy to see
 
 -- Racials (Wowhead WoW Forever race pages, Nov 2026). Every class gets them; an alert
@@ -1879,6 +2125,7 @@ local CLASS_CDS = {
     DRUID = { "Barkskin", "Frenzied Regeneration", "Innervate", "Tranquility", "Challenging Roar", "Dash" },
     WARLOCK = { "Death Coil", "Howl of Terror", "Shadow Ward", "Amplify Curse", "Fel Domination", "Soulshatter" },
 }
+CLASS_CDS.PRIEST = { "Fade", "Psychic Scream", "Desperate Prayer", "Inner Focus", "Power Infusion", "Penance", "Prayer of Mending" }
 for _, list in pairs(CLASS_CDS) do
     for _, n in ipairs(DRU.RACIAL_CDS or {}) do list[#list + 1] = n end
 end
@@ -2059,7 +2306,7 @@ local function layout()
         ctx.form = DRU.FORM[id or 0] or "caster"
         DRU.layoutForm = ctx.form
     end
-    DRU.caster = CLASS == "WARLOCK" or (CLASS == "DRUID" and ctx.form ~= "bear" and ctx.form ~= "cat")
+    DRU.caster = CLASS == "WARLOCK" or CLASS == "PRIEST" or (CLASS == "DRUID" and ctx.form ~= "bear" and ctx.form ~= "cat")
     DRU.lux = DB.lux ~= false and DB.stack ~= false and SPOT[CLASS] ~= nil
     for _, a in ipairs(ALERTS) do if not a.root then makeSlot(a) end end
     if DRU.lux and DRU.layoutCaster then DRU.layoutCaster(); return end
@@ -2634,7 +2881,7 @@ local function pin(d, anchor, onPlate)
         d.anchor = anchor
         d:ClearAllPoints()
         local ok
-        if onPlate then ok = pcall(d.SetPoint, d, "BOTTOM", anchor, "TOP", 0, 4)
+        if onPlate then ok = pcall(d.SetPoint, d, "BOTTOM", anchor, "TOP", 0, 6)
         else ok = pcall(d.SetPoint, d, "CENTER", anchor, "TOPRIGHT", -12, -12) end
         if not ok then d.anchor = nil return false end
     end
@@ -2652,7 +2899,58 @@ local function plateUnit(p)
     return p.namePlateUnitToken or (p.UnitFrame and p.UnitFrame.unit)
 end
 local allOff = false
+do
+    local markers = {}
+    local function draw(index, plate, name, gate)
+        local marker = markers[index]
+        if not plateOK(plate) or not gate.ok then
+            if marker then marker:Hide() end
+            return
+        end
+        if not marker then
+            marker = CreateFrame("Frame", nil, UIParent)
+            local size = index == 3 and 26 or 32
+            marker:SetSize(size, size)
+            marker:SetFrameStrata("HIGH")
+            marker.inner = CreateFrame("Frame", nil, marker)
+            marker.inner:SetAllPoints()
+            marker.icon = marker.inner:CreateTexture(nil, "OVERLAY")
+            marker.icon:SetAllPoints()
+            markers[index] = marker
+        end
+        for i = gate.n + 1, 3 do gate[i] = 1 end
+        marker:SetAlpha(gate[1])
+        marker.inner:SetAlpha(gate[2])
+        marker.icon:SetAlpha(gate[3])
+        marker.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
+        if marker.anchor ~= plate then
+            marker:ClearAllPoints()
+            local ok = pcall(marker.SetPoint, marker, "BOTTOM", plate, "TOP", index == 3 and 34 or 0, 28)
+            marker.anchor = ok and plate or nil
+        end
+        marker:SetShown(marker.anchor == plate)
+    end
+
+    DRU.updateRecoveryMarkers = function()
+        local active = CLASS == "WARRIOR" and InCombatLockdown() and IsInGroup()
+        local loose = DRU.recoveryPlate
+        if loose and (not plateOK(loose) or plain(plateUnit(loose)) ~= DRU.recoveryUnit) then loose = nil end
+        local taunt = ready("Taunt")
+        local gate = {ok = active and loose ~= nil and not DB.off.taunt, n = 0}
+        need(gate, taunt); need(gate, usable("Taunt"))
+        draw(1, loose, "Taunt", gate)
+        gate = {ok = active and loose ~= nil and not DB.off.mocking, n = 0}
+        need(gate, taunt, true); need(gate, ready("Mocking Blow"))
+        draw(2, loose, "Mocking Blow", gate)
+        gate = {ok = active and loose ~= nil and not DB.off.rescueShout, n = 0}
+        need(gate, taunt, true)
+        need(gate, (DRU.shoutCount or 0) >= (DB.shoutMinimum or 3))
+        need(gate, ready("Challenging Shout")); need(gate, usable("Challenging Shout"))
+        draw(3, loose, "Challenging Shout", gate)
+    end
+end
 updateRange = function()
+    DRU.updateRecoveryMarkers()
     -- only while YOU are in combat: out of combat nothing is read at all
     local on = DB.range ~= false and ctx.combat
     if not on then
@@ -4205,7 +4503,7 @@ do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
     end
     local function update()
         if InCombatLockdown() then return end          -- secure button: only change it out of combat
-        if not DB or DB.stoneNag == false or CLASS == "DRUID" or CLASS == "WARLOCK" or UnitIsDeadOrGhost("player") then hide() return end
+        if not DB or DB.stoneNag == false or CLASS == "DRUID" or CLASS == "WARLOCK" or CLASS == "PRIEST" or UnitIsDeadOrGhost("player") then hide() return end
         local kind = weaponKind()
         if not kind or stoned() ~= false then hide() return end
         local id, icon = findStone(kind)
@@ -4343,6 +4641,35 @@ do   -- cursor ring (own block: Lua's 200 top-level locals limit)
     cr.t:SetAllPoints()
     cr.t:SetTexture(MEDIA .. "Ring.tga")
     cr:Hide()
+    local characterRing = CreateFrame("Frame", nil, UIParent)
+    characterRing:SetFrameStrata("LOW")
+    characterRing:EnableMouse(false)
+    local markerBars = {}
+    for _, layer in ipairs({"ARTWORK", "OVERLAY"}) do
+        for axis = 1, 2 do
+            local bar = characterRing:CreateTexture(nil, layer)
+            bar:SetPoint("CENTER")
+            markerBars[#markerBars + 1] = bar
+        end
+    end
+    markerBars[1]:SetColorTexture(0.04, 0.03, 0.03, 0.95)
+    markerBars[2]:SetColorTexture(0.04, 0.03, 0.03, 0.95)
+    characterRing:Hide()
+
+    local lastRingSize
+    local function resizeCharacterRing()
+        local size = math.max(12, math.floor(DB.characterRingSize / 4 + 0.5))
+        if size ~= lastRingSize then
+            characterRing:SetSize(size + 4, size + 4)
+            markerBars[1]:SetSize(size + 4, 7)
+            markerBars[2]:SetSize(7, size + 4)
+            markerBars[3]:SetSize(size, 3)
+            markerBars[4]:SetSize(3, size)
+            lastRingSize = size
+        end
+    end
+
+
     local lastX, lastY
     local function refresh()
         if not DB then return end
@@ -4350,8 +4677,22 @@ do   -- cursor ring (own block: Lua's 200 top-level locals limit)
         cr:SetSize(s, s)
         local cc = CLASS and RAID_CLASS_COLORS and RAID_CLASS_COLORS[CLASS]
         if cc then cr.t:SetVertexColor(cc.r, cc.g, cc.b, 0.9) else cr.t:SetVertexColor(1, 0.82, 0.2, 0.9) end
+        if DB.characterRing then resizeCharacterRing() end
+        characterRing:ClearAllPoints()
+        characterRing:SetPoint("CENTER", UIParent, "CENTER", 0, DB.characterRingHeight + 56)
+        if cc then
+            markerBars[3]:SetColorTexture(cc.r, cc.g, cc.b, 1)
+            markerBars[4]:SetColorTexture(cc.r, cc.g, cc.b, 1)
+        end
+        characterRing:SetShown(DB.characterRing == true and InCombatLockdown())
         lastX = nil
     end
+    local markerEvents = CreateFrame("Frame")
+    markerEvents:RegisterEvent("PLAYER_REGEN_DISABLED")
+    markerEvents:RegisterEvent("PLAYER_REGEN_ENABLED")
+    markerEvents:SetScript("OnEvent", function(_, event)
+        characterRing:SetShown(DB ~= nil and DB.characterRing == true and event == "PLAYER_REGEN_DISABLED")
+    end)
     DBagsAlertsState.cursorRefresh = refresh
     local drv = CreateFrame("Frame")
     drv:SetScript("OnUpdate", function()
@@ -4468,7 +4809,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         local _, class = UnitClass("player")
         if not CLASS_ALERTS[class] then main:Hide(); return end
         CLASS, ALERTS, CD_SPELLS = class, CLASS_ALERTS[class], CLASS_CDS[class]
-        POWER = (class == "PALADIN" or class == "WARLOCK") and MANA or RAGE
+        POWER = (class == "PALADIN" or class == "WARLOCK" or class == "PRIEST") and MANA or RAGE
         if class == "DRUID" then POWER = plain(UnitPowerType("player"), MANA) or MANA end
         if POWER == MANA then rageBar:SetStatusBarColor(0.15, 0.4, 1) end
         DBagsAlertsState.alerts = ALERTS
@@ -4483,6 +4824,9 @@ ev:SetScript("OnEvent", function(self, event, ...)
         end
         DBagsAlertsDB = DBagsAlertsDB or {}
         DB = DBagsAlertsDB
+        if DB.characterRingZoom == nil and DB.characterRingSize == 132 then
+            DB.characterRingSize = DEFAULTS.characterRingSize
+        end
         for k, v in pairs(DEFAULTS) do if DB[k] == nil then DB[k] = type(v) == "table" and CopyTable(v) or v end end
         buildSpells()
         findNearSpell()
@@ -4522,7 +4866,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         DRU.applyHelperSize()
         say("%s loaded. /pa for settings.",
             CLASS == "PALADIN" and (DB.tank and "Paladin (tank)" or "Paladin (damage)")
-            or CLASS == "DRUID" and "Druid" or CLASS == "WARLOCK" and "Warlock" or "Warrior")
+            or CLASS == "DRUID" and "Druid" or CLASS == "WARLOCK" and "Warlock" or CLASS == "PRIEST" and "Priest" or "Warrior")
         return
     end
     alertsDirty = true                 -- every event below can change what should light up
@@ -4601,6 +4945,8 @@ do
 local PLAIN = {
     lowhp = { "Low health", "Shows your best defensive cooldown." },
     taunt = { "Taunt", "Your target isn't attacking you." },
+    mocking = { "Mocking Blow", "Mark a loose enemy in melee when Taunt is on cooldown." },
+    rescueShout = { "Challenging Shout", "Emergency recovery when enough loose enemies are within 10 yards." },
     kick = { "Interrupt", "Your target is casting." },
     loose = { "Loose mobs", "Mobs attacking your group." },
     block = { "Shield Block", "Less damage, more rage." },
@@ -4796,6 +5142,15 @@ WARLOCK = {
     { "PK Pet", "#showtooltip\n/petattack [@mouseover,harm,nodead][]", "Pet attacks mouseover mob, or your target." },
     { "PK Pet Back", "/petfollow", "Pet comes back to you." },
 } }
+
+CLASS_MACROS.PRIEST = {
+    { "Priest Heal", "#showtooltip Flash Heal\n/cast [@mouseover,help,nodead][help,nodead][@player] Flash Heal", "Fast heal on your mouseover, target, or self." },
+    { "Priest Shield", "#showtooltip Power Word: Shield\n/cast [@mouseover,help,nodead][help,nodead][@player] Power Word: Shield", "Shield your mouseover, target, or self." },
+    { "Priest Renew", "#showtooltip Renew\n/cast [@mouseover,help,nodead][help,nodead][@player] Renew", "Renew your mouseover, target, or self." },
+    { "Priest Penance", "#showtooltip Penance\n/cast [@mouseover,help,nodead][help,nodead][harm,nodead][@player] Penance", "Heal an ally or hit your enemy." },
+    { "Priest Mending", "#showtooltip Prayer of Mending\n/cast [@mouseover,help,nodead][help,nodead][@player] Prayer of Mending", "Send a bouncing heal." },
+    { "Priest Wand", "#showtooltip Shoot\n/cast !Shoot", "Start your wand." },
+}
 
 makeMacros = function()
     local list = CLASS_MACROS[CLASS]
@@ -5068,6 +5423,10 @@ local function buildSettings()
     sizes.y=sizes.y-350
     slider(sizes,"partySize","Party cooldown icons",20,44,2,"%d px",function() return DB.partyDefensives and DB.partyDefensives.size or 28 end,
         function(v) DB.partyDefensives=DB.partyDefensives or {};DB.partyDefensives.size=v;if DBagsAlertsState.partyDefensives then DBagsAlertsState.partyDefensives.update() end end)
+    slider(sizes,"characterRingSize","Character marker size",24,200,2,"%d px",function() return DB.characterRingSize end,
+        function(v) DB.characterRingSize=v; DBagsAlertsState.cursorRefresh() end)
+    slider(sizes,"characterRingHeight","Character marker height",-240,120,5,"%d px",function() return DB.characterRingHeight end,
+        function(v) DB.characterRingHeight=v; DBagsAlertsState.cursorRefresh() end)
     slider(sizes,"cursorSize","Cursor ring",24,120,4,"%d px",function() return DB.cursorSize or 48 end,
         function(v) DB.cursorSize=v;if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end end)
     button(sizes,"petSize","Pet size and position",function() if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end end)
@@ -5077,7 +5436,15 @@ local function buildSettings()
         {"stanceNag","Defensive Stance","Warn when tanking in the wrong stance."},{"foodNag","Food buff","Show food I can eat for the XP buff."},
         {"stoneNag","Weapon stone","Remind me to sharpen or weight my weapon."},{"stoneNeed","Missing weapon stone","Show when I have no stone in my bags."},
         {"advice","Rage tips","Show short rage-spending advice."},{"cursor","Cursor ring","Keep the cursor easy to find."},
-        {"cursorCombat","Cursor ring in combat only","Hide the ring outside combat."}}) do check(reminders,entry[1],entry[2],entry[3]) end
+        {"cursorCombat","Cursor ring in combat only","Hide the ring outside combat."},
+        {"characterRing","Character marker","Show a class-colored plus during combat."}}) do
+        if entry[1] == "characterRing" or entry[1] == "characterRingZoom" then
+            check(reminders,entry[1],entry[2],entry[3],function() return DB[entry[1]] end,
+                function(v) DB[entry[1]] = v; DBagsAlertsState.cursorRefresh() end)
+        else
+            check(reminders,entry[1],entry[2],entry[3])
+        end
+    end
     local alerts=page("alerts","Alerts")
     for _,alert in ipairs(ALERTS) do
         local key=alert.key;local text=PLAIN[key] or {key,""}
@@ -5089,6 +5456,8 @@ local function buildSettings()
     if CLASS=="WARRIOR" then
         slider(thresholds,"dumpAt","Spend rage",30,100,5,"%d",function() return DB.dumpAt end,function(v) DB.dumpAt=v;relayout() end)
         slider(thresholds,"dumpTank","Spend rage while taking heavy hits",50,100,5,"%d",function() return DB.dumpTank or 90 end,function(v) DB.dumpTank=v end)
+        slider(thresholds,"shoutMinimum","Loose enemies for Challenging Shout",2,8,1,"%d",
+            function() return DB.shoutMinimum or 3 end,function(v) DB.shoutMinimum=v end)
         slider(thresholds,"sunderGoal","Sunder stacks on normal mobs",0,5,1,"%d",function() return DB.sunderGoal end,function(v) DB.sunderGoal=v end)
     else
         slider(thresholds,"lowMana","Low mana",5,60,5,"%d%%",function() return DB.lowMana end,function(v) DB.lowMana=v end)
@@ -5102,6 +5471,13 @@ local function buildSettings()
     button(group,"follow","Follow buddy",function() if DBagsAlertsState.openFollowBuddy then DBagsAlertsState.openFollowBuddy() end end)
     local tools=page("tools","Tools")
     button(tools,"pets","Pet controls",function() if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end end)
+    if CLASS == "PRIEST" then
+        button(thresholds, "priestMode", "Change Priest mode", function()
+            local nextMode = { Auto = "Shadow", Shadow = "Holy", Holy = "Discipline", Discipline = "Auto" }
+            DB.priestMode = nextMode[DB.priestMode or "Auto"] or "Auto"
+            say("Priest mode: " .. DB.priestMode)
+        end)
+    end
     if CLASS_MACROS[CLASS] then button(tools,"macros","Create or update macros",makeMacros) end
     button(tools,"debug","Debug and Lua errors",function() if DBagsAlertsDebug then DBagsAlertsDebug.open() end end)
     for _,page in pairs(pages) do

@@ -82,6 +82,9 @@ function D.report()
  if healer then out[#out+1]="Healer checks: "..safe(healer.status) end
  if range then out[#out+1]="Group range: "..safe(range.status) end
  for label,error in pairs(D.guards) do out[#out+1]="Guard "..label..": "..error end
+ if DBagsAlertsDebug.lastWarriorScan then out[#out+1]=DBagsAlertsDebug.lastWarriorScan end
+ if DBagsAlertsDebug.lastWarriorRescue then out[#out+1]="During Taunt downtime: "..DBagsAlertsDebug.lastWarriorRescue end
+ if DBagsAlertsDebug.lastWarriorLoose then out[#out+1]="With a loose mob: "..DBagsAlertsDebug.lastWarriorLoose end
  out[#out+1]="Recent events (bounded; no chat text):"
  for _,event in ipairs(c.events) do out[#out+1]=event end
  out[#out+1]="Errors: "..#c.errors
@@ -175,3 +178,24 @@ frame:SetScript("OnEvent",function(_,event,addon,functionName)
  if #c.events>=40 then table.remove(c.events,1) end
  c.events[#c.events+1]=string.format("%.1f %s %s",GetTime(),event,context())
 end)
+
+function DBagsAlertsDebug.warriorScan(plates, loose, candidate, close, rescue, spells, ready, usable, db)
+ local function status(value)
+  if issecretvalue and issecretvalue(value) then return "hidden" end
+  if value == true then return "yes" end
+  if value == false then return "no" end
+  return "unknown"
+ end
+ local function spellState(name, key)
+  if db.off[key] then return "off" end
+  if not spells[name] then return "unlearned" end
+  return status(ready(name)) .. "/" .. status(usable(name))
+ end
+ DBagsAlertsDebug.lastWarriorScan = string.format(
+  "Warrior recovery (last combat scan %.1f; ready/usable): taunt=%s; mocking=%s; shout=%s; plates=%d; loose=%d; rescue=%s; mocking candidate=%s; shout count=%d/%d",
+  GetTime(), spellState("Taunt", "taunt"), spellState("Mocking Blow", "mocking"),
+  spellState("Challenging Shout", "rescueShout"), #plates, loose, tostring(rescue == true),
+  tostring(candidate), close, db.shoutMinimum or 3)
+ if rescue then DBagsAlertsDebug.lastWarriorRescue = DBagsAlertsDebug.lastWarriorScan end
+ if loose > 0 then DBagsAlertsDebug.lastWarriorLoose = DBagsAlertsDebug.lastWarriorScan end
+end
