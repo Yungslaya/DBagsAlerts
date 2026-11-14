@@ -22,6 +22,8 @@ Combat coverage: Protection Warrior; Protection Paladin with basic Retribution d
 
 ## What's new
 
+- **1.0.21:** Legacy picks checked against Method, Icy Veins, Mobalytics and Wowhead. Two new builds: Leveling + professions, and Gathering and gold. The panel now reads every Legacy tree. Type `/reload` after updating.
+
 - **1.0.17:** Wand timer stays visible while moving and turns green when ready. Fixed extra text on the cast bar. Restart WoW after updating.
 
 - **1.0.16:** Starter setup with optional extras, preserved existing preferences, and reversible presentation presets. See the release notes for fixes and validation.
