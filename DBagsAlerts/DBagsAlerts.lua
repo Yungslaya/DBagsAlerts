@@ -1,0 +1,5611 @@
+-- DBagsAlerts: Protection Warrior alerts for WoW Forever.
+--
+-- DISPLAY ONLY. This addon never casts, targets or presses anything. It lights
+-- an icon when something important is ready or needed; you press the button.
+--
+-- WHY it looks the way it does: Forever runs the retail "secret values" system.
+-- In combat many numbers (rage, health, cooldown times, auras) become secret:
+-- an addon may SHOW them but not compare or do math with them. So:
+--   * Plain values (readable) are checked normally in Lua.
+--   * Secret values are never compared. A secret yes/no or a secret percent is
+--     turned into a frame alpha by Blizzard's own curve helpers, and frames are
+--     nested so the icon only shows when every condition is true (alphas
+--     multiply). That is the intended, allowed way to display secret data.
+--   * Our own casts stay readable in combat, so buff/debuff timers come from
+--     "I cast it at time X, it lasts Y" (Y learned out of combat or from the
+--     tooltip).
+-- Every possibly-secret read is wrapped so a locked value never throws errors.
+
+local ADDON = ...
+local secret = issecretvalue or function() return false end
+local function sectable(t) return issecrettable and issecrettable(t) or false end
+local function plain(v, default) if secret(v) then return default end return v end
+-- Forever moved IsCurrentSpell into C_Spell; the old global is nil there.
+local IsCurrentSpell = (C_Spell and C_Spell.IsCurrentSpell) or _G.IsCurrentSpell or function() return false end
+
+local RAGE = (Enum and Enum.PowerType and Enum.PowerType.Rage) or 1
+local MANA = (Enum and Enum.PowerType and Enum.PowerType.Mana) or 0
+local POWER = RAGE        -- rage (warrior), mana (paladin), druid: follows your form
+local CLASS               -- "WARRIOR", "PALADIN", "DRUID" or "WARLOCK"
+-- Druid bits live in one table (Lua allows only 200 top-level locals)
+local DRU = {
+    ENERGY = (Enum and Enum.PowerType and Enum.PowerType.Energy) or 3,
+    COMBO = (Enum and Enum.PowerType and Enum.PowerType.ComboPoints) or 4,
+    dotAt = {},          -- dot name -> target key -> time we cast it
+    anyRange = false,    -- caster form: count mobs at any range, not only melee
+    DOTS = { ["Moonfire"] = true, ["Insect Swarm"] = true, ["Rake"] = true, ["Rip"] = true,
+             ["Faerie Fire"] = true, ["Faerie Fire (Feral)"] = true,
+             -- warlock (Forever calls Curse of Agony "Bane of Agony")
+             ["Corruption"] = true, ["Bane of Agony"] = true, ["Curse of Agony"] = true, ["Immolate"] = true,
+             ["Siphon Life"] = true, ["Curse of the Elements"] = true, ["Curse of Weakness"] = true },
+    passive = {},        -- passive spells / talents in the spellbook (name -> true)
+    icons = {},          -- non-spell icons for alerts (bag items like Healthstone)
+    -- GetShapeshiftFormID -> what we call it (moonkin / tree count as caster)
+    FORM = { [1] = "cat", [5] = "bear", [8] = "bear", [3] = "travel", [4] = "travel",
+             [27] = "travel", [29] = "travel", [2] = "caster", [31] = "caster", [36] = "caster" },
+}
+local ALERTS, CD_SPELLS   -- picked at login from the class tables below
+local spendLine           -- function, defined with the advice code below
+local tankingHard         -- function, defined with the advice code below
+local DB
+local function say(fmt, ...) print("|cffff7d0aDBags|r|cffc79c6eAlerts|r: " .. string.format(fmt, ...)) end
+
+local DEFAULTS = {
+    point = { "CENTER", "CENTER", 0, -170 },
+    scale = 1,
+    targetOfTarget = false,
+    customSizes = false,
+    targetWidth = 280, targetHeight = 9, targetX = 0, targetY = 0,
+    geometry = {},
+    partSizes = {target=1, player=1, alerts=1, dots=1, casts=1, cooldowns=1, helpers=1},
+    locked = true,
+    off = {},            -- alert key -> true when turned off
+    sunderGoal = 2,      -- Sunder stacks wanted on normal mobs (elites/bosses always 5)
+    dumpAt = 70,         -- rage % to start telling you to Heroic Strike / Cleave
+    lowHp = 35,          -- health % for the LOW HP warning
+    sound = false,       -- raid-warning sound on danger alerts (only when not secret)
+    durations = {},      -- learned buff/debuff lengths, by spell name
+    tank = true,         -- paladin: tanking setup (Righteous Fury, Seal of Fury, Sanctuary)
+    lux = true,          -- standard floating HUD
+    stack = true,        -- big-icon mode (one "press this" icon) instead of a row of icons
+    names = false,       -- spell names under the big icon
+    advice = false,      -- rage tip line under the rage bar
+    target = false,       -- our target frame (name, health, who it's hitting)
+    casts = false,        -- our cast bars (yours + your target's)
+    hideBlizz = false,    -- hide Blizzard's player frame, target frame and cast bar
+    style = "classic",   -- "classic" = WoW gold frames + glossy bars, "clean" = thin black lines
+    cursor = false,       -- ring around the mouse cursor
+    cursorSize = 48,
+    characterRing = false,
+    characterRingSize = 80,
+    characterRingZoom = true,
+    characterRingHeight = -45,
+    cursorCombat = false,
+    buffNag = true,      -- missing Battle Shout reminder, also out of combat
+    stanceNag = false,    -- flashing "DEFENSIVE" in combat when you are in another stance
+    foodNag = false,      -- "EAT" button when Well Fed (+5% XP in Forever) is missing and you carry food
+    stoneNag = false,     -- weapon stone button when your main hand has no stone on it
+    stoneNeed = false,    -- ...and a grey "no stone" icon when you have none
+    range = false,       -- optional aggro dots over enemy nameplates
+    lowMana = 20,        -- paladin: mana % for the LOW MANA warning
+    dumpTank = 90,       -- warrior: spend line while you are getting hit a lot
+    shardGoal = 5,       -- warlock: Soul Shards to keep (Drain Soul alert below this)
+}
+
+function DRU.partScale(key)
+    local db=DB or DBagsAlertsDB
+    if not db or not db.customSizes then return 1 end
+    return math.max(0.6, math.min(2, tonumber(db.partSizes and db.partSizes[key]) or 1))
+end
+-- Geometry is separate from font/icon scale and from the shared HUD anchor.
+function DRU.targetGeometry(defaultWidth, defaultHeight)
+    if not DB or not DB.customSizes then return defaultWidth, defaultHeight, 0, 0 end
+    return math.max(120, math.min(600, tonumber(DB.targetWidth) or defaultWidth)),
+        math.max(3, math.min(80, tonumber(DB.targetHeight) or defaultHeight)),
+        math.max(-800, math.min(800, tonumber(DB.targetX) or 0)),
+        math.max(-600, math.min(600, tonumber(DB.targetY) or 0))
+end
+function DRU.geometry(key, width, height)
+    local db=DB or DBagsAlertsDB
+    local g=db and db.customSizes and db.geometry and db.geometry[key]
+    if type(g)~="table" then return width,height,0,0 end
+    return width and math.max(120,math.min(600,tonumber(g.width) or width)),
+        height and math.max(3,math.min(80,tonumber(g.height) or height)),
+        math.max(-800,math.min(800,tonumber(g.x) or 0)),
+        math.max(-600,math.min(600,tonumber(g.y) or 0))
+end
+function DRU.placePart(frame,key,width,height,x,y,scale)
+    local w,h,dx,dy=DRU.geometry(key,width,height)
+    frame:ClearAllPoints();frame:SetScale(scale);frame:SetSize(w,h)
+    frame:SetPoint("TOPLEFT",DBagsAlertsState.main,"TOPLEFT",(x+dx)/scale,(-y+dy)/scale)
+    return h
+end
+-- Fallback lengths when neither the aura nor the tooltip tells us.
+local DEFAULT_DURATION = {
+    ["Shield Block"] = 5, ["Battle Shout"] = 120, ["Demoralizing Shout"] = 30,
+    ["Thunder Clap"] = 10, ["Sunder Armor"] = 30, ["Rend"] = 21,     -- Icy Veins: Rend lasts 21 sec
+    ["Righteous Fury"] = 1800, ["Holy Shield"] = 10, ["Consecration"] = 8,
+}
+for _, s in ipairs({ "Seal of Fury", "Seal of Righteousness", "Seal of Command", "Seal of the Crusader",
+    "Seal of Wisdom", "Seal of Light", "Seal of Justice" }) do DEFAULT_DURATION[s] = 30 end
+for _, b in ipairs({ "Blessing of Sanctuary", "Blessing of Kings", "Blessing of Might", "Blessing of Wisdom" }) do
+    DEFAULT_DURATION[b] = 300; DEFAULT_DURATION["Greater " .. b] = 900
+end
+
+for k, v in pairs({ ["Moonfire"] = 12, ["Insect Swarm"] = 12, ["Rake"] = 9, ["Rip"] = 12,
+    ["Faerie Fire"] = 40, ["Faerie Fire (Feral)"] = 40, ["Demoralizing Roar"] = 30, ["Thorns"] = 600,
+    ["Mark of the Wild"] = 1800, ["Gift of the Wild"] = 3600, ["Rejuvenation"] = 12 }) do
+    DEFAULT_DURATION[k] = v
+end
+for k, v in pairs({ ["Corruption"] = 18, ["Bane of Agony"] = 24, ["Curse of Agony"] = 24, ["Immolate"] = 15,
+    ["Siphon Life"] = 30, ["Curse of the Elements"] = 300, ["Curse of Weakness"] = 120, ["Demon Skin"] = 1800,
+    ["Demon Armor"] = 1800, ["Demonic Sacrifice"] = 7200, ["Searing Pain"] = 10 }) do
+    DEFAULT_DURATION[k] = v
+end
+
+-- Buffs we follow by our own casts. A group means "any one of these counts"
+-- (one seal at a time, one blessing on you, one aura).
+local GROUPS = {
+    ["Shield Block"] = { "Shield Block" },
+    ["Battle Shout"] = { "Battle Shout" },
+    ["Demoralizing Shout"] = { "Demoralizing Shout" },
+    ["Thunder Clap"] = { "Thunder Clap" },
+    ["Righteous Fury"] = { "Righteous Fury" },
+    ["Holy Shield"] = { "Holy Shield" },
+    ["Consecration"] = { "Consecration" },
+    MOTW = { "Mark of the Wild", "Gift of the Wild" },
+    ["Thorns"] = { "Thorns" },
+    ["Rejuvenation"] = { "Rejuvenation" },
+    ["Demoralizing Roar"] = { "Demoralizing Roar" },
+    ARMOR = { "Demon Armor", "Demon Skin", "Fel Armor" },
+    -- Demonic Sacrifice buffs (Imp / Voidwalker / Succubus / Felhunter), or our own cast of it
+    SACRIFICE = { "Demonic Sacrifice", "Touch of Shadow", "Fel Stamina", "Burning Wish", "Fel Energy" },
+    SOULLINK = { "Soul Link" },
+    BRAND = { "Searing Pain" },        -- Demonic Brand: Searing Pain brands the target for 10 sec
+    SEAL = { "Seal of Fury", "Seal of Righteousness", "Seal of Command", "Seal of the Crusader",
+             "Seal of Wisdom", "Seal of Light", "Seal of Justice" },
+    BLESSING = { "Blessing of Sanctuary", "Blessing of Kings", "Blessing of Might", "Blessing of Wisdom",
+                 "Greater Blessing of Sanctuary", "Greater Blessing of Kings", "Greater Blessing of Might",
+                 "Greater Blessing of Wisdom" },
+    AURA = { "Devotion Aura", "Retribution Aura", "Concentration Aura", "Crusader Aura",
+             "Fire Resistance Aura", "Frost Resistance Aura", "Shadow Resistance Aura" },
+}
+local GROUP_OF = {}
+for key, names in pairs(GROUPS) do for _, n in ipairs(names) do GROUP_OF[n] = key end end
+local PERMANENT = { AURA = true, SOULLINK = true }       -- auras last until changed
+-- Which groups to re-read from real aura data whenever it is readable.
+local READ = {
+    WARRIOR = { "Battle Shout", "Shield Block" },
+    PALADIN = { "Righteous Fury", "SEAL", "BLESSING", "AURA", "Holy Shield" },
+    DRUID = { "MOTW", "Thorns", "Rejuvenation" },
+    WARLOCK = { "ARMOR", "SACRIFICE", "SOULLINK" },
+}
+
+---------------------------------------------------------------------------
+-- Spellbook: name -> highest learned rank's spellID
+---------------------------------------------------------------------------
+local spell = {}
+local function rankOf(id)
+    local sub = C_Spell and C_Spell.GetSpellSubtext and C_Spell.GetSpellSubtext(id)
+    if type(sub) ~= "string" or secret(sub) then return 0 end
+    return tonumber(sub:match("%d+")) or 0
+end
+
+local function buildSpells()
+    wipe(spell)
+    wipe(DRU.passive)
+    if not (C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines) then return end
+    local bank = Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player or 0
+    local SPELL = Enum and Enum.SpellBookItemType and Enum.SpellBookItemType.Spell
+    local best = {}
+    for line = 1, C_SpellBook.GetNumSpellBookSkillLines() do
+        local info = C_SpellBook.GetSpellBookSkillLineInfo(line)
+        if info then
+            for i = info.itemIndexOffset + 1, info.itemIndexOffset + info.numSpellBookItems do
+                local item = C_SpellBook.GetSpellBookItemInfo(i, bank)
+                if item and item.spellID and not item.isPassive and type(item.name) == "string"
+                    and not secret(item.name) and (SPELL == nil or item.itemType == SPELL) then
+                    local r = rankOf(item.spellID)
+                    if not best[item.name] or r >= best[item.name] then
+                        best[item.name] = r
+                        spell[item.name] = item.spellID
+                    end
+                elseif item and item.isPassive and type(item.name) == "string" and not secret(item.name) then
+                    DRU.passive[item.name] = true      -- talents like Shadow and Flame
+                end
+            end
+        end
+    end
+end
+
+local durCache = {}       -- tooltip-parsed lengths; reading tooltips every tick is slow
+local function durationOf(name)
+    if DB.durations[name] then return DB.durations[name] end
+    if durCache[name] then return durCache[name] end
+    local id = spell[name]
+    local d = id and C_Spell.GetSpellDescription and C_Spell.GetSpellDescription(id)
+    local n
+    if type(d) == "string" and not secret(d) then
+        n = tonumber(d:match("for (%d+) sec") or d:match("over (%d+) sec") or d:match("[Ll]asts (%d+) sec"))
+    end
+    n = n or DEFAULT_DURATION[name] or 10
+    durCache[name] = n
+    return n
+end
+
+---------------------------------------------------------------------------
+-- Readers that never throw. They return a plain boolean, or a secret one.
+---------------------------------------------------------------------------
+local function ready(name)
+    local id = spell[name]
+    if not id then return false end
+    local ok, c = pcall(C_Spell.GetSpellCooldown, id)
+    if not ok or type(c) ~= "table" or sectable(c) then return true end
+    if not secret(c.isOnGCD) and c.isOnGCD == true then return true end
+    if secret(c.isActive) then return { secretInv = true, v = c.isActive } end -- secret: "ready" = not active
+    if c.isActive ~= nil then return not c.isActive end
+    if secret(c.duration) then return true end
+    return (c.duration or 0) <= 1.5
+end
+
+local function usable(name)
+    local id = spell[name]
+    if not id then return false end
+    local ok, u = pcall(C_Spell.IsSpellUsable, id)
+    if not ok then return true end
+    return u
+end
+
+---------------------------------------------------------------------------
+-- Condition gates. A state collects plain checks (all must be true) and
+-- secret alphas (handed to nested frames, never inspected).
+---------------------------------------------------------------------------
+local function need(st, v, invert)
+    if not st.ok then return end
+    if type(v) == "table" and not sectable(v) and rawget(v, "secretInv") == true then -- wrapped secret from ready()
+        v, invert = v.v, not invert
+    end
+    if secret(v) then
+        if C_CurveUtil and C_CurveUtil.EvaluateColorValueFromBoolean then
+            local ok, a = pcall(C_CurveUtil.EvaluateColorValueFromBoolean, v, invert and 0 or 1, invert and 1 or 0)
+            if ok then st.n = st.n + 1; st[st.n] = a end
+        end
+        return
+    end
+    local b = v and true or false
+    if invert then b = not b end
+    if not b then st.ok = false end
+end
+
+local function needAlpha(st, a)
+    if not st.ok then return end
+    if not a then return end
+    if secret(a) then st.n = st.n + 1; st[st.n] = a return end
+    if a < 0.5 then st.ok = false end
+end
+
+local curves = {}
+local function stepCurve(key, below, frac)
+    if curves[key] ~= nil then return curves[key] or nil end
+    local ok, c = pcall(function()
+        local cv = C_CurveUtil.CreateCurve()
+        cv:SetType(Enum.LuaCurveType.Step)
+        if below then cv:AddPoint(0, 1); cv:AddPoint(frac, 0)
+        else cv:AddPoint(0, 0); cv:AddPoint(frac, 1) end
+        return cv
+    end)
+    curves[key] = ok and c or false
+    return ok and c or nil
+end
+
+-- power (rage or mana) >= pct%  (below=false)  or  < pct%  (below=true)
+local function needRage(st, pct, below)
+    if not st.ok then return end
+    local r, m = UnitPower("player", POWER), UnitPowerMax("player", POWER)
+    if not secret(r) and not secret(m) then
+        local frac = (m and m > 0) and r / m or 0
+        if below then need(st, frac < pct / 100) else need(st, frac >= pct / 100) end
+        return
+    end
+    local cv = UnitPowerPercent and stepCurve("rage" .. pct .. tostring(below), below, pct / 100)
+    if not cv then return end
+    local ok, a = pcall(UnitPowerPercent, "player", POWER, false, cv)
+    if ok then needAlpha(st, a) end
+end
+
+local function needLowHealth(st, pct)
+    if not st.ok then return end
+    local h, m = UnitHealth("player"), UnitHealthMax("player")
+    if not secret(h) and not secret(m) then
+        need(st, m and m > 0 and h / m < pct / 100)
+        return
+    end
+    local cv = UnitHealthPercent and stepCurve("hp" .. pct, true, pct / 100)
+    if not cv then st.ok = false return end
+    local ok, a = pcall(UnitHealthPercent, "player", false, cv)
+    if ok then needAlpha(st, a) else st.ok = false end
+end
+
+-- Target health above pct% (Icy Veins: don't Sunder/Rend a mob that's about to die).
+-- If it can't be read at all, don't block the alert.
+local function needTargetAbove(st, pct)
+    if not st.ok then return end
+    local h, m = UnitHealth("target"), UnitHealthMax("target")
+    if not secret(h) and not secret(m) then
+        if m and m > 0 then need(st, h / m >= pct / 100) end
+        return
+    end
+    local cv = UnitHealthPercent and stepCurve("thp" .. pct, false, pct / 100)
+    if not cv then return end
+    local ok, a = pcall(UnitHealthPercent, "target", false, cv)
+    if ok then needAlpha(st, a) end
+end
+
+---------------------------------------------------------------------------
+-- Our own casts -> timers (readable in combat)
+---------------------------------------------------------------------------
+local expires = {}       -- buff/aoe debuff name -> GetTime() it runs out
+local sunder = {}        -- target key -> { n = stacks, last = time }
+local rendAt = {}        -- target key -> time cast
+
+local lastDebuff             -- { name, at, key } of our last Rend / Sunder cast
+local function targetKey()
+    local g = UnitGUID("target")
+    if g == nil or secret(g) then return "?" end
+    return g
+end
+
+local function onCast(spellID)
+    if spellID == nil or secret(spellID) then return end
+    local name = C_Spell.GetSpellName and C_Spell.GetSpellName(spellID)
+    if type(name) ~= "string" or secret(name) then return end
+    local now = GetTime()
+    local group = GROUP_OF[name]
+    if group then
+        expires[group] = PERMANENT[group] and math.huge or now + durationOf(name)
+    end
+    if name == "Sunder Armor" then
+        local k = targetKey()
+        local s = sunder[k]
+        if not s or now - s.last > durationOf("Sunder Armor") then s = { n = 0 } end
+        s.n, s.last = math.min(5, s.n + 1), now
+        sunder[k] = s
+        lastDebuff = { name = name, at = now, key = k }
+    elseif name == "Rend" then
+        local k = targetKey()
+        rendAt[k] = now
+        lastDebuff = { name = name, at = now, key = k }
+    elseif DRU.DOTS[name] then
+        local k = targetKey()
+        DRU.dotAt[name] = DRU.dotAt[name] or {}
+        DRU.dotAt[name][k] = now
+        lastDebuff = { name = name, at = now, key = k }
+    end
+end
+
+-- The game counts a dodged / parried / missed Rend or Sunder as "cast". If the
+-- target dodges, parries or is immune right after our cast, take it back so the
+-- alert comes back instead of waiting out a timer for a debuff that isn't there.
+local MISSED = { DODGE = true, PARRY = true, MISS = true, IMMUNE = true, EVADE = true, RESIST = true, DEFLECT = true }
+local function onTargetCombat(action)
+    local ld = lastDebuff
+    if not ld or secret(action) or not MISSED[action] then return end
+    if GetTime() - ld.at > 0.35 then lastDebuff = nil return end
+    if ld.name == "Rend" then
+        rendAt[ld.key] = nil
+    elseif ld.name == "Sunder Armor" and sunder[ld.key] then
+        sunder[ld.key].n = math.max(0, sunder[ld.key].n - 1)
+    elseif DRU.dotAt[ld.name] then
+        DRU.dotAt[ld.name][ld.key] = nil
+    end
+    lastDebuff = nil
+end
+
+local function timeLeft(name) return (expires[name] or 0) - GetTime() end
+
+-- Is OUR debuff really on the target? "on" (+ aura data), "off", or nil when the
+-- game won't say (combat lock). When it does say, it beats our timers.
+local function targetDebuff(name)
+    if not (C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName) then return nil end
+    if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+        local okR, restricted = pcall(C_Secrets.ShouldAurasBeSecret)
+        if not okR or secret(restricted) then return nil end
+        if restricted then
+            local id = spell[name]
+            local okS, s = false, nil
+            if id and C_Secrets.ShouldSpellAuraBeSecret then okS, s = pcall(C_Secrets.ShouldSpellAuraBeSecret, id) end
+            if not (okS and not secret(s) and s == false) then return nil end
+        end
+    end
+    local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "target", name, "HARMFUL|PLAYER")
+    if not ok or secret(a) or sectable(a) then return nil end
+    if a then return "on", a end
+    return "off"
+end
+
+-- Out of combat the buff itself is readable: correct our timers and learn lengths.
+local function readBuff(key)
+    if InCombatLockdown() or not (C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName) then return end
+    for _, name in ipairs(GROUPS[key] or { key }) do
+        local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", name, "HELPFUL")
+        if not ok or secret(a) or sectable(a) then return end   -- unreadable: keep our cast timer
+        if a then
+            if secret(a.expirationTime) or secret(a.duration) then return end
+            if (a.duration or 0) > 0 then
+                expires[key] = a.expirationTime
+                DB.durations[name] = a.duration
+            else
+                expires[key] = math.huge
+            end
+            return
+        end
+    end
+    expires[key] = 0   -- readable, and none of them is on you
+end
+
+local function readAll()
+    for _, key in ipairs(READ[CLASS] or {}) do readBuff(key) end
+end
+
+-- any power type >= pct% (or < pct% with below); secret values go through a curve
+function DRU.needPower(st, ptype, pct, below)
+    if not st.ok then return end
+    local r, m = UnitPower("player", ptype), UnitPowerMax("player", ptype)
+    if not secret(r) and not secret(m) then
+        local frac = (m and m > 0) and r / m or 0
+        if below then need(st, frac < pct / 100) else need(st, frac >= pct / 100) end
+        return
+    end
+    local cv = UnitPowerPercent and stepCurve("pw" .. ptype .. "_" .. pct .. tostring(below), below, pct / 100)
+    if not cv then return end
+    local ok, a = pcall(UnitPowerPercent, "player", ptype, false, cv)
+    if ok then needAlpha(st, a) end
+end
+-- at least n combo points (cat form)
+function DRU.needCP(st, n)
+    if not st.ok then return end
+    local c = UnitPower("player", DRU.COMBO)
+    if not secret(c) then need(st, (c or 0) >= n) return end
+    DRU.needPower(st, DRU.COMBO, n / 5 * 100 - 1, false)
+end
+-- our dot needs (re)applying: the real debuff when the game shares it, else our cast
+-- timer. refresh = part of the duration left when it's worth refreshing (0 = let it end).
+function DRU.dotGone(name, refresh)     -- plain true/false
+    local t = DRU.dotAt[name]
+    local at = t and t[targetKey()]
+    local real, aura = targetDebuff(name)
+    local d = durationOf(name)
+    local now = GetTime()
+    if real == "on" then
+        local exp = aura and plain(aura.expirationTime, nil)
+        return (exp and exp > 0 and exp - now <= d * refresh) and true or false
+    elseif real == "off" then return not at or now - at > 1   -- 1s: it lands just after the cast
+    end
+    return not at or now - at > d * (1 - refresh)
+end
+function DRU.needDot(st, name, refresh)
+    if not st.ok then return end
+    need(st, DRU.dotGone(name, refresh))
+end
+-- unit health above pct% (below=false) or under pct% (below=true); unreadable = no block
+function DRU.needUnitHP(st, unit, pct, below)
+    if not st.ok then return end
+    local h, m = UnitHealth(unit), UnitHealthMax(unit)
+    if not secret(h) and not secret(m) then
+        if m and m > 0 then
+            if below then need(st, h / m < pct / 100) else need(st, h / m >= pct / 100) end
+        end
+        return
+    end
+    local cv = UnitHealthPercent and stepCurve("uhp" .. unit .. pct .. tostring(below), below, pct / 100)
+    if not cv then return end
+    local ok, a = pcall(UnitHealthPercent, unit, false, cv)
+    if ok then needAlpha(st, a) end
+end
+
+---------------------------------------------------------------------------
+-- Rage gain per hit (only while rage is readable)
+---------------------------------------------------------------------------
+local lastRage, gains = nil, {}
+local function onRage()
+    local r = UnitPower("player", RAGE)
+    if secret(r) then lastRage = nil return end
+    if lastRage and r > lastRage then
+        table.insert(gains, r - lastRage)
+        if #gains > 8 then table.remove(gains, 1) end
+    end
+    lastRage = r
+end
+local function avgGain()
+    if #gains == 0 then return nil end
+    local s = 0
+    for _, g in ipairs(gains) do s = s + g end
+    return s / #gains
+end
+
+---------------------------------------------------------------------------
+-- Enemy count + loose mobs from nameplates (turn enemy nameplates on: V)
+---------------------------------------------------------------------------
+local scanAt, scanN, scanLoose = 0, nil, nil
+local scanMates = {}        -- reused list of group unit tokens
+local scanEnemiesNow
+local function scanEnemies()   -- counting nameplates 3x a second is plenty
+    local now = GetTime()
+    if now - scanAt >= 0.3 then scanAt = now; scanN, scanLoose = scanEnemiesNow() end
+    return scanN, scanLoose
+end
+scanEnemiesNow = function()
+    DRU.mockPlate, DRU.mockUnit, DRU.mockLabel, DRU.shoutCount = nil, nil, nil, 0
+    DRU.mockHint = nil
+    DRU.recoveryPlate, DRU.recoveryUnit = nil, nil
+    if not (C_NamePlate and C_NamePlate.GetNamePlates) then return nil, nil end
+    local ok, plates = pcall(C_NamePlate.GetNamePlates)
+    if not ok or type(plates) ~= "table" or sectable(plates) then return nil, nil end
+    local melee = spell["Sunder Armor"] or spell["Heroic Strike"] or spell["Holy Strike"] or spell["Crusader Strike"]
+        or spell["Claw"] or spell["Maul"]
+    if DRU.anyRange then melee = nil end
+    local grouped = IsInGroup()
+    -- your group, without you (for "is this mob hitting a friend?")
+    local mates = scanMates
+    wipe(mates)
+    if grouped then
+        if IsInRaid() then
+            for i = 1, GetNumGroupMembers() do
+                local m = "raid" .. i
+                if not plain(UnitIsUnit(m, "player"), false) then mates[#mates + 1] = m end
+            end
+        else
+            for i = 1, 4 do mates[#mates + 1] = "party" .. i end
+        end
+    end
+    local rescue = CLASS == "WARRIOR" and grouped and plain(UnitAffectingCombat("player"), false)
+        and ready("Taunt") ~= true
+    local mock = rescue and not DB.off.mocking and spell["Mocking Blow"]
+        and ready("Mocking Blow") ~= false
+    local mockLabel
+    if mock then
+        if plain(usable("Mocking Blow")) ~= false then
+            mockLabel = "MOCKING BLOW"
+        else
+            local stance = GetShapeshiftForm and plain(GetShapeshiftForm())
+            local rage = plain(UnitPower("player", RAGE))
+            if type(stance) == "number" and stance > 1 then
+                mockLabel = "BATTLE STANCE"
+            elseif type(rage) == "number" and rage < 10 then
+                mockLabel = "NEED 10 RAGE"
+            else
+                mockLabel = "CHECK STANCE / RAGE"
+            end
+        end
+    end
+    local shout = rescue and not DB.off.rescueShout and spell["Challenging Shout"]
+        and ready("Challenging Shout") ~= false and plain(usable("Challenging Shout")) ~= false
+    local n, loose, unknown = 0, 0, false
+    for _, p in ipairs(plates) do
+        local u = p.namePlateUnitToken or (p.UnitFrame and p.UnitFrame.unit)
+        if u and not secret(u) then
+            local atk, dead = UnitCanAttack("player", u), UnitIsDead(u)
+            if secret(atk) or secret(dead) then
+                unknown = true
+            elseif atk and not dead then
+                -- Only mobs fighting YOU: you're on their threat list (you hit them or
+                -- they're hitting you). Mobs fighting other players don't count.
+                local s = UnitThreatSituation("player", u)
+                local mine
+                if secret(s) then
+                    local cmb = UnitAffectingCombat(u)      -- locked: best guess
+                    if secret(cmb) then unknown = true; mine = false else mine = cmb and true or false end
+                else
+                    mine = s ~= nil
+                end
+                if mine then
+                    local inRange = true
+                    if melee and C_Spell.IsSpellInRange then
+                        local okR, r = pcall(C_Spell.IsSpellInRange, melee, u)
+                        if okR and not secret(r) and r == false then inRange = false end
+                    end
+                    if inRange then n = n + 1 end
+                end
+                -- Loose = attacking someone in your group (they have its aggro), not you.
+                if grouped then
+                    for _, m in ipairs(mates) do
+                        local ms = plain(UnitThreatSituation(m, u))
+                        local victim = plain(UnitIsUnit(u .. "target", m)) == true
+                        if not victim and plain(UnitIsUnit(u, "target")) == true then
+                            victim = plain(UnitIsUnit("targettarget", m)) == true
+                        end
+                        if victim or (ms and ms >= 2) then
+                            loose = loose + 1
+                            if CLASS == "WARRIOR" and (victim or (not secret(s) and (s == nil or s < 2))) then
+                                if not DRU.recoveryPlate or plain(UnitIsUnit(u, "target")) == true then
+                                    DRU.recoveryPlate, DRU.recoveryUnit = p, u
+                                end
+                            end
+                            if rescue and (victim or (not secret(s) and (s == nil or s < 2))) then
+                                if mockLabel then
+                                    DRU.mockHint = mockLabel == "MOCKING BLOW" and "CHECK MELEE RANGE" or mockLabel
+                                end
+                                if mockLabel and C_Spell.IsSpellInRange then
+                                    local okRange, inRange = pcall(C_Spell.IsSpellInRange, spell["Mocking Blow"], u)
+                                    local inMelee = okRange and plain(inRange) == true
+                                    if not inMelee and melee and mockLabel ~= "MOCKING BLOW" then
+                                        local okMelee, result = pcall(C_Spell.IsSpellInRange, melee, u)
+                                        inMelee = okMelee and plain(result) == true
+                                    end
+                                    if inMelee and
+                                        (not DRU.mockPlate or plain(UnitIsUnit(u, "target")) == true) then
+                                        DRU.mockPlate, DRU.mockUnit, DRU.mockLabel = p, u, mockLabel
+                                    end
+                                end
+                                if shout then
+                                    local okDistance, squared, checked = pcall(UnitDistanceSquared, u)
+                                    squared, checked = plain(squared), plain(checked)
+                                    local close = okDistance and checked == true and type(squared) == "number"
+                                        and squared >= 0 and squared <= 100
+                                    if not (okDistance and checked == true and type(squared) == "number")
+                                        and melee and C_Spell.IsSpellInRange then
+                                        local okMelee, inMelee = pcall(C_Spell.IsSpellInRange, melee, u)
+                                        close = okMelee and plain(inMelee) == true
+                                    end
+                                    if close then
+                                        DRU.shoutCount = DRU.shoutCount + 1
+                                    end
+                                end
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if CLASS == "WARRIOR" and DBagsAlertsDebug and DBagsAlertsDebug.warriorScan and InCombatLockdown() then
+        DBagsAlertsDebug.warriorScan(plates, loose, DRU.mockPlate ~= nil, DRU.shoutCount, rescue,
+            spell, ready, usable, DB)
+    end
+    if unknown and n == 0 then return nil, nil end
+    return n, grouped and loose or 0
+end
+
+---------------------------------------------------------------------------
+-- Alerts. Order inside a row = priority (left = most important).
+---------------------------------------------------------------------------
+local ctx = {}
+DBagsAlertsState = { ctx = ctx, partScale = DRU.partScale, geometry = DRU.geometry }   -- read-only peek for /pa debug and testing
+DBagsAlertsState.tankSetup = function()
+    if CLASS == "PALADIN" then return DB and DB.tank ~= false end
+    if CLASS == "DRUID" then return ctx.form == "bear" end
+    if CLASS == "WARRIOR" then
+        return spell["Shield Slam"] ~= nil or DRU.passive["Defiance"] == true
+            or DRU.passive["Improved Revenge"] == true or DRU.passive["Shield Specialization"] == true
+    end
+    return false
+end
+
+local WARRIOR_ALERTS = {
+    -- DANGER ROW
+    { key = "lowhp", row = 1, label = "LOW HP", danger = true, icon = "Shield Wall",
+      test = function(st)
+          need(st, ctx.combat)
+          -- Icy Veins: Shield Wall BEFORE the big hits, so warn earlier (50%) while getting hit a lot
+          needLowHealth(st, (tankingHard and tankingHard()) and math.max(DB.lowHp, 50) or DB.lowHp)
+          if st.ok then
+              local r = ready("Shield Wall")
+              if spell["Shield Wall"] and r == true then return "Shield Wall", "SHIELD WALL" end
+              r = ready("Last Stand")
+              if spell["Last Stand"] and r == true then return "Last Stand", "LAST STAND" end
+          end
+      end },
+    { key = "taunt", row = 1, label = "TAUNT", danger = true, icon = "Taunt",
+      test = function(st)
+          need(st, ctx.combat and ctx.group and ctx.hostile)
+          need(st, ready("Taunt")); need(st, usable("Taunt"))
+          if not st.ok then return end
+          local isTanking = UnitDetailedThreatSituation("player", "target")
+          need(st, isTanking, true)
+      end },
+    { key = "mocking", row = 1, label = "MOCKING BLOW", danger = true, icon = "Mocking Blow",
+      test = function(st)
+          need(st, ctx.combat and ctx.group and DRU.mockHint ~= nil)
+          need(st, ready("Taunt"), true)
+          need(st, ready("Mocking Blow"))
+          if DRU.mockLabel == "MOCKING BLOW" then need(st, usable("Mocking Blow")) end
+          if st.ok then return "Mocking Blow", DRU.mockLabel or DRU.mockHint end
+      end },
+    { key = "rescueShout", row = 1, label = "CHALLENGING SHOUT", danger = true, icon = "Challenging Shout",
+      test = function(st)
+          need(st, ctx.combat and ctx.group
+              and (DRU.shoutCount or 0) >= (DB.shoutMinimum or 3))
+          need(st, ready("Taunt"), true)
+          need(st, ready("Challenging Shout"))
+          need(st, usable("Challenging Shout"))
+          if DRU.mockPlate and DRU.mockLabel == "MOCKING BLOW" then need(st, ready("Mocking Blow"), true) end
+      end },
+    { key = "kick", row = 1, label = "INTERRUPT", danger = true, icon = "Shield Bash",
+      test = function(st)
+          local k = spell["Shield Bash"] and "Shield Bash" or (spell["Pummel"] and "Pummel")
+          need(st, k and ctx.combat and ctx.hostile)
+          if not st.ok then return end
+          need(st, ready(k)); need(st, usable(k))
+          if not st.ok then return end
+          local cname, _, _, _, _, _, _, notInt = UnitCastingInfo("target")
+          if not cname then cname, _, _, _, _, _, notInt = UnitChannelInfo("target") end
+          need(st, cname and true or false)
+          need(st, notInt, true)
+          return k
+      end },
+    { key = "loose", row = 1, label = "LOOSE", danger = true, icon = "Taunt",
+      test = function(st)
+          need(st, ctx.combat and ctx.group and (ctx.loose or 0) > 0)
+          if st.ok then return nil, "LOOSE MOBS " .. ctx.loose end
+      end },
+
+    -- ACTION ROW
+    { key = "block", row = 2, label = "SHIELD BLOCK", icon = "Shield Block",
+      test = function(st)
+          -- Off the GCD: a separate cue, not a replacement for your next attack.
+          need(st, ctx.combat and ctx.hostile)
+          need(st, UnitIsUnit("targettarget", "player"))
+          need(st, ready("Shield Block")); need(st, usable("Shield Block"))
+          if DRU.lux then return nil, "BLOCK" end
+      end },
+    { key = "revenge", row = 2, label = "REVENGE", icon = "Revenge",
+      test = function(st)
+          need(st, ctx.combat); need(st, ready("Revenge")); need(st, usable("Revenge"))
+      end },
+    { key = "slam", row = 2, label = "SHIELD SLAM", icon = "Shield Slam",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile); need(st, ready("Shield Slam")); need(st, usable("Shield Slam"))
+      end },
+    { key = "vrush", row = 2, label = "VICTORY RUSH", icon = "Victory Rush",
+      test = function(st)
+          need(st, ctx.hostile); need(st, ready("Victory Rush")); need(st, usable("Victory Rush"))
+      end },
+    { key = "clap", row = 2, label = "THUNDER CLAP", icon = "Thunder Clap",
+      test = function(st)
+          -- Icy Veins tank page: "Use it when ready" - one mob or a pack
+          need(st, ctx.combat and ctx.hostile)
+          need(st, ready("Thunder Clap")); need(st, usable("Thunder Clap"))
+      end },
+    { key = "demo", row = 2, label = "DEMO SHOUT", icon = "Demoralizing Shout",
+      test = function(st)
+          -- Icy Veins (Forever prot leveling): "Use Demoralizing Shout early in the fight
+          -- to reduce damage taken" - single mob AND packs. Less damage = less eating.
+          -- Skipped when the mob is almost dead (wasted rage).
+          need(st, ctx.combat and ctx.hostile and timeLeft("Demoralizing Shout") <= durationOf("Demoralizing Shout") * 0.3)   -- pandemic: refresh at 30% left
+          need(st, usable("Demoralizing Shout"))
+          if (ctx.enemies or 0) < 2 and not ctx.elite then needTargetAbove(st, 40) end
+      end },
+    { key = "execute", row = 2, label = "EXECUTE", icon = "Execute",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile); need(st, ready("Execute")); need(st, usable("Execute"))
+      end },
+    { key = "cleave", row = 2, label = "CLEAVE", icon = "Cleave",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile and spell["Cleave"] and (ctx.enemies or 0) >= 2)
+          if not st.ok then return end
+          need(st, usable("Cleave"))
+          need(st, IsCurrentSpell(spell["Cleave"]), true)
+          -- Extra threat on two enemies; leave a buffer for Block and core attacks.
+          local reserve = (spell["Shield Slam"] or (tankingHard and tankingHard())) and 60 or 40
+          needRage(st, reserve, false)
+      end },
+    { key = "dump", row = 2, label = "SPEND RAGE", icon = "Heroic Strike",
+      test = function(st)
+          local name = "Heroic Strike"
+          need(st, ctx.combat and ctx.hostile and spell[name])
+          need(st, (ctx.enemies or 0) < 2 or not spell["Cleave"])
+          if not st.ok then return end
+          local queued = IsCurrentSpell(spell[name])
+          need(st, queued, true)          -- already queued? then stay quiet
+          needRage(st, spendLine and spendLine() or DB.dumpAt, false)
+          return name, "HEROIC STRIKE"
+      end },
+    { key = "sunder", row = 2, label = "SUNDER", icon = "Sunder Armor",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile)
+          if not st.ok then return end
+          local s = sunder[targetKey()]
+          local stacks = (s and GetTime() - s.last < durationOf("Sunder Armor")) and s.n or 0
+          local real, aura = targetDebuff("Sunder Armor")          -- real stacks when readable
+          if real == "off" then stacks = 0
+          elseif real == "on" then stacks = plain(aura.applications, stacks) or stacks end
+          local goal = ctx.elite and 5 or DB.sunderGoal
+          need(st, stacks < goal)
+          need(st, usable("Sunder Armor"))
+          needTargetAbove(st, 30)
+          if st.ok then return nil, "SUNDER " .. stacks .. "/" .. goal end
+      end },
+    { key = "rend", row = 2, label = "REND", icon = "Rend",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile and not ctx.bleedImmune)
+          if not st.ok then return end
+          local at = rendAt[targetKey()]
+          local real, aura = targetDebuff("Rend")                 -- the truth, when the game shares it
+          local d = durationOf("Rend")
+          if real == "on" then                                     -- refresh in the pandemic window (30% left)
+              local exp = aura and plain(aura.expirationTime, nil)
+              need(st, exp and exp > 0 and exp - GetTime() <= d * 0.3)
+          elseif real == "off" then need(st, not at or GetTime() - at > 1)   -- 1s: it lands just after the cast
+          else need(st, not at or GetTime() - at > d * 0.7) end
+          need(st, usable("Rend"))
+          needTargetAbove(st, 40)        -- not on a mob that is about to die
+      end },
+    { key = "shout", row = 2, label = "BATTLE SHOUT", icon = "Battle Shout",
+      test = function(st)
+          need(st, DB.buffNag == false)   -- the buff reminder icon shows it instead (no doubles)
+          need(st, spell["Battle Shout"] and timeLeft("Battle Shout") <= 10 and not IsMounted())
+          need(st, usable("Battle Shout"))
+      end },
+    { key = "bloodrage", row = 2, label = "BLOODRAGE", icon = "Bloodrage",
+      test = function(st)
+          need(st, ready("Bloodrage")); need(st, usable("Bloodrage"))
+          if not st.ok then return end
+          if ctx.combat then needRage(st, 20, true) else need(st, ctx.hostile) end
+      end },
+}
+
+-- First spell in the list that you know (and, if wanted, that is ready right now).
+local function firstKnown(list, mustBeReady)
+    for _, n in ipairs(list) do
+        if spell[n] and (not mustBeReady or ready(n) == true) then return n end
+    end
+end
+
+local SEAL_TANK = { "Seal of Fury", "Seal of Righteousness" }
+local SEAL_DPS = { "Seal of Righteousness", "Seal of Command", "Seal of Fury" }
+local BLESS_TANK = { "Blessing of Sanctuary", "Blessing of Kings", "Blessing of Might" }
+local BLESS_DPS = { "Blessing of Might", "Blessing of Kings", "Blessing of Sanctuary" }
+local AURAS = { "Devotion Aura", "Retribution Aura" }
+local PALLY_SAVES = { "Templar's Bulwark", "Divine Protection", "Divine Shield", "Lay on Hands" }
+local PALLY_TAUNTS = { "Hand of Reckoning", "Righteous Defense" }
+local PALLY_KICKS = { "Rebuke", "Hammer of Justice" }
+
+local PALADIN_ALERTS = {
+    -- DANGER ROW
+    { key = "lowhp", row = 1, label = "LOW HP", danger = true, icon = "Templar's Bulwark",
+      test = function(st)
+          need(st, ctx.combat)
+          needLowHealth(st, DB.lowHp)
+          if st.ok then
+              local n = firstKnown(PALLY_SAVES, true)
+              if n then return n, n:upper() end
+          end
+      end },
+    { key = "taunt", row = 1, label = "TAUNT", danger = true, icon = "Judgement",
+      test = function(st)
+          -- Righteous Defense / Hand of Reckoning if you have them, else Judgement (taunts with Seal of Fury).
+          local t = firstKnown(PALLY_TAUNTS)
+          local judge = not t
+          t = t or "Judgement"
+          -- Icy Veins: Swift Judgement is the backup taunt while Judgement is on cooldown
+          if judge and ready("Judgement") ~= true and spell["Swift Judgement"] and ready("Swift Judgement") == true then
+              t = "Swift Judgement"
+          end
+          need(st, ctx.combat and ctx.group and ctx.hostile and spell[t])
+          if judge then need(st, timeLeft("SEAL") > 0) end
+          need(st, ready(t)); need(st, usable(t))
+          if not st.ok then return end
+          local isTanking = UnitDetailedThreatSituation("player", "target")
+          need(st, isTanking, true)
+          return t, judge and "TAUNT (JUDGE)" or "TAUNT"
+      end },
+    { key = "kick", row = 1, label = "STUN IT", danger = true, icon = "Hammer of Justice",
+      test = function(st)
+          local k = firstKnown(PALLY_KICKS)
+          need(st, k and ctx.combat and ctx.hostile)
+          if not st.ok then return end
+          need(st, ready(k)); need(st, usable(k))
+          if not st.ok then return end
+          local cname, _, _, _, _, _, _, notInt = UnitCastingInfo("target")
+          if not cname then cname, _, _, _, _, _, notInt = UnitChannelInfo("target") end
+          need(st, cname and true or false)
+          need(st, notInt, true)
+          return k, k == "Rebuke" and "INTERRUPT" or "STUN IT"
+      end },
+    { key = "loose", row = 1, label = "LOOSE", danger = true, icon = "Judgement",
+      test = function(st)
+          need(st, ctx.combat and ctx.group and (ctx.loose or 0) > 0)
+          if st.ok then return nil, "LOOSE MOBS " .. ctx.loose end
+      end },
+
+    -- ACTION ROW
+    { key = "rfury", row = 2, label = "RIGHTEOUS FURY", icon = "Righteous Fury",
+      test = function(st)
+          need(st, DB.tank and spell["Righteous Fury"] and timeLeft("Righteous Fury") <= 10 and not IsMounted())
+          need(st, usable("Righteous Fury"))
+      end },
+    { key = "seal", row = 2, label = "SEAL", icon = "Seal of Righteousness",
+      test = function(st)
+          local s = firstKnown(DB.tank and SEAL_TANK or SEAL_DPS)
+          need(st, s and timeLeft("SEAL") <= 2 and (ctx.combat or ctx.hostile))
+          if not st.ok then return end
+          need(st, usable(s))
+          return s, s == "Seal of Fury" and "SEAL (FURY)" or "SEAL"
+      end },
+    { key = "holyshield", row = 2, label = "HOLY SHIELD", icon = "Holy Shield",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile and timeLeft("Holy Shield") <= 0.5)
+          need(st, ready("Holy Shield")); need(st, usable("Holy Shield"))
+      end },
+    { key = "swift", row = 2, label = "SWIFT JUDGE", icon = "Swift Judgement",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile); need(st, ready("Swift Judgement")); need(st, usable("Swift Judgement"))
+      end },
+    { key = "judge", row = 2, label = "JUDGE", icon = "Judgement",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile and timeLeft("SEAL") > 0)
+          need(st, ready("Judgement")); need(st, usable("Judgement"))
+      end },
+    { key = "consecrate", row = 2, label = "CONSECRATE", icon = "Consecration",
+      test = function(st)
+          -- Icy Veins: as much as mana allows. Packs: from 25% mana. One mob: from 50%.
+          need(st, ctx.combat and ctx.hostile and timeLeft("Consecration") <= 0)
+          need(st, ready("Consecration")); need(st, usable("Consecration"))
+          needRage(st, ((ctx.enemies or 0) >= 2 or ctx.elite) and 25 or 50, false)
+      end },
+    { key = "holystrike", row = 2, label = "HOLY STRIKE", icon = "Holy Strike",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile); need(st, ready("Holy Strike")); need(st, usable("Holy Strike"))
+      end },
+    { key = "exorcism", row = 2, label = "EXORCISM", icon = "Exorcism",
+      test = function(st)
+          need(st, ctx.combat and ctx.hostile and (ctx.ctype == "Undead" or ctx.ctype == "Demon"))
+          need(st, ready("Exorcism")); need(st, usable("Exorcism"))
+      end },
+    { key = "wrath", row = 2, label = "HAMMER OF WRATH", icon = "Hammer of Wrath",
+      test = function(st)
+          -- has a cast time: Icy Veins says only when you're not tanking
+          need(st, ctx.combat and ctx.hostile and not DB.tank)
+          need(st, ready("Hammer of Wrath")); need(st, usable("Hammer of Wrath"))
+      end },
+    { key = "lowmana", row = 2, label = "LOW MANA", icon = "Seal of Wisdom",
+      test = function(st)
+          need(st, ctx.combat)
+          needRage(st, DB.lowMana, true)
+      end },
+    { key = "bless", row = 2, label = "BLESSING", icon = "Blessing of Might",
+      test = function(st)
+          local b = firstKnown(DB.tank and BLESS_TANK or BLESS_DPS)
+          need(st, b and timeLeft("BLESSING") <= 10 and not IsMounted())
+          if not st.ok then return end
+          need(st, usable(b))
+          return b
+      end },
+    { key = "aura", row = 2, label = "AURA", icon = "Devotion Aura",
+      test = function(st)
+          local a = firstKnown(AURAS)
+          need(st, a and timeLeft("AURA") <= 0)
+          return a
+      end },
+}
+
+-- Druid: every alert checks your form, so Bear / Cat / caster each get their own
+-- rotation. Order and rules: Icy Veins WoW Forever Feral, Balance and Restoration
+-- leveling guides (Nov 2026).
+local function inForm(f) return ctx.form == f end
+local function castingTarget(st)
+    local cname, _, _, _, _, _, _, notInt = UnitCastingInfo("target")
+    if not cname then cname, _, _, _, _, _, notInt = UnitChannelInfo("target") end
+    need(st, cname and true or false)
+    need(st, notInt, true)
+end
+local DRUID_ALERTS = {
+    -- DANGER ROW
+    { key = "lowhp", row = 1, label = "LOW HP", danger = true, icon = "Barkskin",
+      test = function(st)
+          need(st, ctx.combat)
+          needLowHealth(st, (inForm("bear") and tankingHard and tankingHard()) and math.max(DB.lowHp, 50) or DB.lowHp)
+          if st.ok then
+              local list = inForm("bear") and { "Frenzied Regeneration", "Barkskin" }
+                  or inForm("cat") and { "Barkskin" } or { "Barkskin", "Regrowth" }
+              local n = firstKnown(list, true)
+              if n then return n, n:upper() end
+          end
+      end },
+    { key = "kick", row = 1, label = "STOP CAST", danger = true, icon = "Bash",
+      test = function(st)
+          local k = firstKnown({ "Bash", "Feral Charge" }, true)
+          need(st, inForm("bear") and k and ctx.combat and ctx.hostile)
+          if not st.ok then return end
+          need(st, usable(k))
+          castingTarget(st)
+          return k, "STOP CAST"
+      end },
+    { key = "taunt", row = 1, label = "GROWL", danger = true, icon = "Growl",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.group and ctx.hostile and spell["Growl"])
+          need(st, ready("Growl")); need(st, usable("Growl"))
+          if not st.ok then return end
+          local isTanking = UnitDetailedThreatSituation("player", "target")
+          need(st, isTanking, true)
+      end },
+    { key = "loose", row = 1, label = "LOOSE", danger = true, icon = "Growl",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.group and (ctx.loose or 0) > 0)
+          if st.ok then return nil, "LOOSE MOBS " .. ctx.loose end
+      end },
+
+    -- CAT: open from Prowl, Rip at 4+ points, keep Rake up, Claw (Shred when behind)
+    { key = "copen", row = 2, label = "OPENER", icon = "Ravage",
+      test = function(st)
+          local n = firstKnown({ "Ravage", "Shred" })
+          need(st, inForm("cat") and ctx.stealth and ctx.hostile and n)
+          if not st.ok then return end
+          need(st, usable(n))
+          return n, n:upper()
+      end },
+    { key = "rip", row = 2, label = "RIP", icon = "Rip",
+      test = function(st)
+          need(st, inForm("cat") and ctx.combat and ctx.hostile and spell["Rip"] and not ctx.bleedImmune)
+          DRU.needCP(st, 4)
+          DRU.needDot(st, "Rip", 0)
+          need(st, usable("Rip"))
+          if not ctx.elite then needTargetAbove(st, 40) end    -- only if the mob will live a while
+      end },
+    { key = "rake", row = 2, label = "RAKE", icon = "Rake",
+      test = function(st)
+          need(st, inForm("cat") and ctx.combat and ctx.hostile and spell["Rake"] and not ctx.bleedImmune)
+          DRU.needDot(st, "Rake", 0)                           -- don't refresh it early
+          need(st, usable("Rake"))
+          if not ctx.elite then needTargetAbove(st, 30) end
+      end },
+    { key = "fbite", row = 2, label = "BITE", icon = "Ferocious Bite",
+      test = function(st)
+          -- 5 points and Rip is already on: spend them so they aren't wasted
+          need(st, inForm("cat") and ctx.combat and ctx.hostile and spell["Ferocious Bite"])
+          DRU.needCP(st, 5)
+          need(st, usable("Ferocious Bite"))
+      end },
+    { key = "cfill", row = 2, label = "CLAW", icon = "Claw",
+      test = function(st)
+          -- Shred needs you behind the mob: only when someone else tanks (in a group)
+          local n = (ctx.group and spell["Shred"]) and "Shred" or (spell["Claw"] and "Claw") or nil
+          need(st, inForm("cat") and ctx.combat and ctx.hostile and n)
+          if not st.ok then return end
+          need(st, usable(n))
+          return n, n:upper()
+      end },
+    { key = "shift", row = 2, label = "SHIFTING POWER", icon = "Shifting Power",
+      test = function(st)
+          need(st, inForm("cat") and ctx.combat and spell["Shifting Power"])
+          need(st, ready("Shifting Power")); need(st, usable("Shifting Power"))
+          DRU.needPower(st, DRU.ENERGY, 50, true)              -- on cooldown below 50 energy
+      end },
+
+    -- BEAR: Primal Bite on cooldown, Lacerate (one mob) / Swipe (packs), Maul for extra rage
+    { key = "primal", row = 2, label = "PRIMAL BITE", icon = "Primal Bite",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.hostile and spell["Primal Bite"])
+          need(st, ready("Primal Bite")); need(st, usable("Primal Bite"))
+      end },
+    { key = "bfill", row = 2, label = "SWIPE", icon = "Swipe",
+      test = function(st)
+          local many = (ctx.enemies or 0) >= 2
+          local n = (not many and spell["Lacerate"]) and "Lacerate" or (spell["Swipe"] and "Swipe") or nil
+          need(st, inForm("bear") and ctx.combat and ctx.hostile and n)
+          if not st.ok then return end
+          need(st, ready(n)); need(st, usable(n))
+          return n, n:upper()
+      end },
+    { key = "maul", row = 2, label = "MAUL", icon = "Maul",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.hostile and spell["Maul"])
+          if not st.ok then return end
+          need(st, IsCurrentSpell(spell["Maul"]), true)        -- not already queued
+          need(st, usable("Maul"))
+          needRage(st, spendLine(), false)                     -- only extra rage
+      end },
+    { key = "enrage", row = 2, label = "ENRAGE", icon = "Enrage",
+      test = function(st)
+          need(st, inForm("bear") and spell["Enrage"] and (ctx.combat or ctx.hostile))
+          need(st, ready("Enrage")); need(st, usable("Enrage"))
+          if st.ok and ctx.combat then needRage(st, 30, true) end
+      end },
+    { key = "roar", row = 2, label = "DEMO ROAR", icon = "Demoralizing Roar",
+      test = function(st)
+          need(st, inForm("bear") and ctx.combat and ctx.hostile and ((ctx.enemies or 0) >= 2 or ctx.elite))
+          need(st, spell["Demoralizing Roar"] and timeLeft("Demoralizing Roar") <= durationOf("Demoralizing Roar") * 0.3)
+          need(st, usable("Demoralizing Roar"))
+      end },
+    { key = "ffire", row = 2, label = "FAERIE FIRE", icon = "Faerie Fire",
+      test = function(st)
+          local n = spell["Faerie Fire (Feral)"] and "Faerie Fire (Feral)" or "Faerie Fire"
+          need(st, (inForm("bear") or inForm("cat")) and ctx.combat and ctx.hostile and spell[n] and not ctx.stealth)
+          DRU.needDot(st, n, 0.1)
+          need(st, ready(n)); need(st, usable(n))
+          needTargetAbove(st, 30)
+          return n, "FAERIE FIRE"
+      end },
+
+    -- CASTER (Balance / Restoration while leveling): Moonfire + Insect Swarm, Wrath filler
+    { key = "hurricane", row = 2, label = "HURRICANE", icon = "Hurricane",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and ctx.hostile and (ctx.enemies or 0) >= 3 and spell["Hurricane"])
+          need(st, ready("Hurricane")); need(st, usable("Hurricane"))
+      end },
+    { key = "moonfire", row = 2, label = "MOONFIRE", icon = "Moonfire",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and ctx.hostile and spell["Moonfire"])
+          DRU.needDot(st, "Moonfire", 0.3)
+          need(st, usable("Moonfire"))
+          needTargetAbove(st, 25)
+      end },
+    { key = "insect", row = 2, label = "INSECT SWARM", icon = "Insect Swarm",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and ctx.hostile and spell["Insect Swarm"])
+          DRU.needDot(st, "Insect Swarm", 0.3)
+          need(st, ready("Insect Swarm")); need(st, usable("Insect Swarm"))
+          needTargetAbove(st, 25)
+      end },
+    { key = "wrath", row = 2, label = "WRATH", icon = "Wrath",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and ctx.hostile and spell["Wrath"])
+          need(st, usable("Wrath"))
+      end },
+
+    -- UPKEEP: Mark of the Wild + Thorns always, Rejuvenation on yourself before a pull
+    { key = "rejuv", row = 2, label = "REJUV", icon = "Rejuvenation",
+      test = function(st)
+          need(st, inForm("caster") and not ctx.combat and ctx.hostile and spell["Rejuvenation"])
+          need(st, timeLeft("Rejuvenation") <= 0)
+          need(st, usable("Rejuvenation"))
+      end },
+    { key = "motw", row = 2, label = "MARK", icon = "Mark of the Wild",
+      test = function(st)
+          need(st, spell["Mark of the Wild"] and timeLeft("MOTW") <= 60 and not IsMounted())
+          if ctx.combat then need(st, usable("Mark of the Wild")) end
+      end },
+    { key = "thorns", row = 2, label = "THORNS", icon = "Thorns",
+      test = function(st)
+          need(st, spell["Thorns"] and timeLeft("Thorns") <= 30 and not IsMounted())
+          if ctx.combat then need(st, usable("Thorns")) end
+      end },
+
+    -- EXTRA (caster)
+    { key = "innervate", row = 2, label = "INNERVATE", icon = "Innervate",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and spell["Innervate"])
+          need(st, ready("Innervate")); need(st, usable("Innervate"))
+          needRage(st, 40, true)                               -- mana in caster form
+      end },
+    { key = "grasp", row = 2, label = "NATURE'S GRASP", icon = "Nature's Grasp",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat and (ctx.enemies or 0) >= 2 and spell["Nature's Grasp"])
+          need(st, ready("Nature's Grasp")); need(st, usable("Nature's Grasp"))
+      end },
+    { key = "lowmana", row = 2, label = "LOW MANA", icon = "Innervate",
+      test = function(st)
+          need(st, inForm("caster") and ctx.combat)
+          needRage(st, DB.lowMana, true)
+      end },
+}
+
+-- Warlock: Icy Veins WoW Forever Affliction, Demonology and Destruction leveling
+-- guides (Nov 2026). DoTs only on mobs that will live, Life Tap when health is
+-- fine, Drain Soul for shards, pet out unless Demonic Sacrifice is on you.
+do
+    -- bags: Soul Shards + your Healthstone (read at most once a second)
+    DRU.SHARD = 6265
+    DRU.HS_IDS = { [5512] = true, [19004] = true, [19005] = true, [5511] = true, [19006] = true, [19007] = true,
+        [5509] = true, [19008] = true, [19009] = true, [5510] = true, [19010] = true, [19011] = true,
+        [9421] = true, [19012] = true, [19013] = true }
+    DRU.icons.Healthstone = "Interface\\Icons\\INV_Stone_04"
+    local bagAt, shards, hsID = -10, 0, nil
+    local function nameOf(info, id)
+        local n = info.itemName
+        if type(n) ~= "string" or secret(n) then
+            local ok, n2 = pcall(C_Item.GetItemInfo, id)
+            n = ok and n2 or nil
+        end
+        if type(n) == "string" and not secret(n) then return n end
+    end
+    function DRU.bags()
+        local now = GetTime()
+        if now - bagAt < 1 then return shards, hsID end
+        bagAt = now
+        local s, hs, icon = 0, nil, nil
+        if C_Container and C_Container.GetContainerNumSlots and C_Container.GetContainerItemInfo then
+            for bag = 0, 5 do              -- 5 = reagent bag slot (soul shard bag)
+                local okN, n = pcall(C_Container.GetContainerNumSlots, bag)
+                n = okN and plain(n, 0) or 0
+                for slot = 1, (type(n) == "number" and n or 0) do
+                    local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+                    if ok and type(info) == "table" and not sectable(info) and info.itemID and not secret(info.itemID) then
+                        local id = info.itemID
+                        local nm = nameOf(info, id)
+                        if id == DRU.SHARD or nm == "Soul Shard" then
+                            s = s + (plain(info.stackCount, 1) or 1)
+                        elseif DRU.HS_IDS[id] or (nm and nm:find("Healthstone")) then
+                            hs, icon = id, plain(info.iconFileID, nil)
+                        end
+                    end
+                end
+            end
+        end
+        shards, hsID = s, hs
+        if icon then DRU.icons.Healthstone = icon end
+        return shards, hsID
+    end
+    local function hsReady()
+        local _, id = DRU.bags()
+        if not id then return false end
+        local getCD = C_Container and C_Container.GetItemCooldown
+        if getCD then
+            local ok, _, d = pcall(getCD, id)
+            if ok and not secret(d) and d and d > 1.5 then return false end
+        end
+        return true
+    end
+    function DRU.havePet()
+        local e = UnitExists("pet")
+        if secret(e) then return true end
+        if not e then return false end
+        local d = UnitIsDead("pet")
+        if secret(d) then return true end
+        return not d
+    end
+    local function trivial()
+        local ok, t = pcall(UnitIsTrivial or function() return false end, "target")
+        return ok and plain(t, false) == true
+    end
+    local function demo() return spell["Soul Link"] or DRU.passive["Demonic Brand"] end
+    local function sAndF() return DRU.passive["Shadow and Flame"] end
+    local function bane() return spell["Bane of Agony"] and "Bane of Agony" or (spell["Curse of Agony"] and "Curse of Agony") end
+    local function lives(st, pct) if not ctx.elite then needTargetAbove(st, pct) end end   -- will it live a while?
+    local function fight(st) need(st, ctx.combat and ctx.hostile) end
+
+    -- Nightfall's free Shadow Bolt ("Shadow Trance"): the aura when readable, else
+    -- the game's own button glow on Shadow Bolt.
+    local tranceAt
+    function DRU.tranceUp()
+        local hidden = true
+        if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+            local ok, r = pcall(C_Secrets.ShouldAurasBeSecret)
+            hidden = not ok or secret(r) or r == true
+        end
+        if not hidden and C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName then
+            for _, n in ipairs({ "Shadow Trance", "Nightfall" }) do
+                local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", n, "HELPFUL")
+                if not ok or secret(a) or sectable(a) then hidden = true break end
+                if a then return true end
+            end
+            if not hidden then return false end
+        end
+        return tranceAt ~= nil and GetTime() - tranceAt < 10
+    end
+    local wf = CreateFrame("Frame")
+    pcall(wf.RegisterEvent, wf, "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
+    pcall(wf.RegisterEvent, wf, "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
+    pcall(wf.RegisterUnitEvent, wf, "UNIT_SPELLCAST_SUCCEEDED", "player")
+    pcall(wf.RegisterUnitEvent, wf, "UNIT_PET", "player")
+    wf:SetScript("OnEvent", function(_, event, a1, a2, a3)
+        if CLASS ~= "WARLOCK" then return end
+        if event == "UNIT_PET" then expires.SOULLINK = 0 return end     -- new pet: Soul Link again
+        local id = event == "UNIT_SPELLCAST_SUCCEEDED" and a3 or a1
+        if id == nil or secret(id) then return end
+        local ok, name = pcall(C_Spell.GetSpellName, id)
+        if not ok or type(name) ~= "string" or secret(name) then return end
+        if event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" then
+            if name == "Shadow Bolt" then tranceAt = GetTime() end
+        elseif event == "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" then
+            if name == "Shadow Bolt" then tranceAt = nil end
+        elseif name == "Shadow Bolt" then
+            tranceAt = nil
+        elseif name == "Conflagrate" and not sAndF() and DRU.dotAt.Immolate then
+            DRU.dotAt.Immolate[targetKey()] = nil                        -- it ate your Immolate
+        end
+    end)
+
+    DRU.WARLOCK_ALERTS = {
+        -- DANGER ROW
+        { key = "lowhp", row = 1, label = "LOW HP", danger = true, icon = "Death Coil",
+          test = function(st)
+              need(st, ctx.combat)
+              needLowHealth(st, DB.lowHp)
+              if not st.ok then return end
+              if hsReady() then return "Healthstone", "HEALTHSTONE" end
+              local n = firstKnown({ "Death Coil" }, true)
+              if n then return n, "DEATH COIL" end
+              if spell["Drain Life"] then return "Drain Life", "DRAIN LIFE" end
+              need(st, false) -- no learned emergency spell: no placeholder icon
+          end },
+        { key = "fear", row = 1, label = "FEAR ONE", danger = true, icon = "Fear",
+          test = function(st)
+              -- solo, 2+ mobs on you and getting low: Fear one so you fight one at a time
+              need(st, ctx.combat and ctx.hostile and not ctx.group and (ctx.enemies or 0) >= 2 and spell["Fear"])
+              need(st, usable("Fear"))
+              DRU.needUnitHP(st, "player", 60, true)
+              if not st.ok then return end
+              if (ctx.enemies or 0) >= 3 and spell["Howl of Terror"] and ready("Howl of Terror") == true then
+                  return "Howl of Terror", "HOWL"
+              end
+          end },
+
+        -- NEXT: procs and finishers first, then DoTs, then the filler
+        { key = "trance", row = 2, label = "FREE BOLT", icon = "Shadow Bolt",
+          test = function(st)
+              fight(st); need(st, spell["Shadow Bolt"] and DRU.tranceUp())
+          end },
+        { key = "drainlife", row = 2, label = "DRAIN LIFE", icon = "Drain Life",
+          test = function(st)
+              fight(st); need(st, spell["Drain Life"]); need(st, usable("Drain Life"))
+              DRU.needUnitHP(st, "player", 50, true)
+          end },
+        { key = "drainsoul", row = 2, label = "SOUL SHARD", icon = "Drain Soul",
+          test = function(st)
+              -- dying mob + not enough shards: channel Drain Soul as it dies
+              fight(st); need(st, spell["Drain Soul"] and not trivial())
+              if not st.ok then return end
+              need(st, (DRU.bags()) < (DB.shardGoal or 5))
+              need(st, usable("Drain Soul"))
+              DRU.needUnitHP(st, "target", 25, true)
+              if st.ok then return nil, "SHARD " .. (DRU.bags()) .. "/" .. (DB.shardGoal or 5) end
+          end },
+        { key = "sburn", row = 2, label = "SHADOWBURN", icon = "Shadowburn",
+          test = function(st)
+              fight(st); need(st, spell["Shadowburn"]); need(st, ready("Shadowburn")); need(st, usable("Shadowburn"))
+              -- after Shadow and Flame the shard always comes back: on cooldown vs tough mobs
+              if not (sAndF() and ctx.elite) then DRU.needUnitHP(st, "target", 20, true) end
+          end },
+        { key = "conflag", row = 2, label = "CONFLAGRATE", icon = "Conflagrate",
+          test = function(st)
+              fight(st); need(st, spell["Conflagrate"] and not DRU.dotGone("Immolate", 0))
+              need(st, ready("Conflagrate")); need(st, usable("Conflagrate"))
+              if not st.ok or sAndF() then return end
+              -- before Shadow and Flame it eats Immolate: only near its end or to finish
+              if not DRU.dotGone("Immolate", 0.3) then DRU.needUnitHP(st, "target", 25, true) end
+          end },
+        { key = "brand", row = 2, label = "BRAND", icon = "Searing Pain",
+          test = function(st)
+              -- Demonology: Searing Pain brands your pet's target (10 sec)
+              fight(st); need(st, demo() and spell["Searing Pain"] and DRU.havePet() and timeLeft("BRAND") <= 0)
+              need(st, usable("Searing Pain"))
+              lives(st, 25)
+          end },
+        { key = "corrupt", row = 2, label = "CORRUPTION", icon = "Corruption",
+          test = function(st)
+              fight(st); need(st, spell["Corruption"])
+              DRU.needDot(st, "Corruption", 0.1)
+              need(st, usable("Corruption"))
+              lives(st, 35)
+          end },
+        { key = "bane", row = 2, label = "AGONY", icon = "Bane of Agony",
+          test = function(st)
+              local n = bane()
+              fight(st); need(st, n)
+              if not st.ok then return end
+              DRU.needDot(st, n, 0)                -- strongest ticks at the end: never refresh early
+              need(st, usable(n))
+              lives(st, 50)
+              return n, "AGONY"
+          end },
+        { key = "immolate", row = 2, label = "IMMOLATE", icon = "Immolate",
+          test = function(st)
+              fight(st); need(st, spell["Immolate"])
+              DRU.needDot(st, "Immolate", 0.1)
+              need(st, usable("Immolate"))
+              lives(st, 40)
+          end },
+        { key = "siphon", row = 2, label = "SIPHON LIFE", icon = "Siphon Life",
+          test = function(st)
+              fight(st); need(st, spell["Siphon Life"])
+              DRU.needDot(st, "Siphon Life", 0.1)
+              need(st, usable("Siphon Life"))
+              lives(st, 60)                         -- 30 sec dot: long fights only
+          end },
+        { key = "filler", row = 2, label = "SHADOW BOLT", icon = "Shadow Bolt",
+          test = function(st)
+              -- Incinerate (Destruction 40+), else wand when you have one, else Shadow Bolt
+              local okW, wand = pcall(HasWandEquipped or function() return false end)
+              wand = okW and plain(wand, false) == true
+              local n = spell["Incinerate"] and "Incinerate" or (wand and spell["Shoot"] and "Shoot") or "Shadow Bolt"
+              fight(st); need(st, spell[n])
+              if not st.ok then return end
+              if n == "Shoot" then need(st, IsCurrentSpell(spell.Shoot), true) else need(st, usable(n)) end
+              return n, n == "Shoot" and "WAND" or n:upper()
+          end },
+
+        -- BUFF: upkeep
+        { key = "armor", row = 2, label = "ARMOR", icon = "Demon Skin",
+          test = function(st)
+              local n = firstKnown({ "Fel Armor", "Demon Armor", "Demon Skin" })
+              need(st, n and timeLeft("ARMOR") <= 60 and not IsMounted())
+              if not st.ok then return end
+              if ctx.combat then need(st, usable(n)) end
+              return n, "ARMOR"
+          end },
+        { key = "pet", row = 2, label = "SUMMON PET", icon = "Summon Imp",
+          test = function(st)
+              need(st, spell["Summon Imp"] and not IsMounted() and not DRU.havePet())
+              need(st, timeLeft("SACRIFICE") <= 0)  -- sacrificed on purpose: no nagging
+              if not st.ok then return end
+              -- Voidwalker tanks for you (Icy Veins solo pick); Imp needs no shard
+              local n = ((DRU.bags()) > 0 and spell["Summon Voidwalker"]) and "Summon Voidwalker" or "Summon Imp"
+              return n, "PET"
+          end },
+        { key = "soullink", row = 2, label = "SOUL LINK", icon = "Soul Link",
+          test = function(st)
+              need(st, spell["Soul Link"] and DRU.havePet() and timeLeft("SOULLINK") <= 0 and not IsMounted())
+              need(st, usable("Soul Link"))
+          end },
+        { key = "curse", row = 2, label = "CURSE", icon = "Curse of the Elements",
+          test = function(st)
+              -- elites / bosses: Elements (more magic damage), or Weakness if that's all you have
+              local n = firstKnown({ "Curse of the Elements", "Curse of Weakness" })
+              fight(st); need(st, n and ctx.elite)
+              if not st.ok then return end
+              need(st, DRU.dotGone("Curse of the Elements", 0.1) and DRU.dotGone("Curse of Weakness", 0.1))
+              need(st, usable(n))
+              return n, "CURSE"
+          end },
+        { key = "mkstone", row = 2, label = "HEALTHSTONE", icon = "Create Healthstone",
+          test = function(st)
+              need(st, not ctx.combat and spell["Create Healthstone"] and not IsMounted())
+              if not st.ok then return end
+              local s, hs = DRU.bags()
+              need(st, s > 0 and not hs)
+              return nil, "MAKE STONE"
+          end },
+
+        -- EXTRA
+        { key = "lifetap", row = 2, label = "LIFE TAP", icon = "Life Tap",
+          test = function(st)
+              need(st, spell["Life Tap"] and (ctx.combat or ctx.hostile) and not IsMounted())
+              need(st, usable("Life Tap"))
+              needRage(st, 40, true)                        -- mana under 40%
+              DRU.needUnitHP(st, "player", 60, false)       -- ...and health is fine
+          end },
+        { key = "funnel", row = 2, label = "HEAL PET", icon = "Health Funnel",
+          test = function(st)
+              need(st, ctx.combat and spell["Health Funnel"] and DRU.havePet())
+              need(st, usable("Health Funnel"))
+              DRU.needUnitHP(st, "pet", 30, true)
+          end },
+        { key = "rof", row = 2, label = "RAIN OF FIRE", icon = "Rain of Fire",
+          test = function(st)
+              fight(st); need(st, ctx.group and (ctx.enemies or 0) >= 3 and spell["Rain of Fire"])
+              need(st, usable("Rain of Fire"))
+          end },
+        { key = "lowmana", row = 2, label = "LOW MANA", icon = "Life Tap",
+          test = function(st)
+              need(st, ctx.combat and spell["Life Tap"])
+              needRage(st, DB.lowMana, true)
+          end },
+    }
+end
+
+-- Priest priorities for Forever. Keep one next action per HUD slot.
+do
+    local function canCast(name, unit)
+        local id = spell[name]
+        if not id or ready(name) ~= true or plain(usable(name)) ~= true then return false end
+        if not unit or unit == "player" then return true end
+        if not C_Spell.IsSpellInRange then return false end
+        local ok, inRange = pcall(C_Spell.IsSpellInRange, id, unit)
+        return ok and plain(inRange) == true
+    end
+
+    local function aura(unit, name, filter)
+        if not C_UnitAuras or not C_UnitAuras.GetAuraDataBySpellName then return nil end
+        if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+            local ok, restricted = pcall(C_Secrets.ShouldAurasBeSecret)
+            if not ok or plain(restricted) ~= false then return nil end
+        end
+        local ok, data = pcall(C_UnitAuras.GetAuraDataBySpellName, unit, name, filter)
+        if not ok or secret(data) or sectable(data) then return nil end
+        return data ~= nil
+    end
+
+    local function moving()
+        local speed = GetUnitSpeed and plain(GetUnitSpeed("player"))
+        return type(speed) == "number" and speed > 0
+    end
+
+    local function casting()
+        local cast, channel = UnitCastingInfo("player"), UnitChannelInfo("player")
+        if secret(cast) or secret(channel) then return true end
+        return cast ~= nil or channel ~= nil
+    end
+
+    local function hp(unit)
+        local current, maximum = plain(UnitHealth(unit)), plain(UnitHealthMax(unit))
+        if type(current) == "number" and type(maximum) == "number" and maximum > 0 and current > 0 then
+            return current / maximum * 100
+        end
+    end
+
+    local function mode()
+        if DB.priestMode and DB.priestMode ~= "Auto" then return DB.priestMode end
+        if spell["Shadowform"] then return "Shadow" end
+        if spell["Penance"] then return "Discipline" end
+        if spell["Prayer of Mending"] then return "Holy" end
+        if ctx.group and UnitGroupRolesAssigned and plain(UnitGroupRolesAssigned("player")) == "HEALER" then return "Holy" end
+        return "Shadow"
+    end
+
+    local function patient()
+        local result, lowest, hurt = "player", hp("player") or 101, 0
+        if lowest <= 70 then hurt = 1 end
+        if not ctx.group then return result, lowest, hurt end
+        local raid = IsInRaid()
+        local prefix = raid and "raid" or "party"
+        for i = 1, raid and GetNumGroupMembers() or 4 do
+            local unit = prefix .. i
+            if plain(UnitExists(unit)) == true and plain(UnitIsUnit(unit, "player")) == false then
+                local near, checked
+                if UnitInRange then near, checked = UnitInRange(unit) end
+                if plain(near) == true and plain(checked) == true then
+                    local value = hp(unit)
+                    if value then
+                        if value <= 70 then hurt = hurt + 1 end
+                        if value < lowest then result, lowest = unit, value end
+                    end
+                end
+            end
+        end
+        return result, lowest, hurt
+    end
+
+    local function heal()
+        if casting() or aura("player", "Shadowform", "HELPFUL") == true then return end
+        local spec = mode()
+        local unit, health, hurt
+        if spec == "Shadow" then unit, health, hurt = "player", hp("player") or 101, 0
+        else unit, health, hurt = patient() end
+        if health > (spec == "Shadow" and 40 or 85) then return end
+        local target = unit == "player" and "SELF" or plain(UnitName(unit), "ALLY") or "ALLY"
+        local function pick(name)
+            if canCast(name, unit) then return name, name .. " → " .. target end
+        end
+        if spec == "Discipline" and health <= 55 then
+            if aura(unit, "Weakened Soul", "HARMFUL") == false
+                and aura(unit, "Power Word: Shield", "HELPFUL") == false and canCast("Power Word: Shield", unit) then
+                return pick("Power Word: Shield")
+            end
+            if not moving() and canCast("Penance", unit) then return pick("Penance") end
+        end
+        if health <= 40 and not moving() then
+            for _, name in ipairs({ "Flash Heal", "Lesser Heal", "Heal" }) do
+                if canCast(name, unit) then return pick(name) end
+            end
+        end
+        if hurt >= 3 and not IsInRaid() and not moving() and canCast("Prayer of Healing") then
+            return "Prayer of Healing", "Prayer of Healing → PARTY"
+        end
+        if spec == "Holy" and ctx.combat and health <= 70 and canCast("Prayer of Mending", unit) then
+            return pick("Prayer of Mending")
+        end
+        if health <= 65 and not moving() then
+            for _, name in ipairs({ "Greater Heal", "Heal", "Lesser Heal" }) do
+                if canCast(name, unit) then return pick(name) end
+            end
+        end
+        if aura(unit, "Renew", "HELPFUL|PLAYER") == false then return pick("Renew") end
+    end
+
+    local function damage()
+        if not ctx.combat or not ctx.hostile or casting() then return end
+        local spec = mode()
+        if spec ~= "Shadow" and ctx.group then
+            local _, health = patient()
+            if health <= 85 then return end
+        end
+        local health = hp("target")
+        if health and health <= 15 and canCast("Shoot", "target") then return "Shoot", "FINISH WITH WAND" end
+        if targetDebuff("Shadow Word: Pain") == "off" and canCast("Shadow Word: Pain", "target") then
+            return "Shadow Word: Pain", "APPLY PAIN"
+        end
+        if spec == "Shadow" and health and health >= 35 and targetDebuff("Devouring Plague") == "off"
+            and canCast("Devouring Plague", "target") then return "Devouring Plague", "APPLY PLAGUE" end
+        if not moving() then
+            local choices = spec == "Shadow" and { "Mind Blast", "Mind Flay", "Smite" }
+                or { "Holy Fire", "Smite" }
+            for _, name in ipairs(choices) do
+                if canCast(name, "target") then return name, name end
+            end
+        end
+        if canCast("Shoot", "target") then return "Shoot", "USE WAND" end
+    end
+
+    DRU.PRIEST_ALERTS = {
+        { key = "priestHeal", row = 1, label = "HEAL", icon = "Lesser Heal", danger = true,
+          test = function(st) local name, label = heal(); need(st, name ~= nil); return name, label end },
+        { key = "priestDamage", row = 2, label = "ATTACK", icon = "Shadow Word: Pain",
+          test = function(st) local name, label = damage(); need(st, name ~= nil); return name, label end },
+        { key = "priestBuff", row = 2, label = "BUFF", icon = "Power Word: Fortitude",
+          test = function(st)
+              if not ctx.combat then
+                  for _, name in ipairs({ "Power Word: Fortitude", "Inner Fire", "Divine Spirit" }) do
+                      if canCast(name) and aura("player", name, "HELPFUL") == false then return name, "BUFF: " .. name end
+                  end
+              end
+              need(st, false)
+          end },
+        { key = "lowmana", row = 2, label = "LOW MANA", icon = "Inner Focus",
+          test = function(st) needRage(st, DB.lowMana, true); if st.ok then return firstKnown({ "Inner Focus", "Power Word: Shield" }), "LOW MANA" end end },
+    }
+end
+
+local CLASS_ALERTS = { WARRIOR = WARRIOR_ALERTS, PALADIN = PALADIN_ALERTS, DRUID = DRUID_ALERTS,
+    WARLOCK = DRU.WARLOCK_ALERTS, PRIEST = DRU.PRIEST_ALERTS }
+
+-- Big-icon mode: every alert of a spot sits in one place, stacked. First in the list
+-- is on top, so you only ever see the most important lit one. Order: Icy Veins
+-- Forever Prot Warrior / Prot Paladin leveling + tank rotation pages (Nov 2026).
+local SPOT = {
+    WARRIOR = {
+        danger = { "lowhp", "kick", "taunt", "rescueShout", "mocking", "loose" },
+        next   = { "slam", "revenge", "vrush", "clap", "sunder", "execute" },
+        buff   = { "demo", "rend", "shout" },               -- upkeep: never buried under the rotation
+        extra  = { "block", "cleave", "dump", "bloodrage" },   -- off the global cooldown: press any time
+    },
+    PALADIN = {
+        danger = { "lowhp", "kick", "taunt", "loose" },
+        next   = { "consecrate", "holyshield", "holystrike", "exorcism", "wrath" },
+        buff   = { "rfury", "seal", "bless", "aura" },
+        extra  = { "judge", "lowmana" },             -- Judgement is off the global cooldown
+    },
+    DRUID = {   -- each key only lights in its own form, so one list covers all three specs
+        danger = { "lowhp", "kick", "taunt", "loose" },
+        next   = { "copen", "rip", "rake", "fbite", "cfill", "primal", "bfill",
+                   "hurricane", "moonfire", "insect", "wrath" },
+        buff   = { "rejuv", "motw", "thorns", "ffire", "roar" },
+        extra  = { "shift", "enrage", "maul", "innervate", "grasp", "lowmana" },
+    },
+    WARLOCK = {   -- spells you don't know yet never light, so one list covers all three specs
+        danger = { "lowhp", "fear" },
+        next   = { "trance", "drainlife", "drainsoul", "sburn", "conflag", "brand",
+                   "corrupt", "bane", "immolate", "siphon", "filler" },
+        buff   = { "armor", "pet", "soullink", "curse", "mkstone" },
+        extra  = { "lifetap", "funnel", "rof", "lowmana" },
+    },
+}
+SPOT.PRIEST = { danger = { "priestHeal" }, next = { "priestDamage" }, buff = { "priestBuff" }, extra = { "lowmana" } }
+local SPOT_SIZE = { danger = 64, next = 64, buff = 44, extra = 64 }   -- big, easy to see
+
+-- Racials (Wowhead WoW Forever race pages, Nov 2026). Every class gets them; an alert
+-- or a cooldown icon only shows when your character really has that racial.
+do
+    -- Damage racials: worth it on tough fights (elite, 2+ mobs, or getting hit hard).
+    local BURST = { "Elune's Light", "Blood Fury", "Berserking" }
+    local racial = { key = "racial", row = 2, label = "RACIAL", icon = "Berserking",
+      test = function(st)
+          local n = firstKnown(BURST)
+          local tough = ctx.elite or (ctx.enemies or 0) >= 2 or (tankingHard and tankingHard())
+          need(st, n and ctx.combat and ctx.hostile and tough)
+          if not st.ok then return end
+          need(st, ready(n)); need(st, usable(n))
+          return n, n:upper()
+      end }
+    -- Tauren: War Stomp stops a cast when your normal interrupt isn't ready.
+    local stomp = { key = "stomp", row = 1, label = "WAR STOMP", danger = true, icon = "War Stomp",
+      test = function(st)
+          need(st, spell["War Stomp"] and ctx.combat and ctx.hostile and (ctx.enemies or 0) >= 1)
+          if not st.ok then return end
+          need(st, ready("War Stomp")); need(st, usable("War Stomp"))
+          castingTarget(st)
+      end }
+    for _, list in pairs(CLASS_ALERTS) do list[#list + 1] = racial; list[#list + 1] = stomp end
+    for _, sp in pairs(SPOT) do
+        table.insert(sp.danger, "stomp")       -- under the class interrupt
+        table.insert(sp.extra, 1, "racial")    -- off the global cooldown: first in its spot
+    end
+    -- cooldown row: every combat racial (only the ones you know get an icon)
+    DRU.RACIAL_CDS = { "Elune's Light", "Shadowmeld", "Blood Fury", "Berserking", "Stoneform", "War Stomp",
+        "Will of the Forsaken", "Will to Survive", "Escape Artist", "Shatter Curse" }
+end
+
+---------------------------------------------------------------------------
+-- UI
+---------------------------------------------------------------------------
+local main = CreateFrame("Frame", "DBagsAlertsFrame", UIParent)
+DBagsAlertsState.main = main
+
+do -- Shared settings behavior: one opaque window at a time, draggable and remembered.
+    local windows = {}
+    DBagsAlertsState.settingsWindows = windows
+    DBagsAlertsState.prepareSettingsWindow = function(w, key)
+        windows[key] = w
+        if key ~= "main" and not rawget(w, "dbaChrome") then
+            local chrome=CreateFrame("Frame",nil,w,"BackdropTemplate")
+            chrome:SetPoint("TOPLEFT",-7,7);chrome:SetPoint("BOTTOMRIGHT",7,-7)
+            chrome:SetFrameLevel(math.max(0,(w:GetFrameLevel() or 1)-1))
+            chrome:SetBackdrop({edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border",edgeSize=20})
+            w.dbaChrome=chrome
+        end
+        w:SetMovable(true); w:SetClampedToScreen(true); w:EnableMouse(true)
+        w:RegisterForDrag("LeftButton")
+        w:SetScript("OnDragStart", function(self) self:StartMoving() end)
+        w:SetScript("OnDragStop", function(self)
+            self:StopMovingOrSizing()
+            local point, _, relative, x, y = self:GetPoint()
+            DBagsAlertsDB.windows = DBagsAlertsDB.windows or {}
+            DBagsAlertsDB.windows[key] = {point, relative, x, y}
+        end)
+        local pos = DBagsAlertsDB and DBagsAlertsDB.windows and DBagsAlertsDB.windows[key]
+        if type(pos) == "table" and type(pos[1]) == "string" then
+            w:ClearAllPoints(); w:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4])
+        end
+    end
+    DBagsAlertsState.showSettingsWindow = function(w, key)
+        for name, other in pairs(windows) do if name ~= key then other:Hide() end end
+        w:Show(); w:Raise()
+    end
+    DBagsAlertsState.isSettingsOpen = function()
+        for _, w in pairs(windows) do if w:IsShown() then return true end end
+        return false
+    end
+    DBagsAlertsState.settingsBackButton = function(w, callback)
+        local b = CreateFrame("Button", nil, w, "UIPanelButtonTemplate")
+        b:SetSize(80, 24); b:SetPoint("BOTTOMLEFT", 14, 14); b:SetText("Back")
+        b:SetScript("OnClick", function() w:Hide(); callback() end)
+        return b
+    end
+end
+
+main:SetSize(10, 10)
+main:SetMovable(true)
+main:SetClampedToScreen(true)
+main:RegisterForDrag("LeftButton")
+main:SetScript("OnDragStart", function(self) if not DB.locked then self:StartMoving() end end)
+main:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    local p, _, rp, x, y = self:GetPoint()
+    DB.point = { p, rp, x, y }
+    if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end
+end)
+main.bg = main:CreateTexture(nil, "BACKGROUND")
+main.bg:SetAllPoints()
+main.bg:SetColorTexture(0.2, 0.6, 1, 0.25)
+-- Unlocked: drag to move, mouse wheel to resize.
+main:SetScript("OnMouseWheel", function(self, delta)
+    if DB.locked then return end
+    DB.scale = math.max(0.5, math.min(2.5, (DB.scale or 1) + delta * 0.05))
+    self:SetScale(DB.scale)
+end)
+
+-- Look: flat dark bars, thin black borders, outlined text.
+-- Look inspired by EllesmereUI / Naowh: smooth flat bars,
+-- 1px black pixel borders, icons packed edge to edge, no boxes or glows.
+local MEDIA = "Interface\\AddOns\\DBagsAlerts\\Media\\"
+local FLAT = "Interface\\Buttons\\WHITE8X8"
+local BAR_TEX = MEDIA .. "Smooth.tga"
+local FONT = "Fonts\\FRIZQT__.TTF"          -- WoW's own font: familiar, easy to read
+local FALLBACK_FONT = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
+local function styleText(fs, size, r, g, b)
+    if not fs:SetFont(FONT, size, "OUTLINE") then fs:SetFont(FALLBACK_FONT, size, "OUTLINE") end
+    fs:SetShadowOffset(0, 0)
+    if r then fs:SetTextColor(r, g, b) end
+end
+local function setText(fs, s)          -- skip the work when the text didn't change
+    if fs._t ~= s then fs._t = s; fs:SetText(s) end
+end
+local function addBorder(f, r, g, b, a, px)
+    px = px or 1
+    local t = {}
+    for i = 1, 4 do
+        local e = f:CreateTexture(nil, "OVERLAY", nil, 7)
+        e:SetColorTexture(r, g, b, a or 1)
+        t[i] = e
+    end
+    t[1]:SetPoint("TOPLEFT", -px, px); t[1]:SetPoint("TOPRIGHT", px, px); t[1]:SetHeight(px)
+    t[2]:SetPoint("BOTTOMLEFT", -px, -px); t[2]:SetPoint("BOTTOMRIGHT", px, -px); t[2]:SetHeight(px)
+    t[3]:SetPoint("TOPLEFT", -px, px); t[3]:SetPoint("BOTTOMLEFT", -px, -px); t[3]:SetWidth(px)
+    t[4]:SetPoint("TOPRIGHT", px, px); t[4]:SetPoint("BOTTOMRIGHT", px, -px); t[4]:SetWidth(px)
+    return t
+end
+local function colorBorder(t, r, g, b, a) for _, e in ipairs(t) do e:SetColorTexture(r, g, b, a or 1) end end
+
+-- Icons that always exist, for alerts whose spell you don't have (yet).
+local FALLBACK_ICON = {
+    lowhp = "Interface\\Icons\\Spell_Holy_SealOfProtection",
+    loose = "Interface\\Icons\\Ability_Warrior_Challange",
+    taunt = "Interface\\Icons\\Ability_Warrior_Challange",
+    lowmana = "Interface\\Icons\\INV_Drink_07",
+    kick = "Interface\\Icons\\Ability_Kick",
+}
+local DEFAULT_ICON = "Interface\\Icons\\Ability_Warrior_DefensiveStance"
+
+local SIZE = { 46, 38 }
+local GAP = 8
+local BAR_W = 240
+
+local function makeSlot(a)
+    local size = SIZE[a.row]
+    local root = CreateFrame("Frame", nil, main)
+    root:SetSize(size, size)
+    local parent, gates = root, {}
+    for i = 1, 4 do
+        local g = CreateFrame("Frame", nil, parent)
+        g:SetAllPoints(root)
+        gates[i], parent = g, g
+    end
+    local c = CreateFrame("Frame", nil, parent)
+    c:SetAllPoints(root)
+    c.icon = c:CreateTexture(nil, "ARTWORK")
+    c.icon:SetAllPoints()
+    c.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)     -- zoomed, no Blizzard bevel
+    addBorder(c, 0, 0, 0, 1, 1)                    -- 1px black pixel border
+    local edge = CreateFrame("Frame", nil, c)
+    edge:SetPoint("TOPLEFT", 1, -1); edge:SetPoint("BOTTOMRIGHT", -1, 1)
+    c.edge = addBorder(edge, 1, 0.15, 0.15, 1, 2)   -- thick red edge: danger is obvious
+    if not a.danger then colorBorder(c.edge, 0, 0, 0, 0) end   -- only danger gets a red edge
+    c.edgeFrame = edge
+    -- solid name plate: when icons are stacked, the top one's plate hides the names below
+    c.plate = c:CreateTexture(nil, "BACKGROUND")
+    c.plate:SetColorTexture(0.04, 0.04, 0.05, 0.9)
+    c.plate:SetPoint("TOP", root, "BOTTOM", 0, -2)
+    c.plate:SetSize(size + 20, 22)
+    c.text = c:CreateFontString(nil, "OVERLAY")
+    styleText(c.text, a.row == 1 and 11 or 9, 1, 0.85, 0.25)
+    c.text:SetPoint("CENTER", c.plate, "CENTER", 0, 0)
+    c.text:SetWidth(size + 18)          -- long names wrap onto two lines
+    c.text:SetWordWrap(true)
+    c.text:SetJustifyH("CENTER")
+    if a.danger then c.text:SetTextColor(1, 0.35, 0.35) end
+    if a.danger then   -- the red border pulses; the icon itself stays solid
+        local ag = edge:CreateAnimationGroup()
+        ag:SetLooping("BOUNCE")
+        local fade = ag:CreateAnimation("Alpha")
+        fade:SetFromAlpha(1); fade:SetToAlpha(0.35); fade:SetDuration(0.45)
+        ag:Play()
+    end
+    a.root, a.gates, a.c = root, gates, c
+    a.iconName = nil
+end
+
+-- Put an alert's frames on their own layer (L .. L+6), so stacks draw in order.
+local function setLevels(a, L)
+    a.root:SetFrameLevel(L)
+    for i = 1, 4 do a.gates[i]:SetFrameLevel(L + i) end
+    a.c:SetFrameLevel(L + 5)
+    a.c.edgeFrame:SetFrameLevel(L + 6)
+end
+
+-- Range: like Blizzard's action bars - the big icon itself is colored red when
+-- you're out of melee, amber a few steps out. No extra shapes.
+local ring = CreateFrame("Frame", nil, main)    -- holds the mob count on the big icon
+-- mob count, bottom-right of the big icon (orange = heavy hits)
+ring.count = ring:CreateFontString(nil, "OVERLAY")
+styleText(ring.count, 20, 1, 1, 1)
+ring.count:SetPoint("BOTTOMRIGHT", -2, 2)
+
+-- A bar: flat fill, dark back, black outline, label on the left, value on the right,
+-- and a bright spark riding the end of the fill (anchored, so no math on secrets).
+-- "Classic WoW" style: Blizzard's own rounded gold-edged frame (the tooltip border)
+-- around every bar and icon spot, and WoW's classic glossy bar texture.
+local CLASSIC_TEX = "Interface\\TargetingFrame\\UI-StatusBar"
+local EDGE = { edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 12,
+               insets = { left = 3, right = 3, top = 3, bottom = 3 } }
+local GOLD = { 0.86, 0.72, 0.42 }
+-- The shared floating layout is flat; the previous layout remains available with /pa oldlook.
+local function classic() return not DRU.lux and (not DB or DB.style ~= "clean") end
+local function goldFrame(parent, pad)
+    local f = CreateFrame("Frame", nil, parent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+    f:SetPoint("TOPLEFT", -pad, pad); f:SetPoint("BOTTOMRIGHT", pad, -pad)
+    if f.SetBackdrop then
+        f:SetBackdrop(EDGE)
+        f:SetBackdropBorderColor(GOLD[1], GOLD[2], GOLD[3], 1)
+    end
+    f:Hide()
+    return f
+end
+local BARS = {}
+
+local function makeBar(r, g, b, h, label, parent)
+    local bar = CreateFrame("StatusBar", nil, parent or main)
+    bar:SetSize(BAR_W, h)
+    bar:SetStatusBarTexture(BAR_TEX)
+    bar:SetStatusBarColor(r, g, b)
+    bar.col = { r, g, b }
+    bar.bg = bar:CreateTexture(nil, "BACKGROUND")
+    bar.bg:SetAllPoints(); bar.bg:SetTexture(BAR_TEX); bar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.85)
+    bar.px = addBorder(bar, 0, 0, 0, 1, 1)
+    bar.frame = goldFrame(bar, 4)
+    BARS[#BARS + 1] = bar
+    bar.left = bar:CreateFontString(nil, "OVERLAY")
+    styleText(bar.left, math.max(9, h - 6), 0.9, 0.9, 0.9)
+    bar.left:SetPoint("LEFT", 4, 0)
+    bar.left:SetText(label or "")
+    bar.text = bar:CreateFontString(nil, "OVERLAY")
+    styleText(bar.text, math.max(10, h - 6), 1, 1, 1)
+    bar.text:SetPoint("RIGHT", -4, 0)
+    return bar
+end
+
+-- No box behind the bars (an invisible anchor only)
+local panel = CreateFrame("Frame", nil, main)
+panel.bg = panel:CreateTexture(nil, "BACKGROUND", nil, -8)
+panel.bg:SetAllPoints(); panel.bg:SetColorTexture(0, 0, 0, 0)
+
+local healthBar = makeBar(0.1, 0.8, 0.1, 28, "")       -- classic WoW green
+local rageBar = makeBar(0.85, 0.15, 0.15, 18, "")
+local threatBar = makeBar(0.15, 0.75, 0.3, 10, "")
+local swingBar = makeBar(0.8, 0.8, 0.85, 10, "")
+threatBar.text:Hide(); swingBar.text:Hide()
+styleText(healthBar.text, 18, 1, 1, 1); styleText(rageBar.text, 14, 1, 1, 1)
+healthBar.text:ClearAllPoints(); healthBar.text:SetPoint("CENTER")    -- numbers in the middle, big
+rageBar.text:ClearAllPoints(); rageBar.text:SetPoint("CENTER")
+panel.accent = panel:CreateTexture(nil, "ARTWORK")
+panel.accent:SetColorTexture(0, 0, 0, 0)
+
+-- "Spend here" marker on the rage bar (where the gold starts).
+rageBar.tick = rageBar:CreateTexture(nil, "OVERLAY", nil, 6)
+rageBar.tick:SetColorTexture(1, 1, 1, 0.8); rageBar.tick:SetSize(2, 13)
+
+-- Advice line: one plain sentence under the power bar. Three sentences sit on top of
+-- each other; rage (maybe secret) picks which one is visible through curve alphas.
+local advice = CreateFrame("Frame", nil, main)
+advice:SetSize(BAR_W, 16)
+local function adviceLine(r, g, b)
+    local fs = advice:CreateFontString(nil, "OVERLAY")
+    styleText(fs, 13, r, g, b); fs:SetPoint("CENTER")
+    return fs
+end
+advice.low = adviceLine(0.75, 0.75, 0.8)
+advice.mid = adviceLine(0.85, 0.85, 0.88)
+advice.highGate = CreateFrame("Frame", nil, advice)   -- holds the alpha; the text inside pulses
+advice.highGate:SetAllPoints()
+advice.high = advice.highGate:CreateFontString(nil, "OVERLAY")
+styleText(advice.high, 13, 1, 0.82, 0.15); advice.high:SetPoint("CENTER")
+do  -- the "too much rage" sentence pulses so you notice it
+    local ag = advice.high:CreateAnimationGroup()
+    ag:SetLooping("BOUNCE")
+    local a = ag:CreateAnimation("Alpha"); a:SetFromAlpha(1); a:SetToAlpha(0.6); a:SetDuration(0.6)
+    advice.highAnim = ag
+end
+
+local info = main:CreateFontString(nil, "OVERLAY")
+styleText(info, 9, 0.7, 0.7, 0.75)
+
+-- Health color: green -> yellow -> orange -> red as you drop.
+-- Two copies of the health bar (yellow, red) sit on top of the green one and fade in
+-- as health falls. Their fade comes from UnitHealthPercent + a curve, so it keeps
+-- working when health is secret in combat (we only hand the value to SetAlpha).
+local updateHealthColor, styleHealthColor
+do
+    local text = CreateFrame("Frame", nil, healthBar)    -- keeps the % above the color layers
+    text:SetAllPoints()
+    healthBar.text:SetParent(text)
+    local function layer(r, g, b)
+        local s = CreateFrame("StatusBar", nil, healthBar)
+        s:SetAllPoints(); s:SetStatusBarTexture(BAR_TEX); s:SetStatusBarColor(r, g, b)
+        s:SetMinMaxValues(0, 1); s:SetValue(0); s:SetAlpha(0)
+        return s
+    end
+    local yellow = layer(1, 0.82, 0.1)
+    local red = layer(0.9, 0.1, 0.08)
+    -- fade in: yellow from 75% down to 45%, red from 45% down to 15% (yellow+red = orange)
+    local function fadeCurve(full, none)
+        local ok, cv = pcall(function()
+            local c = C_CurveUtil.CreateCurve()
+            c:SetType(Enum.LuaCurveType.Linear)
+            c:AddPoint(0, 1); c:AddPoint(full, 1); c:AddPoint(none, 0); c:AddPoint(1, 0)
+            return c
+        end)
+        return ok and cv or nil
+    end
+    local yC = C_CurveUtil and fadeCurve(0.45, 0.75)
+    local rC = C_CurveUtil and fadeCurve(0.15, 0.45)
+    local function plainFade(frac, full, none)
+        if frac <= full then return 1 elseif frac >= none then return 0 end
+        return (none - frac) / (none - full)
+    end
+    local function fade(s, cv, full, none, h, m)
+        if not secret(h) and not secret(m) then
+            s:SetAlpha((m and m > 0) and plainFade(h / m, full, none) or 0)
+        elseif cv and UnitHealthPercent then
+            local ok, a = pcall(UnitHealthPercent, "player", false, cv)
+            if ok and not pcall(s.SetAlpha, s, a) then s:SetAlpha(0) end
+        end
+    end
+    -- setValue = the same smooth setter the green bar uses, so the layers move together
+    updateHealthColor = function(h, m, setValue)
+        for _, s in ipairs({ yellow, red }) do
+            pcall(s.SetMinMaxValues, s, 0, m)
+            setValue(s, h)
+        end
+        fade(yellow, yC, 0.45, 0.75, h, m)
+        fade(red, rC, 0.15, 0.45, h, m)
+    end
+    styleHealthColor = function(tex)
+        yellow:SetStatusBarTexture(tex); yellow:SetStatusBarColor(1, 0.82, 0.1)
+        red:SetStatusBarTexture(tex); red:SetStatusBarColor(0.9, 0.1, 0.08)
+        local L = healthBar:GetFrameLevel() or 1
+        yellow:SetFrameLevel(L + 1); red:SetFrameLevel(L + 2); text:SetFrameLevel(L + 3)
+    end
+end
+
+-- Swing timer. Forever fires PLAYER_SWING the moment your auto-attack lands
+-- (technique from AKForeverCombatTimers, MIT). If its length is secret in combat
+-- we use your weapon speed, read whenever it is readable.
+local swing = { start = 0, dur = 0, speed = nil, rangedSpeed = nil, ranged = false }
+DBagsAlertsState.swing = swing
+local QUEUED_SPELLS = { "Heroic Strike", "Cleave" }
+local function readSpeed()
+    local ok, mh = pcall(UnitAttackSpeed, "player")
+    if ok and mh and not secret(mh) and mh > 0 then swing.speed = mh end
+    if UnitRangedDamage then
+        local okR, speed = pcall(UnitRangedDamage, "player")
+        if okR and not secret(speed) and type(speed) == "number" and speed > 0 then swing.rangedSpeed = speed end
+    end
+end
+local function onSwing(duration, swingType)
+    -- Forever uses PlayerSwingType, not SwingType. Offhand must not reset the bar.
+    if secret(swingType) then return end
+    local types = Enum and (Enum.PlayerSwingType or Enum.SwingType)
+    local mh, ranged = types and types.MainHand or 0, types and types.Ranged or 2
+    if swingType ~= nil and swingType ~= mh and swingType ~= ranged then return end
+    swing.ranged = swingType == ranged
+    readSpeed()
+    local speed = swing.speed
+    if swing.ranged then speed = swing.rangedSpeed end
+    local d = (not secret(duration) and type(duration) == "number" and duration > 0) and duration or speed
+    if not d then swing.start, swing.dur = 0, 0 return end
+    swing.start, swing.dur = GetTime(), d
+end
+local function onAttackSpeed()
+    local old = swing.speed
+    if swing.ranged then old = swing.rangedSpeed end
+    readSpeed()
+    local speed = swing.speed
+    if swing.ranged then speed = swing.rangedSpeed end
+    local now = GetTime()
+    if old and speed and old ~= speed and now < swing.start + swing.dur then
+        -- haste/slow mid-swing: stretch what is left using the active weapon.
+        local left = (swing.start + swing.dur - now) * speed / old
+        swing.dur = (now - swing.start) + left
+    end
+end
+-- Runs every frame, so it does as little as possible: one SetValue, and the
+-- text / colour only a few times a second.
+local swingTextAt, swingQAt, swingShown, swingQueued, swingMax = 0, 0, nil, nil, nil
+local function updateSwing()
+    local now = GetTime()
+    local left = swing.start + swing.dur - now
+    local show = (not DB.off.swing and not DRU.caster and (left > 0 or (ctx.combat and ctx.hostile))) and true or false
+    if show ~= swingShown then swingShown = show; swingBar:SetShown(show) end
+    if not show then return end
+    if left > 0 and swing.dur > 0 then
+        if swingMax ~= swing.dur then swingMax = swing.dur; swingBar:SetMinMaxValues(0, swing.dur) end
+        swingBar:SetValue(now - swing.start)
+        if now - swingTextAt >= 0.05 then swingTextAt = now; swingBar.text:SetFormattedText("%.1f", left) end
+    elseif swingMax ~= -1 then
+        swingMax = -1
+        swingBar:SetMinMaxValues(0, 1); swingBar:SetValue(1)
+        swingBar.text:SetText("")
+    end
+    -- Warrior: bar turns gold while Heroic Strike / Cleave is queued on the next swing.
+    if now - swingQAt >= 0.1 then
+        swingQAt = now
+        local queued = false
+        for _, n in ipairs(QUEUED_SPELLS) do
+            if spell[n] then
+                local q = IsCurrentSpell(spell[n])
+                if not swing.ranged and not secret(q) and q then queued = true end
+            end
+        end
+        local color = swing.ranged and "shot" or queued
+        if color ~= swingQueued then
+            swingQueued = color
+            if swing.ranged then swingBar:SetStatusBarColor(0.25, 0.65, 1)
+            elseif queued then swingBar:SetStatusBarColor(1, 0.78, 0.1)
+            else swingBar:SetStatusBarColor(0.8, 0.8, 0.88) end
+        end
+    end
+end
+threatBar:SetMinMaxValues(0, 100)
+-- Threat: a green bar (you have it) with a red bar on top (you don't). Their alpha
+-- comes from isTanking, which may be secret, so one of them shows.
+threatBar.red = CreateFrame("StatusBar", nil, threatBar)
+threatBar.red:SetAllPoints(); threatBar.red:SetStatusBarTexture(FLAT)
+threatBar.red:SetStatusBarColor(0.9, 0.15, 0.15); threatBar.red:SetMinMaxValues(0, 100)
+threatBar.red:SetFrameLevel(threatBar:GetFrameLevel() + 1)
+threatBar.top = CreateFrame("Frame", nil, threatBar)
+threatBar.top:SetAllPoints(); threatBar.top:SetFrameLevel(threatBar:GetFrameLevel() + 2)
+threatBar.ok = threatBar.top:CreateFontString(nil, "OVERLAY")
+styleText(threatBar.ok, 9, 0.55, 1, 0.6); threatBar.ok:SetPoint("LEFT", threatBar, "LEFT", 4, 0)
+threatBar.ok:SetText("TANKING")
+threatBar.bad = threatBar.top:CreateFontString(nil, "OVERLAY")
+styleText(threatBar.bad, 9, 1, 0.85, 0.85); threatBar.bad:SetPoint("LEFT", threatBar, "LEFT", 4, 0)
+threatBar.bad:SetText("NO AGGRO")
+threatBar.text:SetParent(threatBar.top)
+threatBar.left:SetText("")
+threatBar.ok:Hide(); threatBar.bad:Hide()   -- color says it: green = tanking, red = not
+
+-- Cooldown row: real cooldown spirals + countdown numbers, even when the times are secret.
+local CLASS_CDS = {
+    -- Rotation buttons are left out: the big icons already tell you when to press them.
+    -- This row is for emergency + utility cooldowns you want to know are ready in advance.
+    WARRIOR = { "Shield Wall", "Last Stand", "Retaliation", "Challenging Shout", "Concussion Blow",
+        "Intimidating Shout", "Berserker Rage" },
+    PALADIN = { "Templar's Bulwark", "Divine Protection", "Divine Shield", "Lay on Hands",
+        "Blessing of Protection", "Blessing of Freedom" },
+    DRUID = { "Barkskin", "Frenzied Regeneration", "Innervate", "Tranquility", "Challenging Roar", "Dash" },
+    WARLOCK = { "Death Coil", "Howl of Terror", "Shadow Ward", "Amplify Curse", "Fel Domination", "Soulshatter" },
+}
+CLASS_CDS.PRIEST = { "Fade", "Psychic Scream", "Desperate Prayer", "Inner Focus", "Power Infusion", "Penance", "Prayer of Mending" }
+for _, list in pairs(CLASS_CDS) do
+    for _, n in ipairs(DRU.RACIAL_CDS or {}) do list[#list + 1] = n end
+end
+local CD_SIZE = 40
+local cdIcons = {}
+local function makeCD(name)
+    local f = CreateFrame("Frame", nil, main)
+    f:SetSize(CD_SIZE, CD_SIZE)
+    f.icon = f:CreateTexture(nil, "ARTWORK")
+    f.icon:SetAllPoints(); f.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    addBorder(f, 0, 0, 0, 1, 1)
+    f.cd = CreateFrame("Cooldown", nil, f, "CooldownFrameTemplate")
+    f.cd:SetAllPoints()
+    if f.cd.SetCountdownFont then pcall(f.cd.SetCountdownFont, f.cd, "GameFontHighlightLarge") end   -- big timer numbers
+    if f.cd.SetHideCountdownNumbers then f.cd:SetHideCountdownNumbers(false) end
+    pcall(f.cd.SetDrawEdge, f.cd, false)                 -- clean dark sweep, no bright edge line
+    pcall(f.cd.SetDrawBling, f.cd, false)                -- we do our own "ready" pop instead
+    pcall(f.cd.SetSwipeColor, f.cd, 0, 0, 0, 0.7)
+    -- not enough rage/mana: blue tint, like Blizzard's action bars
+    f.dim = f:CreateTexture(nil, "OVERLAY")
+    f.dim:SetAllPoints(); f.dim:SetColorTexture(0.1, 0.25, 0.8, 0.55); f.dim:SetAlpha(0)
+    -- quick "pop" the moment it comes off cooldown
+    f.pop = f:CreateAnimationGroup()
+    local s = f.pop:CreateAnimation("Scale")
+    s:SetScaleFrom(1.3, 1.3); s:SetScaleTo(1, 1); s:SetDuration(0.2)
+    if s.SetSmoothing then s:SetSmoothing("OUT") end
+    -- Blizzard-style proc glow: shows when this button is what the alerts say to press.
+    -- Its own little gate chain, so it can follow secret (locked) conditions too.
+    f.glowGates = {}
+    local gp = f
+    for i = 1, 4 do
+        local g = CreateFrame("Frame", nil, gp)
+        g:SetAllPoints(f)
+        f.glowGates[i], gp = g, g
+    end
+    f.glowGates[1]:SetAlpha(0)
+    f.glow = gp:CreateTexture(nil, "OVERLAY", nil, 7)
+    f.glow:SetTexture(MEDIA .. "ProcGlow.tga")        -- our own glow art (icon = middle 64%)
+    f.glow:SetBlendMode("ADD")
+    f.glow:SetVertexColor(1, 0.82, 0.25)
+    f.glow:SetPoint("CENTER")
+    local ga = f.glow:CreateAnimationGroup()
+    ga:SetLooping("BOUNCE")
+    local gfade = ga:CreateAnimation("Alpha")
+    gfade:SetFromAlpha(1); gfade:SetToAlpha(0.45); gfade:SetDuration(0.5)
+    ga:Play()
+    f.alphaT = 1                                         -- target alpha; faded smoothly each frame
+    f.name = name
+    return f
+end
+
+-- Big-icon mode: [danger] [ NEXT ] [buff / extra], each a stack of alerts.
+-- Empty-slot backgrounds, so the block keeps its shape when nothing is lit.
+local slotBG = {}
+local function slotBack(key, x, y, s)
+    local f = slotBG[key]
+    if not f then
+        f = CreateFrame("Frame", nil, main)
+        f.t = f:CreateTexture(nil, "BACKGROUND")
+        f.t:SetAllPoints(); f.t:SetColorTexture(0, 0, 0, 0.35)
+        f.px = addBorder(f, 0, 0, 0, 0.8, 1)
+        f.frame = goldFrame(f, 4)
+        slotBG[key] = f
+    end
+    f:SetSize(s, s); f:ClearAllPoints()
+    f:SetPoint("TOPLEFT", main, "TOPLEFT", x, y)
+    f:SetFrameLevel(main:GetFrameLevel() + 1)
+    f.frame:SetShown(classic())
+    f.t:SetColorTexture(0, 0, 0, classic() and 0.55 or 0.35)
+    f:Show()
+end
+
+-- Switch every bar between the two styles.
+local function applyStyle()
+    local c = classic()
+    for _, bar in ipairs(BARS) do
+        local tex = c and CLASSIC_TEX or BAR_TEX     -- new warlock look: Blizzard bar texture
+        bar:SetStatusBarTexture(tex)
+        bar:SetStatusBarColor(bar.col[1], bar.col[2], bar.col[3])
+        bar.bg:SetTexture(tex)
+        bar.bg:SetVertexColor(0.06, 0.06, 0.07, c and 0.9 or 0.85)
+        bar.frame:SetShown(c)
+        bar.frame:SetFrameLevel(bar:GetFrameLevel() + 4)
+        colorBorder(bar.px, 0, 0, 0, c and 0 or 1)
+    end
+    styleHealthColor(c and CLASSIC_TEX or BAR_TEX)
+end
+
+local blockW = BAR_W
+local layoutExtras          -- target frame + cast bars; defined further down
+-- Big-icon block (EllesmereUI style): a small buff icon on top, then
+-- [danger][ NEXT ][extra] packed edge to edge, bars the same width right under.
+local function layoutStack()
+    local byKey = {}
+    for _, a in ipairs(ALERTS) do byKey[a.key] = a; a.root:Hide(); a.inSpot = false end
+    local sp = SPOT[CLASS]
+    local M, B = SPOT_SIZE.next, SPOT_SIZE.buff
+    -- clean style: icons share 1px lines. Classic style: gold frames need a little room.
+    local g = classic() and 10 or 1
+    local pad = classic() and 5 or 0
+    if DRU.lux then M = 74 end     -- new warlock look: three big icons fill the 224 px column
+    local W = M * 3 + 2 * g + 2 * pad
+    local rowY = -(pad + B + g)
+    local pos = {
+        buff   = { DRU.lux and (W - B) / 2 or pad, -pad, B },
+        danger = { pad, rowY, M },
+        next   = { pad + M + g, rowY, M },
+        extra  = { pad + 2 * (M + g), rowY, M },
+    }
+    -- no empty background boxes: a frame only shows around an icon that is lit
+    -- (new warlock look: dark empty squares keep the row's shape, like a cooldown bar)
+    if DRU.lux then
+        for _, spot in ipairs({ "danger", "next", "extra" }) do
+            local p = pos[spot]
+            slotBack(spot, p[1], p[2], p[3])
+        end
+    end
+    local base = main:GetFrameLevel() + 5
+    for spot, keys in pairs(sp) do
+        local p = pos[spot]
+        for i, key in ipairs(keys) do
+            local a = byKey[key]
+            if a then
+                a.inSpot = true
+                a.root:SetSize(p[3], p[3])
+                a.root:ClearAllPoints()
+                a.root:SetScale(1)
+                a.root:SetPoint("TOPLEFT", main, "TOPLEFT", p[1], p[2])
+                setLevels(a, base + (#keys - i + 1) * 8)     -- first in the list = on top
+                local named = DB.names and spot ~= "buff"
+                a.c.text:SetShown(named); a.c.plate:SetShown(named)
+                a.c.plate:SetSize(p[3] + 2, 16); a.c.text:SetWidth(p[3])
+                -- Classic style: the gold frame belongs to the icon, so it hides with it
+                if not rawget(a.c, "gold") then a.c.gold = goldFrame(a.c, 4) end
+                a.c.gold:SetShown(classic())
+                a.c.gold:SetFrameLevel(a.c:GetFrameLevel() + 2)
+                -- proc glow on the big icon itself: lit = press it. It lives inside the
+                -- icon's gates, so it shows and hides exactly with the alert.
+                local gl = rawget(a.c, "glowF")
+                if not gl then
+                    gl = CreateFrame("Frame", nil, a.c)
+                    gl:SetPoint("CENTER")
+                    gl.t = gl:CreateTexture(nil, "OVERLAY", nil, 7)
+                    gl.t:SetAllPoints(); gl.t:SetTexture(MEDIA .. "ProcGlow.tga"); gl.t:SetBlendMode("ADD")
+                    if a.danger then gl.t:SetVertexColor(1, 0.25, 0.2) else gl.t:SetVertexColor(1, 0.82, 0.25) end
+                    local ga = gl:CreateAnimationGroup()
+                    ga:SetLooping("BOUNCE")
+                    local f = ga:CreateAnimation("Alpha")
+                    f:SetFromAlpha(1); f:SetToAlpha(0.4); f:SetDuration(0.5)
+                    ga:Play()
+                    a.c.glowF = gl
+                end
+                gl:SetSize(p[3] / 0.64, p[3] / 0.64)        -- the icon fills the middle 64% of the art
+                gl:SetFrameLevel(a.c:GetFrameLevel() + 3)
+                gl:SetShown(DB.glow ~= false)
+                if not DB.off[key] then a.root:Show() end
+            end
+        end
+    end
+    -- range tint + mob count sit on top of the big icon
+    ring:ClearAllPoints()
+    ring:SetPoint("TOPLEFT", main, "TOPLEFT", pos.next[1], pos.next[2])
+    ring:SetSize(M, M)
+    ring:SetFrameLevel(base + 200)
+    ring:Show()
+    return W, pad + B + g + M + pad + (DB.names and 18 or 0)
+end
+
+local function layout()
+    -- Secure helper buttons are anchored to this HUD. Their anchor cannot be
+    -- resized/repositioned by addon code during combat, including form changes.
+    if InCombatLockdown() then DRU.layoutPending = true; return end
+    DRU.layoutPending = nil
+    local width = BAR_W + 12
+    local y = 0
+    if CLASS == "DRUID" then
+        local id = plain(GetShapeshiftFormID and GetShapeshiftFormID(), nil)
+        ctx.form = DRU.FORM[id or 0] or "caster"
+        DRU.layoutForm = ctx.form
+    end
+    DRU.caster = CLASS == "WARLOCK" or CLASS == "PRIEST" or (CLASS == "DRUID" and ctx.form ~= "bear" and ctx.form ~= "cat")
+    DRU.lux = DB.lux ~= false and DB.stack ~= false and SPOT[CLASS] ~= nil
+    for _, a in ipairs(ALERTS) do if not a.root then makeSlot(a) end end
+    if DRU.lux and DRU.layoutCaster then DRU.layoutCaster(); return end
+    if DRU.hideCaster then DRU.hideCaster() end
+    ring:Hide()
+    for _, f in pairs(slotBG) do f:Hide() end
+    if DB.stack ~= false and SPOT[CLASS] then
+        width, y = layoutStack()
+    else
+        -- row mode: every alert gets its own spot
+        local rows = { {}, {} }
+        for _, a in ipairs(ALERTS) do
+            a.inSpot = true
+            a.root:SetSize(SIZE[a.row], SIZE[a.row])
+            a.c.text:Show(); a.c.plate:Hide()
+            if DB.off[a.key] then a.root:Hide() else a.root:Show(); table.insert(rows[a.row], a) end
+        end
+        for r = 1, 2 do width = math.max(width, #rows[r] * (SIZE[r] + GAP) - GAP) end
+        for r = 1, 2 do
+            local list = rows[r]
+            local rowW = #list * (SIZE[r] + GAP) - GAP
+            for i, a in ipairs(list) do
+                a.root:ClearAllPoints()
+                a.root:SetPoint("TOPLEFT", main, "TOPLEFT", (width - rowW) / 2 + (i - 1) * (SIZE[r] + GAP), -y)
+            end
+            if #list > 0 then y = y + SIZE[r] + 26 end
+        end
+    end
+    -- bars: same width as the icon block, stacked tight under it (shared 1px lines)
+    applyStyle()
+    local gb = classic() and 9 or 1            -- gap between bars (gold frames need room)
+    local bp = classic() and 5 or 0            -- bars sit this far inside the block edges
+    blockW = ((DB.stack ~= false and SPOT[CLASS]) and width or BAR_W) - 2 * bp
+    local x = (width - blockW) / 2
+    local top = y
+    y = y + (classic() and 6 or 1)
+    -- new warlock look: DoT timer row right under the big icons (like a cooldown row)
+    if DRU.lux and DRU.dotRow then y = DRU.dotRow(x, y) end
+    local rh = DRU.lux and 20 or 18             -- mana bar height
+    rageBar:SetHeight(rh)
+    for _, b in ipairs({ healthBar, rageBar, threatBar, swingBar }) do b:SetWidth(blockW) end
+    advice:SetWidth(blockW)
+    healthBar:ClearAllPoints(); healthBar:SetPoint("TOPLEFT", main, "TOPLEFT", x, -y)
+    rageBar:ClearAllPoints(); rageBar:SetPoint("TOPLEFT", healthBar, "BOTTOMLEFT", 0, -gb)
+    advice:ClearAllPoints(); advice:SetPoint("TOP", rageBar, "BOTTOM", 0, -2)
+    advice:SetShown(DB.advice and true or false)
+    local spendAt = POWER == MANA and DB.lowMana or DB.dumpAt
+    rageBar.tick:SetSize(2, 18)
+    rageBar.tick:ClearAllPoints(); rageBar.tick:SetPoint("CENTER", rageBar, "LEFT", blockW * spendAt / 100, 0)
+    rageBar.tick:SetShown(POWER == MANA or (POWER == RAGE and CLASS ~= "DRUID") or (CLASS == "DRUID" and POWER == RAGE))
+    if POWER == MANA then
+        setText(advice.low, "Low mana")
+        setText(advice.mid, ""); setText(advice.high, "")
+    else
+        setText(advice.low, "Building rage")
+        setText(advice.mid, "Keep 10 for Shield Block")
+    end
+    if CLASS then
+        local cc = (C_ClassColor and C_ClassColor.GetClassColor and C_ClassColor.GetClassColor(CLASS))
+            or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[CLASS])
+        -- health stays classic green (easy to read), not class color
+    end
+    y = y + 28 + gb + rh + (DB.advice and 18 or 0)
+    -- Caster look (warlock): cast bar right under mana, then one row of DoT timers +
+    -- cooldowns. No threat / swing bars (the aggro dots on nameplates cover threat).
+    local known = {}
+    if DRU.casterLayout then y = DRU.casterLayout(x, y, gb) end
+    -- Important buttons: one centered row right under health + rage (only ones you know)
+    for _, f in pairs(cdIcons) do f:Hide() end
+    if not DB.off.cooldowns then
+        for _, name in ipairs(CD_SPELLS) do
+            if spell[name] then
+                cdIcons[name] = cdIcons[name] or makeCD(name)
+                cdIcons[name].icon:SetTexture(C_Spell.GetSpellTexture(spell[name]) or DEFAULT_ICON)
+                table.insert(known, cdIcons[name])
+            end
+        end
+    end
+    if #known > 0 then
+        local n, cg = #known, DRU.lux and 1 or 2
+        local cs = math.min(DRU.lux and 36 or 44, math.floor((blockW - (n - 1) * cg) / n))
+        local cx = (width - (n * cs + (n - 1) * cg)) / 2
+        y = y + (classic() and 7 or 3)
+        for i, f in ipairs(known) do
+            f:SetSize(cs, cs)
+            f.glow:SetSize(cs / 0.64, cs / 0.64)          -- the icon fills the middle 64% of the glow art
+            f:ClearAllPoints()
+            f:SetPoint("TOPLEFT", main, "TOPLEFT", cx + (i - 1) * (cs + cg), -y)
+            f:Show()
+        end
+        y = y + cs
+    end
+    if DRU.lux and DRU.castBottom then y = DRU.castBottom(x, y + 4) end
+    -- threat + swing go under the buttons: when they hide, nothing empty is left in the middle
+    threatBar:ClearAllPoints(); threatBar:SetPoint("TOPLEFT", main, "TOPLEFT", x, -(y + gb))
+    swingBar:ClearAllPoints(); swingBar:SetPoint("TOPLEFT", threatBar, "BOTTOMLEFT", 0, -gb)
+    if DRU.caster then
+        threatBar:Hide(); swingBar:Hide()
+        y = y + (classic() and 8 or 3)
+    else
+        threatBar:Show()
+        y = y + gb + 10 + gb + 10 + (classic() and 8 or 3)
+    end
+    panel:ClearAllPoints()
+    panel:SetPoint("TOPLEFT", main, "TOPLEFT", x, -top)
+    panel:SetSize(blockW, y - top)
+    if layoutExtras then y = layoutExtras(width, x, y) end   -- your cast bar + target frame
+    info:Hide()
+    main:SetSize(width, y + 2)
+    main:SetScale(DB.scale)
+    main:ClearAllPoints()
+    main:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
+    main:EnableMouse(not DB.locked)
+    main:EnableMouseWheel(not DB.locked)
+    main.bg:SetShown(not DB.locked)
+    if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end   -- right-click menus follow
+end
+
+local function setIcon(a, name, label)
+    name = name or a.icon
+    if a.iconName ~= name then
+        a.iconName = name
+        local id = spell[name]
+        local tex = id and C_Spell.GetSpellTexture(id) or DRU.icons[name]
+        a.c.icon:SetTexture(tex or (CLASS == "WARLOCK" and "Interface\\Icons\\INV_Misc_QuestionMark") or FALLBACK_ICON[a.key] or DEFAULT_ICON)
+    end
+    setText(a.c.text, (DRU.lux and a.hudSpot == "next") and (a.key == "trance" and "Free Shadow Bolt" or name) or (label or a.label))
+end
+
+local function safeAlpha(f, v)
+    if not pcall(f.SetAlpha, f, v) then f:SetAlpha(1) end
+end
+
+local testUntil, soundAt, lit = 0, 0, {}
+
+-- alpha from a yes/no that may be secret (never inspected when secret)
+local function boolAlpha(f, v, yes, no)
+    if secret(v) then
+        local ok, a = pcall(C_CurveUtil.EvaluateColorValueFromBoolean, v, yes, no)
+        if ok then safeAlpha(f, a) else f:SetAlpha(yes) end
+    else
+        f:SetAlpha(v and yes or no)
+    end
+end
+
+local function updateCD(f)
+    local id = spell[f.name]
+    if not id then return end
+    local ok, c = pcall(C_Spell.GetSpellCooldown, id)
+    if ok and type(c) == "table" and not sectable(c) then
+        if secret(c.startTime) or secret(c.duration) then
+            local okD, d = pcall(C_Spell.GetSpellCooldownDuration, id)
+            if okD and d and f.cd.SetCooldownFromDurationObject then
+                pcall(f.cd.SetCooldownFromDurationObject, f.cd, d)
+            end
+        elseif (c.duration or 0) > 1.5 then
+            f.cd:SetCooldown(c.startTime, c.duration, plain(c.modRate, 1) or 1)
+        else
+            f.cd:Clear()
+        end
+    end
+    -- ready = full color; on cooldown = gray + faded; coming off cooldown = pop
+    local r = ready(f.name)
+    if r == true then
+        if f.state == "cd" then pcall(f.pop.Play, f.pop) end
+        if f.state ~= "ready" then f.state = "ready"; f.icon:SetDesaturated(false); f.alphaT = 1 end
+    elseif r == false then
+        if f.state ~= "cd" then f.state = "cd"; f.icon:SetDesaturated(true); f.alphaT = 0.5 end
+    else
+        f.alphaT = 1                                     -- locked: the sweep still shows the cooldown
+    end
+    local okU, u = pcall(C_Spell.IsSpellUsable, id)
+    if okU then boolAlpha(f.dim, u, 0, 1) end
+end
+
+-- Fade the button row toward its target alpha (called every frame; 7 icons, cheap).
+local function fadeCDs(dt)
+    local k = math.min(1, (dt or 0.016) * 10)
+    for _, f in pairs(cdIcons) do
+        if f:IsShown() then
+            local a, t = f:GetAlpha() or 1, f.alphaT or 1
+            if math.abs(t - a) > 0.01 then f:SetAlpha(a + (t - a) * k) end
+        end
+    end
+end
+
+-- Show region f only while your power % is in [lo, hi). Works when power is secret
+-- (a Step curve turns the percent into 0 or 1 and that becomes the alpha).
+local function bandAlpha(f, lo, hi)
+    local r, m = UnitPower("player", POWER), UnitPowerMax("player", POWER)
+    if not secret(r) and not secret(m) then
+        local p = (m and m > 0) and r / m * 100 or 0
+        f:SetAlpha((p >= lo and p < hi) and 1 or 0)
+        return
+    end
+    if not UnitPowerPercent then f:SetAlpha(0) return end
+    local key = "band" .. lo .. "_" .. hi
+    local cv = curves[key]
+    if cv == nil then
+        local ok, c = pcall(function()
+            local x = C_CurveUtil.CreateCurve()
+            x:SetType(Enum.LuaCurveType.Step)
+            x:AddPoint(0, lo <= 0 and 1 or 0)
+            if lo > 0 then x:AddPoint(lo / 100, 1) end
+            if hi <= 100 then x:AddPoint(hi / 100, 0) end
+            return x
+        end)
+        cv = ok and c or false
+        curves[key] = cv
+    end
+    if not cv then f:SetAlpha(0) return end
+    local ok, a = pcall(UnitPowerPercent, "player", POWER, false, cv)
+    if ok then safeAlpha(f, a) else f:SetAlpha(0) end
+end
+
+-- "Am I tanking hard right now?" Counts the hits you took (UNIT_COMBAT on you
+-- stays readable in combat), plus how many mobs are on you and whether it's an elite.
+local hitTimes = {}
+local function onUnitCombat(unit, action)
+    if unit ~= "player" then return end
+    if not secret(action) and (action == "HEAL" or action == "ENERGIZE") then return end
+    table.insert(hitTimes, GetTime())
+    if #hitTimes > 40 then table.remove(hitTimes, 1) end
+end
+local function hitsIn(sec)
+    local n, now = 0, GetTime()
+    for i = #hitTimes, 1, -1 do
+        if now - hitTimes[i] <= sec then n = n + 1 else break end
+    end
+    return n
+end
+tankingHard = function()
+    if not ctx.combat then return false end
+    local h = hitsIn(4)
+    return h >= 4 or (ctx.enemies or 0) >= 3 or (ctx.elite and h >= 2) or false
+end
+
+-- Where the "spend rage" line is right now: higher while you're tanking hard.
+spendLine = function()
+    if tankingHard() then return math.max(DB.dumpAt, DB.dumpTank or 90) end
+    return DB.dumpAt
+end
+
+local function updateAdvice()
+    local show = ctx.combat or GetTime() < testUntil
+    advice:SetAlpha(show and 1 or 0)
+    if not show then return end
+    if POWER ~= RAGE and POWER ~= MANA or (CLASS == "DRUID" and POWER == RAGE) then
+        advice:SetAlpha(0) return                     -- rage tips are warrior words
+    end
+    if POWER == MANA then
+        bandAlpha(advice.low, 0, DB.lowMana)
+        return
+    end
+    local hard = tankingHard()
+    local line = spendLine()
+    local cleave = (ctx.enemies or 0) >= 2 and spell["Cleave"]
+    local many = (ctx.enemies or 0) >= 3
+
+    -- Pick the plain sentence for the middle zone. Only readable facts decide the words;
+    -- the rage amount (maybe secret) only decides which zone's sentence you see.
+    local mid = "Keep 10 for Shield Block"
+    if hard then
+        local blockNow = spell["Shield Block"] and ready("Shield Block") == true and timeLeft("Shield Block") <= 0.3
+        local clapNow = many and spell["Thunder Clap"] and ready("Thunder Clap") == true and timeLeft("Thunder Clap") <= 1
+        local demoNow = (many or ctx.elite) and spell["Demoralizing Shout"] and timeLeft("Demoralizing Shout") <= durationOf("Demoralizing Shout") * 0.3
+        if blockNow then mid = "Shield Block now"
+        elseif clapNow then mid = "Thunder Clap the pack"
+        elseif demoNow then mid = "Demo Shout now"
+        else mid = "Save rage for Shield Block" end
+        setText(advice.low, "Building rage")
+        setText(advice.high, cleave and "Spend: Cleave" or "Spend: Heroic Strike")
+    else
+        setText(advice.low, "Building rage")
+        setText(advice.high, cleave and "Spend: Cleave" or "Spend: Heroic Strike")
+    end
+    setText(advice.mid, mid)
+    if hard then advice.mid:SetTextColor(1, 0.62, 0.3) else advice.mid:SetTextColor(0.85, 0.85, 0.88) end
+    bandAlpha(advice.low, 0, 10)
+    bandAlpha(advice.mid, 10, line)
+    bandAlpha(advice.highGate, line, 1000)
+    if not advice.highAnim:IsPlaying() then advice.highAnim:Play() end
+    rageBar.tick:ClearAllPoints()
+    rageBar.tick:SetPoint("CENTER", rageBar, "LEFT", blockW * line / 100, 0)
+end
+
+-- Rage bar: red normally, gold once you are past the "spend" line.
+local function colorRage()
+    if POWER == MANA then rageBar:SetStatusBarColor(0.2, DRU.lux and 0.42 or 0.45, DRU.lux and 0.78 or 1) return end
+    if POWER == DRU.ENERGY then rageBar:SetStatusBarColor(1, 0.85, 0.1) return end   -- energy: yellow
+    local line = spendLine()
+    local r, m = UnitPower("player", RAGE), UnitPowerMax("player", RAGE)
+    if not secret(r) and not secret(m) then
+        if m and m > 0 and r / m * 100 >= line then rageBar:SetStatusBarColor(1, 0.72, 0.1)
+        else rageBar:SetStatusBarColor(0.85, 0.12, 0.12) end
+        return
+    end
+    if not UnitPowerPercent then return end
+    local key = "rc" .. line
+    local set = curves[key]
+    if set == nil then
+        local ok, c = pcall(function()
+            local function ch(lowV, highV)
+                local x = C_CurveUtil.CreateCurve()
+                x:SetType(Enum.LuaCurveType.Step)
+                x:AddPoint(0, lowV); x:AddPoint(line / 100, highV)
+                return x
+            end
+            return { ch(0.85, 1), ch(0.12, 0.72), ch(0.12, 0.1) }
+        end)
+        set = ok and c or false
+        curves[key] = set
+    end
+    if not set then return end
+    local okR, rr = pcall(UnitPowerPercent, "player", RAGE, false, set[1])
+    local okG, gg = pcall(UnitPowerPercent, "player", RAGE, false, set[2])
+    local okB, bb = pcall(UnitPowerPercent, "player", RAGE, false, set[3])
+    if okR and okG and okB then pcall(rageBar.SetStatusBarColor, rageBar, rr, gg, bb) end
+end
+
+-- Smooth bars: the game animates between values itself (same as MiniResourceDisplay /
+-- Better Personal Resource Display). Bars update only when the game says the value changed.
+local SMOOTH = Enum and Enum.StatusBarInterpolation and Enum.StatusBarInterpolation.ExponentialEaseOut
+local function setBar(bar, v)
+    if SMOOTH then
+        if not pcall(bar.SetValue, bar, v, SMOOTH) then pcall(bar.SetValue, bar, v) end
+    else
+        pcall(bar.SetValue, bar, v)
+    end
+end
+
+local cdAt = 0
+local function updateHealth()
+    -- Health: bar + percent text. Widgets accept secret numbers; we never compare them.
+    pcall(healthBar.SetMinMaxValues, healthBar, 0, UnitHealthMax("player"))
+    setBar(healthBar, UnitHealth("player"))
+    local h, m = UnitHealth("player"), UnitHealthMax("player")
+    if not secret(h) and not secret(m) and m and m > 0 then
+        healthBar.text:SetFormattedText("%d%%", h / m * 100 + 0.5)
+    elseif UnitHealthPercent and CurveConstants and CurveConstants.ScaleTo100 then
+        local okP, pct = pcall(UnitHealthPercent, "player", false, CurveConstants.ScaleTo100)
+        if okP then pcall(healthBar.text.SetFormattedText, healthBar.text, "%.0f%%", pct) end
+    end
+    updateHealthColor(h, m, setBar)
+end
+
+local function updatePower()
+    -- Rage (warrior) or mana (paladin)
+    pcall(rageBar.SetMinMaxValues, rageBar, 0, UnitPowerMax("player", POWER))
+    setBar(rageBar, UnitPower("player", POWER))
+    if POWER == DRU.ENERGY then      -- cat: energy and combo points
+        pcall(rageBar.text.SetFormattedText, rageBar.text, "%d    %d CP", UnitPower("player", POWER), UnitPower("player", DRU.COMBO))
+    else
+        pcall(rageBar.text.SetFormattedText, rageBar.text, "%d", UnitPower("player", POWER))
+    end
+    colorRage()
+    updateAdvice()
+end
+
+local function updateThreat()
+    -- Threat on your target. Always shown so the panel never jumps; dim without a target.
+    threatBar:SetAlpha((ctx.hostile and not DRU.caster) and 1 or 0)   -- no enemy target: nothing to show
+    if ctx.hostile then
+        local isTanking, _, scaled = UnitDetailedThreatSituation("player", "target")
+        if scaled then
+            setBar(threatBar, scaled)
+            setBar(threatBar.red, scaled)
+            pcall(threatBar.text.SetFormattedText, threatBar.text, "%.0f%%", scaled)
+        else
+            threatBar:SetValue(0); threatBar.red:SetValue(0); threatBar.text:SetText("")
+        end
+        if not secret(isTanking) and isTanking == nil then
+            threatBar.red:SetAlpha(1)
+            threatBar.ok:SetAlpha(0); threatBar.bad:SetAlpha(ctx.combat and 1 or 0)
+            if not ctx.combat then threatBar.ok:SetAlpha(0) end
+        else
+            boolAlpha(threatBar.red, isTanking, 0, 1)   -- red layer hides while you tank
+            boolAlpha(threatBar.ok, isTanking, 1, 0)
+            boolAlpha(threatBar.bad, isTanking, 0, 1)
+        end
+    else
+        threatBar:SetValue(0); threatBar.red:SetValue(0); threatBar.red:SetAlpha(1)
+        threatBar.text:SetText(""); threatBar.ok:SetAlpha(0); threatBar.bad:SetAlpha(0)
+    end
+end
+
+-- Pieces the slow tick still refreshes (timers that have no event of their own).
+local function updateBars()
+    local now = GetTime()
+    if now - cdAt >= 0.25 then      -- cooldown icons: 4x a second is plenty
+        cdAt = now
+        for _, f in pairs(cdIcons) do if f:IsShown() then updateCD(f) end end
+    end
+    colorRage()       -- the spend line moves when heavy hits start/stop
+    updateAdvice()
+end
+
+-- Which bars need a refresh, set by events and handled once per frame at most.
+local barsDirty = { health = true, power = true, threat = true }
+
+-- (range code in its own block: Lua allows only 200 top-level locals)
+local updateRange, findNearSpell
+do
+-- Range ring. Melee = a known melee spell in range. "A few steps away" = a known
+-- harmful spell with about 10 yd range (Judgement, Hammer of Justice, Intimidating
+-- Shout...), found from the spellbook's own range numbers.
+local MELEE = { WARRIOR = { "Sunder Armor", "Heroic Strike", "Hamstring", "Rend" },
+                PALADIN = { "Holy Strike", "Crusader Strike" } }
+local nearSpell
+findNearSpell = function()
+    nearSpell = nil
+    if not (C_Spell.GetSpellInfo and C_Spell.IsSpellHarmful) then return end
+    local best
+    for name, id in pairs(spell) do
+        local ok, info = pcall(C_Spell.GetSpellInfo, id)
+        if ok and type(info) == "table" and not sectable(info) then
+            local mn, mx = plain(info.minRange, 99), plain(info.maxRange, 0)
+            local okH, harm = pcall(C_Spell.IsSpellHarmful, id)
+            if okH and plain(harm, false) and mn == 0 and mx >= 8 and mx <= 15 and (not best or mx < best) then
+                best, nearSpell = mx, name
+            end
+        end
+    end
+end
+-- Three checks, because one alone lied in game (green at 30+ yards):
+--  bar  = your action button for that spell (the same red tint Blizzard's bars use)
+--  book = C_Spell.IsSpellInRange
+--  near = CheckInteractDistance 3 (about 10 yd; only works out of combat)
+local function show(v)
+    if v == nil then return "nil" end
+    if secret(v) then return "secret" end
+    return tostring(v)
+end
+local function barRange(id)
+    local AB = C_ActionBar
+    if not (AB and AB.FindSpellActionButtons) then return nil end
+    local ok, slots = pcall(AB.FindSpellActionButtons, id)
+    if not ok or type(slots) ~= "table" or sectable(slots) then return nil end
+    local fn = AB.IsActionInRange or _G.IsActionInRange
+    if not fn then return nil end
+    for _, slot in ipairs(slots) do
+        local okR, r = pcall(fn, slot, "target")
+        if okR and r ~= nil then return r end
+    end
+    return nil
+end
+local function closeCheck()
+    if InCombatLockdown() or not CheckInteractDistance then return nil end
+    local ok, r = pcall(CheckInteractDistance, "target", 3)
+    if ok and not secret(r) then return r and true or false end
+    return nil
+end
+local dbgAt = 0
+local function rangeOf(name, isMelee)
+    local id = name and spell[name]
+    if not id then return nil end
+    local okB, book = pcall(C_Spell.IsSpellInRange, id, "target")
+    if not okB then book = nil end
+    local bar = barRange(id)
+    local close
+    if isMelee then close = closeCheck() end
+    if isMelee and GetTime() - dbgAt > 1 then      -- for "check logs": what each check said
+        dbgAt = GetTime()
+        DB.rangeDebug = { spell = name, id = id, book = show(book), bar = show(bar), close = show(close) }
+    end
+    local r = bar
+    if r == nil then r = book end
+    -- out of combat the 10 yd check is plain and trustworthy: farther than 10 yd is never melee
+    if close == false and (r == nil or secret(r) or r == true) then r = false end
+    return r
+end
+local ringState
+-- Color every icon in the big-icon stack (only one is ever visible).
+local function tintNext(g, b)
+    local keys = SPOT[CLASS] and SPOT[CLASS].next
+    if not keys then return end
+    for _, a in ipairs(ALERTS) do
+        for _, k in ipairs(keys) do
+            if a.key == k and a.c then pcall(a.c.icon.SetVertexColor, a.c.icon, 1, g, b) end
+        end
+    end
+end
+local function setRing(state)     -- "in", "near", "far"
+    if ringState == state then return end
+    ringState = state
+    if state == "far" then tintNext(0.25, 0.25)
+    elseif state == "near" then tintNext(0.75, 0.4)
+    else tintNext(1, 1) end
+end
+-- AGGRO dots: one over EVERY enemy nameplate that is in a fight, plus one on our
+-- target frame when your target has no nameplate. Threat status on that mob:
+--   3 = it's on you, solid  -> green
+--   2 = it's on you, but someone is about to take it -> yellow
+--   0/1 or not on its list while it fights -> red (it's NOT hitting you)
+-- If the game locks the status number in combat, step curves turn it into alphas
+-- without reading it; if even that isn't allowed, it falls back to green/red.
+local function newDot()
+    local d = CreateFrame("Frame", nil, UIParent)
+    d:SetSize(24, 24)
+    d:SetFrameStrata("HIGH")
+    d:Hide()
+    local function tex(r, g, b)
+        local t = d:CreateTexture(nil, "OVERLAY")
+        t:SetAllPoints(); t:SetTexture(MEDIA .. "Dot.tga"); t:SetAlpha(0)   -- our own dot art
+        t:SetVertexColor(r, g, b)
+        return t
+    end
+    d.g = tex(0.2, 1, 0.2)
+    d.o = tex(1, 0.85, 0.1)       -- yellow: about to lose aggro
+    d.r = tex(1, 0.15, 0.15)
+    return d
+end
+local dot = newDot()              -- the target-frame dot (target without a nameplate)
+DBagsAlertsState.dot = dot
+
+local threatCurves
+local function statusCurves()
+    if threatCurves ~= nil then return threatCurves or nil end
+    local ok, c = pcall(function()
+        local function step(a0, a1, a2, a3)
+            local cv = C_CurveUtil.CreateCurve()
+            cv:SetType(Enum.LuaCurveType.Step)
+            cv:AddPoint(0, a0); cv:AddPoint(1, a1); cv:AddPoint(2, a2); cv:AddPoint(3, a3)
+            return cv
+        end
+        return { g = step(0, 0, 0, 1), o = step(0, 0, 1, 0), r = step(1, 1, 0, 0) }
+    end)
+    threatCurves = ok and c or false
+    return ok and c or nil
+end
+local function setState(d, state)
+    if state == d.state then return end
+    d.state = state
+    d.g:SetAlpha(state == "g" and 1 or 0)
+    d.o:SetAlpha(state == "o" and 1 or 0)
+    d.r:SetAlpha(state == "r" and 1 or 0)
+end
+-- Color dot d for unit. Returns false when that mob isn't fighting (no dot).
+-- trustCombat: the mob's own "in combat" flag may be guessed from ours when locked
+-- (only for your target - for every plate that would light up random mobs).
+local function colorDot(d, unit, trustCombat)
+    local s = UnitThreatSituation("player", unit)
+    if not secret(s) then
+        if s == nil then
+            local tc = UnitAffectingCombat(unit)
+            local fighting
+            if secret(tc) then fighting = trustCombat and ctx.combat else fighting = tc end
+            if not fighting then return false end
+            setState(d, "r")
+        elseif s >= 3 then setState(d, "g")
+        elseif s == 2 then setState(d, "o")
+        else setState(d, "r") end
+        return true
+    end
+    d.state = nil                               -- locked number: never compared
+    local cv = statusCurves()
+    if cv and cv.g.Evaluate then
+        local ok1, ag = pcall(cv.g.Evaluate, cv.g, s)
+        local ok2, ao = pcall(cv.o.Evaluate, cv.o, s)
+        local ok3, ar = pcall(cv.r.Evaluate, cv.r, s)
+        if ok1 and ok2 and ok3 and pcall(d.g.SetAlpha, d.g, ag)
+           and pcall(d.o.SetAlpha, d.o, ao) and pcall(d.r.SetAlpha, d.r, ar) then
+            return true
+        end
+    end
+    local isTanking = UnitDetailedThreatSituation("player", unit)   -- green / red only
+    boolAlpha(d.g, isTanking, 1, 0); boolAlpha(d.r, isTanking, 0, 1); d.o:SetAlpha(0)
+    return true
+end
+local function pin(d, anchor, onPlate)
+    if d.anchor ~= anchor then
+        d.anchor = anchor
+        d:ClearAllPoints()
+        local ok
+        if onPlate then ok = pcall(d.SetPoint, d, "BOTTOM", anchor, "TOP", 0, 6)
+        else ok = pcall(d.SetPoint, d, "CENTER", anchor, "TOPRIGHT", -12, -12) end
+        if not ok then d.anchor = nil return false end
+    end
+    d:Show()
+    return true
+end
+local function plateOK(plate)
+    return plate and not (plate.IsForbidden and plate:IsForbidden())
+       and not (plate.IsVisible and not plate:IsVisible())
+end
+
+local pool, used = {}, {}       -- plate frame -> dot
+DBagsAlertsState.dotPool = pool
+local function plateUnit(p)
+    return p.namePlateUnitToken or (p.UnitFrame and p.UnitFrame.unit)
+end
+local allOff = false
+do
+    local markers = {}
+    local function draw(index, plate, name, gate)
+        local marker = markers[index]
+        if not plateOK(plate) or not gate.ok then
+            if marker then marker:Hide() end
+            return
+        end
+        if not marker then
+            marker = CreateFrame("Frame", nil, UIParent)
+            local size = index == 3 and 26 or 32
+            marker:SetSize(size, size)
+            marker:SetFrameStrata("HIGH")
+            marker.inner = CreateFrame("Frame", nil, marker)
+            marker.inner:SetAllPoints()
+            marker.icon = marker.inner:CreateTexture(nil, "OVERLAY")
+            marker.icon:SetAllPoints()
+            markers[index] = marker
+        end
+        for i = gate.n + 1, 3 do gate[i] = 1 end
+        marker:SetAlpha(gate[1])
+        marker.inner:SetAlpha(gate[2])
+        marker.icon:SetAlpha(gate[3])
+        marker.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
+        if marker.anchor ~= plate then
+            marker:ClearAllPoints()
+            local ok = pcall(marker.SetPoint, marker, "BOTTOM", plate, "TOP", index == 3 and 34 or 0, 28)
+            marker.anchor = ok and plate or nil
+        end
+        marker:SetShown(marker.anchor == plate)
+    end
+
+    DRU.updateRecoveryMarkers = function()
+        local active = CLASS == "WARRIOR" and InCombatLockdown() and IsInGroup()
+        local loose = DRU.recoveryPlate
+        if loose and (not plateOK(loose) or plain(plateUnit(loose)) ~= DRU.recoveryUnit) then loose = nil end
+        local taunt = ready("Taunt")
+        local gate = {ok = active and loose ~= nil and not DB.off.taunt, n = 0}
+        need(gate, taunt); need(gate, usable("Taunt"))
+        draw(1, loose, "Taunt", gate)
+        gate = {ok = active and loose ~= nil and not DB.off.mocking, n = 0}
+        need(gate, taunt, true); need(gate, ready("Mocking Blow"))
+        draw(2, loose, "Mocking Blow", gate)
+        gate = {ok = active and loose ~= nil and not DB.off.rescueShout, n = 0}
+        need(gate, taunt, true)
+        need(gate, (DRU.shoutCount or 0) >= (DB.shoutMinimum or 3))
+        need(gate, ready("Challenging Shout")); need(gate, usable("Challenging Shout"))
+        draw(3, loose, "Challenging Shout", gate)
+    end
+end
+updateRange = function()
+    DRU.updateRecoveryMarkers()
+    -- only while YOU are in combat: out of combat nothing is read at all
+    local on = DB.range ~= false and ctx.combat
+    if not on then
+        if not allOff then
+            allOff = true
+            for _, d in pairs(pool) do d:Hide() end
+            dot:Hide()
+        end
+        return
+    end
+    allOff = false
+    wipe(used)
+    -- every enemy nameplate that is fighting
+    if on and C_NamePlate and C_NamePlate.GetNamePlates then
+        local ok, plates = pcall(C_NamePlate.GetNamePlates)
+        if ok and type(plates) == "table" and not sectable(plates) then
+            for _, p in ipairs(plates) do
+                local u = plateOK(p) and plateUnit(p)
+                if u and not secret(u) then
+                    local okA, atk = pcall(UnitCanAttack, "player", u)
+                    local dead = UnitIsDead(u)
+                    if okA and plain(atk, true) and not plain(dead, false) then
+                        local d = pool[p]
+                        if not d then d = newDot(); pool[p] = d end
+                        if colorDot(d, u, UnitIsUnit(u, "target") == true) and pin(d, p, true) then
+                            used[p] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for p, d in pairs(pool) do if not used[p] then d:Hide() end end
+    -- your target without a nameplate: the dot sits on our target frame
+    local tplate
+    if on and ctx.hostile then
+        local okT, tp = pcall(C_NamePlate.GetNamePlateForUnit, "target")
+        if okT and plateOK(tp) then tplate = tp end
+    end
+    local tfr = DBagsAlertsState.targetFrame
+    if on and ctx.hostile and not tplate and tfr and tfr:IsShown()
+       and colorDot(dot, "target", true) and pin(dot, tfr, false) then
+        return
+    end
+    dot:Hide()
+end
+
+end   -- range block
+
+local function updateContext()
+    ctx.combat = InCombatLockdown() or plain(UnitAffectingCombat("player"), false)
+    ctx.group = IsInGroup()
+    local exists = plain(UnitExists("target"), false)
+    -- If these are ever locked, assume a target you have in combat is a live enemy.
+    local atk = plain(UnitCanAttack("player", "target"), ctx.combat)
+    local dead = plain(UnitIsDead("target"), false)
+    ctx.hostile = exists and atk and not dead
+    local cls = plain(UnitClassification("target"), "normal")
+    local lvl = plain(UnitLevel("target"), 0)
+    ctx.elite = ctx.hostile and (cls == "elite" or cls == "rareelite" or cls == "worldboss" or lvl == -1) or false
+    local ctype = plain(UnitCreatureType("target"), nil)
+    ctx.bleedImmune = ctype == "Elemental" or ctype == "Mechanical"
+    ctx.ctype = ctype
+    if CLASS == "DRUID" then
+        local okF, id = pcall(GetShapeshiftFormID or function() return nil end)
+        id = okF and plain(id, nil) or nil
+        ctx.form = DRU.FORM[id or 0] or "caster"
+        ctx.stealth = plain(IsStealthed and IsStealthed(), false) and true or false
+        DRU.anyRange = ctx.form ~= "bear" and ctx.form ~= "cat"
+    elseif CLASS == "WARLOCK" then
+        DRU.anyRange = true           -- caster: count every mob fighting you, at any range
+    end
+    ctx.enemies, ctx.loose = scanEnemies()
+end
+
+local function update()
+    if not DB then return end
+    updateContext()
+    local testing = GetTime() < testUntil
+    local glowSet = ctx.glowSet or {}       -- button-row icons that should glow this tick
+    ctx.glowSet = glowSet
+    wipe(glowSet)
+    for _, a in ipairs(ALERTS) do
+        if a.root and not DB.off[a.key] and a.inSpot ~= false then
+            if testing and CLASS == "WARLOCK" and not (spell[a.icon] or DRU.icons[a.icon]) then
+                a.root:SetAlpha(0); a.rootA = 0
+            elseif testing then
+                setIcon(a); a.root:SetAlpha(1); a.rootA = 1
+                a.gA = a.gA or {}
+                for i = 1, 4 do a.gates[i]:SetAlpha(1); a.gA[i] = 1 end
+            else
+                -- reuse one table per alert (no garbage every tick)
+                local st = a.st
+                if not st then st = {}; a.st = st end
+                st.ok, st.n = true, 0
+                st[1], st[2], st[3], st[4] = nil, nil, nil, nil
+                local okT, name, label = pcall(a.test, st)
+                if not okT then st.ok = false end
+                -- only touch a frame's alpha when it actually changes (secret ones always)
+                a.gA = a.gA or {}
+                if st.ok then
+                    setIcon(a, name, label)
+                    if a.rootA ~= 1 then a.rootA = 1; a.root:SetAlpha(1) end
+                    for i = 1, 4 do
+                        if st[i] then safeAlpha(a.gates[i], st[i]); a.gA[i] = nil
+                        elseif a.gA[i] ~= 1 then a.gA[i] = 1; a.gates[i]:SetAlpha(1) end
+                    end
+                elseif a.rootA ~= 0 then
+                    a.rootA = 0; a.root:SetAlpha(0)
+                end
+                -- Sound only for danger alerts we KNOW are lit (no secret gates).
+                local known = st.ok and st.n == 0
+                if DB.sound and a.danger and known and not lit[a.key] and GetTime() > soundAt then
+                    PlaySound(SOUNDKIT.RAID_WARNING, "Master")
+                    soundAt = GetTime() + 3
+                end
+                lit[a.key] = known
+            end
+        end
+    end
+    -- Glow: the button that each big icon is telling you to press (one per spot, in
+    -- priority order), with the same conditions - so a glow always means "this one, now".
+    local byKey = ctx.byKey
+    if not byKey or ctx.byKeyFor ~= ALERTS then
+        byKey = {}; for _, a in ipairs(ALERTS) do byKey[a.key] = a end
+        ctx.byKey, ctx.byKeyFor = byKey, ALERTS
+    end
+    local sp = (DB.stack ~= false) and SPOT[CLASS]
+    if sp and not testing then
+        for _, keys in pairs(sp) do
+            for _, key in ipairs(keys) do
+                local a = byKey[key]
+                local st = a and a.st
+                if a and st and st.ok and not DB.off[key] and a.inSpot ~= false then
+                    local cdf = cdIcons[a.iconName or a.icon]
+                    if cdf and cdf:IsShown() and not glowSet[cdf] then
+                        glowSet[cdf] = true
+                        cdf.glowGates[1]:SetAlpha(1)
+                        for i = 1, 4 do
+                            if st[i] then safeAlpha(cdf.glowGates[i], st[i]) elseif i > 1 then cdf.glowGates[i]:SetAlpha(1) end
+                        end
+                    end
+                    break                          -- only the top one in this spot
+                end
+            end
+        end
+    end
+    if testing then                                -- preview: every button glows
+        for _, f in pairs(cdIcons) do
+            glowSet[f] = true
+            for i = 1, 4 do f.glowGates[i]:SetAlpha(1) end
+        end
+    end
+    for _, f in pairs(cdIcons) do                  -- everything else: no glow
+        if not glowSet[f] then f.glowGates[1]:SetAlpha(0) end
+    end
+
+    updateBars()
+    barsDirty.threat = true        -- threat follows the alert rate, smoothed by the game
+    -- small status line: only rebuilt when something in it changed
+    local e = ctx.enemies
+    local hard = POWER == RAGE and tankingHard()
+    local s = ctx.hostile and sunder[targetKey()]
+    local stacks = (s and GetTime() - s.last < durationOf("Sunder Armor")) and s.n or 0
+    local key = tostring(e) .. (hard and "h" or "") .. stacks
+    if key ~= info.key then      -- just a number on the big icon: mobs on you (orange = heavy hits)
+        info.key = key
+        ring.count:SetText((e and e >= 2) and tostring(e) or "")
+        if hard then ring.count:SetTextColor(1, 0.6, 0.25) else ring.count:SetTextColor(1, 1, 1) end
+    end
+    main:SetAlpha((ctx.combat or ctx.hostile or testing or not DB.locked) and 1 or 0.45)
+end
+
+---------------------------------------------------------------------------
+-- Target frame + cast bars, so Blizzard's can be hidden. Cast bars use the game's
+-- own timer (UnitCastingDuration + SetTimerDuration, the Threat Plates way): WoW
+-- animates them itself, smooth, and it works while combat values are locked.
+---------------------------------------------------------------------------
+local TIMER_NOW = Enum and Enum.StatusBarInterpolation and Enum.StatusBarInterpolation.Immediate
+local DIR_UP = Enum and Enum.StatusBarTimerDirection and Enum.StatusBarTimerDirection.ElapsedTime
+local DIR_DOWN = Enum and Enum.StatusBarTimerDirection and Enum.StatusBarTimerDirection.RemainingTime
+local TARGET_W = 230
+
+local function makeCastBar(parent, h)
+    local cb = makeBar(1, 0.7, 0.1, h, "", parent)
+    cb.lock = CreateFrame("StatusBar", nil, cb)        -- gray layer: can't be interrupted
+    cb.lock:SetAllPoints(); cb.lock:SetStatusBarTexture(BAR_TEX)
+    cb.lock:SetStatusBarColor(0.55, 0.55, 0.6); cb.lock:SetMinMaxValues(0, 1)
+    cb.lock:SetFrameLevel(cb:GetFrameLevel() + 1); cb.lock:SetAlpha(0)
+    cb.top = CreateFrame("Frame", nil, cb)
+    cb.top:SetAllPoints(); cb.top:SetFrameLevel(cb:GetFrameLevel() + 2)
+    cb.name = cb.top:CreateFontString(nil, "OVERLAY")
+    styleText(cb.name, 14, 1, 1, 1)
+    cb.name:SetPoint("LEFT", 5, 0); cb.name:SetPoint("RIGHT", -5, 0)
+    cb.name:SetJustifyH("LEFT"); cb.name:SetWordWrap(false)
+    cb.icon = cb.top:CreateTexture(nil, "OVERLAY")
+    cb.icon:SetSize(h, h); cb.icon:SetPoint("RIGHT", cb, "LEFT", -1, 0)
+    cb.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    cb.text:Hide(); cb:Hide()
+    return cb
+end
+
+local castPlayer = makeCastBar(main, 22)
+
+local tf = CreateFrame("Frame", nil, main)              -- target frame
+DBagsAlertsState.targetFrame = tf
+tf:SetSize(TARGET_W, 90)
+tf.name = tf:CreateFontString(nil, "OVERLAY")
+styleText(tf.name, 15, 1, 1, 1)
+tf.name:SetJustifyH("LEFT"); tf.name:SetWordWrap(false)
+tf.level = tf:CreateFontString(nil, "OVERLAY")
+styleText(tf.level, 15, 1, 0.82, 0.2)
+tf.hp = makeBar(0.8, 0.1, 0.1, 28, "", tf)
+styleText(tf.hp.text, 18, 1, 1, 1); tf.hp.text:ClearAllPoints(); tf.hp.text:SetPoint("CENTER")
+tf.pw = makeBar(0.2, 0.45, 1, 8, "", tf); tf.pw.text:Hide()
+tf.cast = makeCastBar(tf, 22)
+tf.tot = tf:CreateFontString(nil, "OVERLAY")              -- who your target is hitting
+styleText(tf.tot, 14, 1, 1, 1)
+tf.tot:SetJustifyH("RIGHT"); tf.tot:SetWordWrap(false)
+tf.totBar = makeBar(0.25, 0.52, 0.3, 16, "", tf)
+tf.totBar:SetPoint("TOPLEFT", tf.hp, "BOTTOMLEFT", 0, -4)
+tf.totBar:SetWidth(TARGET_W); tf.totBar.text:Hide(); tf.totBar.left:Hide()
+tf.tot:SetParent(tf.totBar); tf.tot:SetJustifyH("LEFT")
+tf.tot:ClearAllPoints(); tf.tot:SetPoint("LEFT", 4, 0)
+styleText(tf.tot, 12, 1, 1, 1); tf.totBar:Hide()
+tf:Hide()
+
+local tDirty = { all = true }
+
+local function refreshCast(cb, unit, isTarget)
+    if not DB.casts then cb:Hide(); if not isTarget and DRU.clearCastClock then DRU.clearCastClock() end; return end
+    local name, _, tex, startMS, endMS, _, _, notInt = UnitCastingInfo(unit)
+    local channel = false
+    if not name then
+        name, _, tex, startMS, endMS, _, notInt = UnitChannelInfo(unit)
+        channel = name and true or false
+    end
+    if not name then cb:Hide(); if not isTarget and DRU.clearCastClock then DRU.clearCastClock() end; return end
+    local dur
+    if channel then dur = UnitChannelDuration and UnitChannelDuration(unit)
+    else dur = UnitCastingDuration and UnitCastingDuration(unit) end
+    local dir = channel and DIR_DOWN or DIR_UP
+    if not (dur and cb.SetTimerDuration and pcall(cb.SetTimerDuration, cb, dur, TIMER_NOW, dir)) then cb:Hide() return end
+    pcall(cb.lock.SetTimerDuration, cb.lock, dur, TIMER_NOW, dir)
+    local displayName=name
+    if not secret(name) and type(name)=="string" then
+        -- Some interaction spells expose an internal "No Text" suffix.
+        displayName=name=="No Text" and "Interacting" or name:gsub("%s+%-%s+No Text$","")
+    end
+    pcall(cb.name.SetText, cb.name, displayName)
+    pcall(cb.icon.SetTexture, cb.icon, tex)
+    if isTarget then boolAlpha(cb.lock, notInt, 1, 0) else cb.lock:SetAlpha(0) end
+    cb:Show()
+    if not isTarget and DRU.castClock then DRU.castClock(dur, channel, startMS, endMS) end
+end
+
+do   -- authoritative cast display: duration object drives both fill and timer.
+    local cb = castPlayer
+    cb.left = cb.top:CreateFontString(nil, "OVERLAY")
+    styleText(cb.left, 15, 1, 1, 1)
+    cb.left:SetPoint("RIGHT", -7, 0)
+    cb.name:SetPoint("RIGHT", -49, 0)
+    local mark = cb.top:CreateTexture(nil, "ARTWORK")
+    mark:SetColorTexture(0.45, 0.67, 1, 0.85); mark:Hide()
+    cb.queueMark = mark
+    local dur, finish, queueAt, channel, elapsed = nil, nil, nil, false, 0
+    local function reset()
+        dur, finish, queueAt = nil, nil, nil
+        mark:Hide(); cb.left:SetText("")
+        local c = cb.col; cb:SetStatusBarColor(c[1], c[2], c[3])
+    end
+    DRU.castClock = function(d, ch, startMS, endMS)
+        reset()
+        dur, channel = d, ch
+        -- The queue marker means "press next" only. Latency does not prove that
+        -- moving early is safe. Hidden cast times are never guessed from spell data.
+        if secret(startMS) or secret(endMS) then return end
+        if type(startMS) ~= "number" or type(endMS) ~= "number" or endMS <= startMS then return end
+        finish = endMS / 1000
+        if ch or DB.slide == false then return end
+        local ok, v = pcall(GetCVar or function() end, "SpellQueueWindow")
+        v = ok and plain(v, nil) or nil
+        local ms = tonumber(v) or 400
+        local length = (endMS - startMS) / 1000
+        local w = math.min(math.max(ms / 1000, 0), length)
+        queueAt = finish - w
+        local width = cb:GetWidth()
+        if type(width) == "number" and not secret(width) and width > 0 and w > 0 then
+            mark:ClearAllPoints(); mark:SetPoint("BOTTOMRIGHT", cb, "BOTTOMRIGHT", 0, 0)
+            mark:SetSize(width * w / length, 2); mark:Show()
+        end
+    end
+    DRU.clearCastClock = reset
+    local driver = CreateFrame("Frame")
+    driver:SetScript("OnUpdate", function(_, dt)
+        if not dur then return end
+        if not cb:IsShown() then reset(); return end
+        elapsed = elapsed + dt
+        if elapsed < 0.05 then return end
+        elapsed = 0
+        if dur.GetRemainingDuration then
+            -- Secrets may go straight to Blizzard's text renderer, never to Lua math.
+            local ok, remaining = pcall(dur.GetRemainingDuration, dur)
+            if ok then pcall(cb.left.SetFormattedText, cb.left, "%.1f", remaining) end
+        elseif finish then
+            cb.left:SetFormattedText("%.1f", math.max(0, finish - GetTime()))
+        end
+        -- No full-bar colour changes: the spell's identity stays consistent.
+    end)
+    DBagsAlertsState.castPlayer = cb
+end
+
+do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
+    -- Like a caster WeakAura: one tile per DoT you know. Bright with a big countdown
+    -- and a draining bar while it's on your target; dark and faded when it's missing;
+    -- red numbers in the last 3 seconds. Times come from your own casts (and the real
+    -- debuff when the game shares it), so they work in combat.
+    local SHADOW = { 0.62, 0.32, 1 }            -- warlock purple
+    local FEL = { 0.58, 0.38, 1 }               -- soul shard purple (Luxthos' shard colour)
+    local TILE_H = 6                            -- timer bar under each tile
+    local idle = makeBar(0.1, 0.1, 0.1, 24, "")  -- empty slot when you're not casting
+    idle.text:Hide(); idle:SetMinMaxValues(0, 1); idle:SetValue(0); idle:Hide()
+    local tiles, used = {}, {}
+    local function tile(i)
+        if tiles[i] then return tiles[i] end
+        local f = CreateFrame("Frame", nil, main)
+        f.icon = f:CreateTexture(nil, "ARTWORK")
+        f.icon:SetPoint("TOPLEFT"); f.icon:SetPoint("TOPRIGHT")
+        f.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        f.shade = f:CreateTexture(nil, "ARTWORK", nil, 2)     -- darkens the icon while missing
+        f.shade:SetAllPoints(f.icon); f.shade:SetColorTexture(0, 0, 0, 0.6)
+        f.bar = CreateFrame("StatusBar", nil, f)
+        f.bar:SetPoint("BOTTOMLEFT"); f.bar:SetPoint("BOTTOMRIGHT"); f.bar:SetHeight(TILE_H)
+        f.bar:SetStatusBarTexture(BAR_TEX); f.bar:SetStatusBarColor(SHADOW[1], SHADOW[2], SHADOW[3])
+        f.bar:SetMinMaxValues(0, 1); f.bar:SetValue(0)
+        f.bar.bg = f.bar:CreateTexture(nil, "BACKGROUND")
+        f.bar.bg:SetAllPoints(); f.bar.bg:SetColorTexture(0.05, 0.05, 0.06, 0.9)
+        f.top = CreateFrame("Frame", nil, f)
+        f.top:SetAllPoints(f.icon); f.top:SetFrameLevel(f:GetFrameLevel() + 3)
+        f.num = f.top:CreateFontString(nil, "OVERLAY")
+        f.num:SetFont(FONT, 20, "THICKOUTLINE"); f.num:SetPoint("CENTER", 0, 0)
+        addBorder(f, 0, 0, 0, 1, 1)
+        f.gold = goldFrame(f, 4)
+        -- new look: a red edge that pulses when this DoT is missing in a fight
+        local ef = CreateFrame("Frame", nil, f.top)
+        ef:SetAllPoints(f.icon)
+        f.warn = addBorder(ef, 1, 0.2, 0.2, 1, 2)
+        local ag = ef:CreateAnimationGroup()
+        ag:SetLooping("BOUNCE")
+        local fa = ag:CreateAnimation("Alpha")
+        fa:SetFromAlpha(1); fa:SetToAlpha(0.25); fa:SetDuration(0.5)
+        ag:Play()
+        f.warnF = ef; ef:Hide()
+        tiles[i] = f
+        return f
+    end
+    -- which DoTs you know, in rotation order
+    local function dotList()
+        local list = {}
+        for _, n in ipairs({ "Corruption", "Bane of Agony", "Curse of Agony", "Immolate", "Siphon Life" }) do
+            if spell[n] and not (n == "Curse of Agony" and spell["Bane of Agony"]) then list[#list + 1] = n end
+        end
+        local curse = spell["Curse of the Elements"] and "Curse of the Elements" or (spell["Curse of Weakness"] and "Curse of Weakness")
+        if curse then list[#list + 1] = curse end
+        return list
+    end
+    -- seconds left on your DoT on the target (nil = not on it / unknown)
+    local function left(name)
+        local real, aura = targetDebuff(name)
+        local now = GetTime()
+        if real == "on" then
+            local exp = aura and plain(aura.expirationTime, nil)
+            if exp and exp > 0 then return exp - now, plain(aura.duration, nil) or durationOf(name) end
+        elseif real == "off" then
+            local t = DRU.dotAt[name]; local at = t and t[targetKey()]
+            if not (at and now - at <= 1) then return nil end        -- just cast: still landing
+        end
+        local t = DRU.dotAt[name]
+        local at = t and t[targetKey()]
+        local d = durationOf(name)
+        if at and now - at < d then return d - (now - at), d end
+    end
+    local shown = false
+    -- soul shard pips (new look): one pip per shard you want to keep
+    local pips = CreateFrame("Frame", nil, main)
+    pips.p = {}
+    pips.more = pips:CreateFontString(nil, "OVERLAY")
+    pips.more:SetFont(FONT, 13, "OUTLINE"); pips.more:SetPoint("LEFT", pips, "RIGHT", 4, 0)
+    pips:Hide()
+    local pipN = 0
+    local function fontSize(fs, size)
+        local f, _, fl = fs:GetFont()
+        pcall(fs.SetFont, fs, f or FONT, size, fl)
+    end
+    -- new look, step 1: DoT row right under the big icons, edge to edge
+    DRU.dotRow = function(x, y)
+        for _, f in ipairs(tiles) do f:Hide() end
+        wipe(used)
+        local list = dotList()
+        local n = #list
+        if n == 0 then return y end
+        local s = math.min(56, math.floor((blockW - (n - 1)) / n))
+        local cx = x + (blockW - (n * s + (n - 1))) / 2
+        y = y + 3
+        for i, name in ipairs(list) do
+            local f = tile(i)
+            f.name = name
+            f:SetSize(s, s)
+            f.icon:SetHeight(s)
+            f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]) or DEFAULT_ICON)
+            f.gold:SetShown(false)
+            f.bar:SetHeight(5)                          -- thin timer bar inside the icon
+            pcall(f.num.SetFont, f.num, FONT, 22, "THICKOUTLINE")
+            f.warnF:Hide()
+            f:ClearAllPoints(); f:SetPoint("TOPLEFT", main, "TOPLEFT", cx + (i - 1) * (s + 1), -y)
+            f:Show()
+            used[#used + 1] = f
+        end
+        shown = true
+        return y + s + 4
+    end
+    DRU.casterLayout = function(x, y, gb)
+        local cb = castPlayer
+        pips:Hide()
+        if not DRU.lux then
+            for _, f in ipairs(tiles) do f:Hide() end
+            wipe(used)
+        end
+        if not DRU.caster then
+            idle:Hide(); shown = false
+            cb.col = { 1, 0.7, 0.1 }
+            cb:SetHeight(22); cb.icon:SetSize(22, 22)
+            return y
+        end
+        if DRU.lux then
+            -- new look, step 2: shard pips (the cast bar goes to the bottom: DRU.castBottom)
+            fontSize(rageBar.text, 15)
+            if spell["Drain Soul"] then
+                pipN = math.max(3, math.min(10, DB.shardGoal or 5))
+                local pw = (blockW - (pipN - 1)) / pipN
+                pips:ClearAllPoints(); pips:SetSize(blockW, 10)
+                pips:SetPoint("TOPLEFT", main, "TOPLEFT", x, -(y + 1))
+                for i = 1, 10 do
+                    local p = pips.p[i]
+                    if not p then
+                        p = CreateFrame("Frame", nil, pips)
+                        p.bg = p:CreateTexture(nil, "BACKGROUND"); p.bg:SetAllPoints(); p.bg:SetColorTexture(0.08, 0.08, 0.1, 0.8)
+                        p.fill = p:CreateTexture(nil, "ARTWORK"); p.fill:SetAllPoints()
+                        p.fill:SetTexture(CLASSIC_TEX); p.fill:SetVertexColor(FEL[1], FEL[2], FEL[3])
+                        addBorder(p, 0, 0, 0, 1, 1)
+                        pips.p[i] = p
+                    end
+                    p:SetShown(i <= pipN)
+                    p:ClearAllPoints(); p:SetSize(pw, 10)
+                    p:SetPoint("TOPLEFT", pips, "TOPLEFT", (i - 1) * (pw + 1), 0)
+                end
+                pips:Show()
+                y = y + 12
+            end
+            idle:Hide()
+            shown = true
+            return y + 2
+        end
+        -- 1) cast bar: full width under your mana, purple, icon on the left
+        local h, ih = 24, 24
+        cb.col = { SHADOW[1], SHADOW[2], SHADOW[3] }
+        cb:SetStatusBarColor(SHADOW[1], SHADOW[2], SHADOW[3])
+        cb:SetHeight(h); cb.icon:SetSize(ih, ih)
+        y = y + gb + 2
+        cb:ClearAllPoints(); cb:SetWidth(blockW - ih - 1)
+        cb:SetPoint("TOPLEFT", main, "TOPLEFT", x + ih + 1, -y)
+        idle:ClearAllPoints(); idle:SetWidth(blockW - ih - 1)
+        idle:SetPoint("TOPLEFT", main, "TOPLEFT", x + ih + 1, -y)
+        idle:SetFrameLevel(math.max(0, cb:GetFrameLevel() - 2))
+        idle.frame:SetShown(classic()); idle:SetShown(DB.casts and true or false)
+        y = y + h + gb + 4
+        -- 2) DoT tiles, one row, centered, as big as fits (max 44)
+        local list = dotList()
+        local n, g = #list, classic() and 8 or 3
+        if n > 0 then
+            local s = math.min(44, math.floor((blockW - (n - 1) * g) / n))
+            local cx = x + (blockW - (n * s + (n - 1) * g)) / 2
+            y = y + (classic() and 3 or 0)
+            for i, name in ipairs(list) do
+                local f = tile(i)
+                f.name = name
+                f:SetSize(s, s + TILE_H + 1)
+                f.icon:SetHeight(s); f.bar:SetHeight(TILE_H); f.warnF:Hide()
+                pcall(f.num.SetFont, f.num, FONT, 20, "THICKOUTLINE")
+                f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]) or DEFAULT_ICON)
+                f.gold:SetShown(classic())
+                f:ClearAllPoints(); f:SetPoint("TOPLEFT", main, "TOPLEFT", cx + (i - 1) * (s + g), -y)
+                f:Show()
+                used[#used + 1] = f
+            end
+            y = y + s + TILE_H + 1 + (classic() and 6 or 2)
+        end
+        shown = true
+        return y
+    end
+    -- update the tiles 10x a second
+    local t = 0
+    local drv = CreateFrame("Frame")
+    drv:SetScript("OnUpdate", function(_, e)
+        t = t + e
+        if t < 0.1 or not shown then return end
+        t = 0
+        pcall(function()
+            if pips:IsShown() then
+                local have = DRU.bags()
+                for i = 1, pipN do pips.p[i].fill:SetShown(i <= have) end
+                pips.more:SetText(have > pipN and ("+" .. (have - pipN)) or "")
+            end
+            local fight = ctx.hostile
+            for _, f in ipairs(used) do
+                local l, d
+                if fight then
+                    l, d = left(f.name)
+                    -- a curse tile counts either of your curses
+                    if not l and f.name == "Curse of the Elements" then l, d = left("Curse of Weakness") end
+                end
+                if l and l > 0 then
+                    f.warnF:Hide()
+                    f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
+                    f.bar:SetValue(d and d > 0 and l / d or 0)
+                    f.num:SetFormattedText(l >= 10 and "%d" or "%.1f", l)
+                    if l <= 3 then f.num:SetTextColor(1, 0.25, 0.25); f.bar:SetStatusBarColor(1, 0.25, 0.25)
+                    else f.num:SetTextColor(1, 1, 1); f.bar:SetStatusBarColor(SHADOW[1], SHADOW[2], SHADOW[3]) end
+                else
+                    f.shade:SetAlpha(1); f.icon:SetDesaturated(true); f:SetAlpha(fight and 1 or 0.5)
+                    f.bar:SetValue(0); f.num:SetText("")
+                    -- new look: missing in a fight = pulsing red edge (put it back on)
+                    f.warnF:SetShown(DRU.lux and fight and ctx.combat and true or false)
+                end
+            end
+        end)
+    end)
+    -- new look, step 3: cast bar at the very bottom, under the cooldowns, so nothing
+    -- leaves a hole in the middle while you're not casting
+    DRU.castBottom = function(x, y)
+        local cb = castPlayer
+        local h = 30
+        cb.col = { FEL[1], FEL[2], FEL[3] }
+        cb:SetStatusBarColor(FEL[1], FEL[2], FEL[3])
+        cb:SetHeight(h); cb.icon:SetSize(h, h)
+        fontSize(cb.name, 15); fontSize(cb.left, 16)
+        cb:ClearAllPoints(); cb:SetWidth(blockW - h - 1)
+        cb:SetPoint("TOPLEFT", main, "TOPLEFT", x + h + 1, -y)
+        idle:Hide()
+        return y + h + 3
+    end
+    DRU.hideOldCaster = function()
+        shown = false; idle:Hide(); pips:Hide()
+        for _, f in ipairs(tiles) do f:Hide() end
+    end
+    DBagsAlertsState.layoutParts={health=healthBar,power=rageBar,threat=threatBar,swing=swingBar,playerCast=castPlayer,targetCast=tf.cast,cooldowns=cdIcons}
+    DBagsAlertsState.dotTiles = used
+    DBagsAlertsState.pips = pips
+end
+
+do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
+    local W, PAD, NEXT = 300, 10, 60
+    local deck = CreateFrame("Frame", nil, main)
+    deck:SetFrameLevel(main:GetFrameLevel())
+    local shardText = deck:CreateFontString(nil, "OVERLAY")
+    styleText(shardText, 13, 0.76, 0.68, 0.92)
+    shardText:SetPoint("TOPRIGHT", -PAD, -85) -- repositioned beside utility after layout
+    local dots, used, dotY, castY, utilityY = {}, {}, 0, 0, 0
+    local dotScale, dotColumns, dotX = 1, 6, 0
+    local function dotList()
+        local names
+        if CLASS == "WARRIOR" then names = {"Rend"}
+        elseif CLASS == "PALADIN" then names = {} -- upkeep stays in the small buff cue
+        elseif CLASS == "DRUID" then
+            if ctx.form == "cat" then names = {"Rake", "Rip", "Faerie Fire (Feral)"}
+            elseif ctx.form == "bear" then names = {"Faerie Fire (Feral)"}
+            elseif ctx.form == "travel" then names = {}
+            else names = {"Moonfire", "Insect Swarm", "Faerie Fire"} end
+        else names = {"Corruption", "Bane of Agony", "Curse of Agony", "Immolate", "Siphon Life"} end
+        local list = {}
+        for _, n in ipairs(names) do
+            if spell[n] and not (n == "Curse of Agony" and spell["Bane of Agony"]) then list[#list + 1] = n end
+        end
+        if CLASS == "WARLOCK" then
+            local curse = firstKnown({"Curse of the Elements", "Curse of Weakness"})
+            if curse then list[#list + 1] = curse end
+        end
+        return list
+    end
+    local function tile(i)
+        if dots[i] then return dots[i] end
+        local f = CreateFrame("Frame", nil, main)
+        f.icon = f:CreateTexture(nil, "ARTWORK"); f.icon:SetAllPoints()
+        f.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        f.shade = f:CreateTexture(nil, "OVERLAY"); f.shade:SetAllPoints(); f.shade:SetColorTexture(0, 0, 0, 0.48)
+        f.top = CreateFrame("Frame", nil, f); f.top:SetAllPoints(); f.top:SetFrameLevel(f:GetFrameLevel() + 2)
+        f.num = f.top:CreateFontString(nil, "OVERLAY"); styleText(f.num, 17, 1, 1, 1)
+        f.num:SetPoint("CENTER", 0, 1)
+        f.nativeCD = CreateFrame("Cooldown", nil, f.top, "CooldownFrameTemplate")
+        f.nativeCD:SetAllPoints(); f.nativeCD:SetDrawEdge(false); f.nativeCD:SetDrawBling(false)
+        f.nativeCD:SetHideCountdownNumbers(false); f.nativeCD:Hide()
+        f.bar = CreateFrame("StatusBar", nil, f.top)
+        f.bar:SetPoint("BOTTOMLEFT"); f.bar:SetPoint("BOTTOMRIGHT"); f.bar:SetHeight(3)
+        f.bar:SetStatusBarTexture(BAR_TEX); f.bar:SetMinMaxValues(0, 1)
+        f.edge = addBorder(f.top, 0.12, 0.12, 0.16, 1, 1)
+        f.refreshGlow = CreateFrame("Frame", nil, f.top)
+        f.refreshGlow:SetPoint("CENTER"); f.refreshGlow:SetSize(40 / 0.64, 40 / 0.64)
+        f.refreshGlow:SetFrameLevel(f.top:GetFrameLevel() + 1)
+        f.refreshGlow.t = f.refreshGlow:CreateTexture(nil, "OVERLAY")
+        f.refreshGlow.t:SetAllPoints(); f.refreshGlow.t:SetTexture(MEDIA .. "ProcGlow.tga")
+        f.refreshGlow.t:SetBlendMode("ADD"); f.refreshGlow.t:SetVertexColor(1, 0.82, 0.2)
+        f.refreshPulse = f.refreshGlow:CreateAnimationGroup()
+        f.refreshPulse:SetLooping("BOUNCE")
+        local pulse = f.refreshPulse:CreateAnimation("Alpha")
+        pulse:SetFromAlpha(1); pulse:SetToAlpha(0.45); pulse:SetDuration(0.5)
+        f.refreshGlow:Hide()
+        dots[i] = f
+        return f
+    end
+    -- Match the existing spell-specific refresh advice. Expiry-only spells stay
+    -- expiry-only; a visual refresh warning does not assume Pandemic mechanics.
+    local refreshAt = { ["Rend"] = 0.3, ["Moonfire"] = 0.3, ["Insect Swarm"] = 0.3,
+        ["Corruption"] = 0.1, ["Immolate"] = 0.1, ["Siphon Life"] = 0.1,
+        ["Faerie Fire"] = 0.1, ["Faerie Fire (Feral)"] = 0.1 }
+    local function setRefreshGlow(f, want)
+        want = want and DB.glow ~= false or false
+        if f.refreshWanted == want then return end
+        f.refreshWanted = want
+        if want then f.refreshGlow:Show(); f.refreshPulse:Play()
+        else f.refreshPulse:Stop(); f.refreshGlow:Hide() end
+    end
+    local function trackedDots()
+        for _, f in ipairs(dots) do f:Hide() end
+        wipe(used)
+        for i, name in ipairs(dotList()) do
+            local f = tile(i)
+            f.name, f.auraID = name, nil
+            f:SetSize(40, 40); f:ClearAllPoints(); f:SetScale(dotScale)
+            f:SetPoint("TOPLEFT", main, "TOPLEFT", dotX / dotScale + ((i - 1) % dotColumns) * 46, -dotY / dotScale - math.floor((i - 1) / dotColumns) * 47)
+            f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
+            f.nativeCD:Clear(); f.nativeCD:Hide(); setRefreshGlow(f, false)
+            used[#used + 1] = f
+        end
+        DRU.nativeDotsMode = false
+    end
+    DRU.targetAuraCache = {}
+    local function dotLeft(name, now, key)
+        -- Re-read the current target, including DoTs applied before switching away.
+        -- Cache per spell; aura/target events invalidate it immediately.
+        local cached = DRU.targetAuraCache[name]
+        if not cached or now - cached.at >= 0.5 then
+            local real, aura = targetDebuff(name)
+            cached = {at=now, real=real, aura=aura}
+            DRU.targetAuraCache[name] = cached
+        end
+        local aura, real = cached.aura, cached.real
+        local length = durationOf(name)
+        if real == "on" and aura then
+            local exp, duration = plain(aura.expirationTime, nil), plain(aura.duration, nil)
+            if exp and exp > 0 then
+                return math.max(0, exp - now), (duration and duration > 0) and duration or length
+            end
+            local id = plain(aura.auraInstanceID, nil)
+            if id and C_UnitAuras.GetAuraDuration then
+                local obj = C_UnitAuras.GetAuraDuration("target", id)
+                if obj then return nil, length, obj end
+            end
+        end
+        local t = DRU.dotAt[name]
+        local at = name == "Rend" and rendAt[key] or (t and t[key])
+        -- Readable absence wins after the short spell-landing grace period.
+        if real == "off" and not (at and now - at <= 1) then return nil, length end
+        if at then return math.max(0, length - (now - at)), length end
+        return nil, length
+    end
+    DRU.hideCaster = function()
+        deck:Hide()
+        for _, f in ipairs(dots) do f:Hide() end
+        for _, a in ipairs(ALERTS or {}) do
+            a.hudSpot = nil
+            a.c.plate:ClearAllPoints(); a.c.plate:SetPoint("TOP", a.root, "BOTTOM", 0, -2)
+            a.c.text:ClearAllPoints(); a.c.text:SetPoint("CENTER", a.c.plate, "CENTER", 0, 0)
+            a.c.text:SetJustifyH("CENTER"); a.c.text:SetWordWrap(true)
+            styleText(a.c.text, a.row == 1 and 11 or 9, 1, 0.85, 0.25)
+            colorBorder(a.c.edge, a.danger and 1 or 0, a.danger and 0.15 or 0, a.danger and 0.15 or 0, a.danger and 1 or 0)
+        end
+        for _, f in pairs(cdIcons) do f.glow:SetAlpha(1) end
+        panel:Show(); healthBar:SetHeight(28); threatBar:SetHeight(10); swingBar:SetHeight(10)
+        healthBar.left:SetText(""); rageBar.left:SetText("")
+        styleText(healthBar.text, 18, 1, 1, 1); styleText(rageBar.text, 14, 1, 1, 1)
+        tf.pw:Show(); tf.tot:SetShown(DB.targetOfTarget and true or false)
+    end
+    DRU.layoutCaster = function()
+        if InCombatLockdown() then DRU.layoutPending = true; return end
+        DRU.nativeDotsMode = nil
+        DRU.targetAuraCache = {}
+        DRU.hideOldCaster()
+        deck:Show()
+        local targetScale, playerScale = DRU.partScale("target"), DRU.partScale("player")
+        local alertScale, castScale, cdScale = DRU.partScale("alerts"), DRU.partScale("casts"), DRU.partScale("cooldowns")
+        dotScale = DRU.partScale("dots")
+        blockW = 280
+        local width = math.max(W, blockW * math.max(targetScale, playerScale, castScale) + 2 * PAD)
+        dotColumns = math.max(1, math.min(6, math.floor((width - 2 * PAD) / (46 * dotScale))))
+        local targetW, targetH, targetX, targetY = DRU.targetGeometry(blockW, 9)
+        local actionTop = math.max(42, 8 + (19 + targetH + (DB.targetOfTarget and 20 or 0)) * targetScale + 6)
+        -- Keep the drag anchor fixed. Resizing a child must not resize its
+        -- CENTER-anchored parent and shift the whole HUD on the screen.
+        main:SetSize(W, 260)
+        deck:ClearAllPoints(); deck:SetAllPoints()
+        ring:Hide(); advice:Hide(); threatBar:Hide(); swingBar:Hide(); panel:Hide()
+        for _, f in pairs(slotBG) do f:Hide() end
+        for _, f in pairs(cdIcons) do f:Hide() end
+        applyStyle()
+        -- Put action cues beside the resource strip, leaving the world open above it.
+        local _,_,cueX,cueY=DRU.geometry("alerts")
+        local pos = { next = {PAD - NEXT * alertScale - 10, -actionTop, NEXT}, danger = {width + 2, -actionTop, 28},
+                      extra = {width + 2, -actionTop - 34 * alertScale, 28}, buff = {width + 2, -actionTop - 68 * alertScale, 28} }
+        local byKey = {}
+        for _, a in ipairs(ALERTS) do
+            a.root:Hide(); a.root:SetScale(alertScale); a.inSpot = false; byKey[a.key] = a
+            if rawget(a.c, "glowF") then a.c.glowF:Hide() end
+            if rawget(a.c, "gold") then a.c.gold:Hide() end
+        end
+        for spot, keys in pairs(SPOT[CLASS]) do
+            local p = pos[spot]
+            for i, key in ipairs(keys) do
+                local a = byKey[key]
+                if a then
+                    -- Shield Block must not share the dump/Bloodrage helper slot.
+                    local p = key == "block" and {width + 44 * alertScale, -actionTop, 40}
+                        or key == "cleave" and {width + 44 * alertScale, -actionTop - 68 * alertScale, 40} or p
+                    a.hudSpot, a.inSpot = spot, true
+                    a.root:ClearAllPoints(); a.root:SetSize(p[3], p[3])
+                    a.root:SetScale(alertScale)
+                    a.root:SetPoint("TOPLEFT", main, "TOPLEFT", (p[1]+cueX) / alertScale, (p[2]+cueY) / alertScale)
+                    setLevels(a, main:GetFrameLevel() + 10 + (#keys - i + 1) * 8)
+                    a.c.text:Hide(); a.c.plate:Hide()
+                    if spot == "next" and DB.names then
+                        a.c.plate:ClearAllPoints(); a.c.plate:SetPoint("TOP", a.root, "BOTTOM", 0, -3)
+                        a.c.plate:SetSize(78, 28); a.c.plate:SetColorTexture(0, 0, 0, 0.7)
+                        a.c.plate:Show()
+                        a.c.text:ClearAllPoints(); a.c.text:SetPoint("CENTER", a.c.plate, "CENTER")
+                        a.c.text:SetWidth(76); a.c.text:SetJustifyH("CENTER"); a.c.text:SetWordWrap(true)
+                        styleText(a.c.text, 12, 0.94, 0.93, 0.98); a.c.text:Show()
+                    end
+                    colorBorder(a.c.edge, spot == "danger" and 0.95 or 0.45, spot == "danger" and 0.23 or 0.32, spot == "danger" and 0.2 or 0.66, 1)
+                    if key == "block" or key == "cleave" then
+                        local gl = rawget(a.c, "glowF")
+                        if not gl then
+                            gl = CreateFrame("Frame", nil, a.c)
+                            gl:SetPoint("CENTER")
+                            gl.t = gl:CreateTexture(nil, "OVERLAY")
+                            gl.t:SetAllPoints(); gl.t:SetTexture(MEDIA .. "ProcGlow.tga")
+                            gl.t:SetBlendMode("ADD"); gl.t:SetVertexColor(1, 0.82, 0.25)
+                            local pulse = gl:CreateAnimationGroup(); pulse:SetLooping("BOUNCE")
+                            local alpha = pulse:CreateAnimation("Alpha")
+                            alpha:SetFromAlpha(1); alpha:SetToAlpha(0.4); alpha:SetDuration(0.5)
+                            pulse:Play(); a.c.glowF = gl
+                        end
+                        gl:SetSize(40 / 0.64, 40 / 0.64)
+                        gl:SetFrameLevel(a.c:GetFrameLevel() + 3); gl:SetShown(DB.glow ~= false)
+                        a.c.plate:ClearAllPoints(); a.c.plate:SetPoint("TOP", a.root, "BOTTOM", 0, -3)
+                        a.c.plate:SetSize(50, 16); a.c.plate:SetColorTexture(0, 0, 0, 0.7)
+                        a.c.text:ClearAllPoints(); a.c.text:SetPoint("CENTER", a.c.plate, "CENTER")
+                        styleText(a.c.text, 12, 1, 0.85, 0.25)
+                        a.c.plate:Show(); a.c.text:Show()
+                    end
+                    if not DB.off[key] then a.root:Show() end
+                end
+            end
+        end
+        -- The anchor is invisible. Missing alerts leave the game view clear.
+        for _, f in ipairs(dots) do f:Hide() end
+        wipe(used)
+        local list = dotList()
+        local y = actionTop
+        local _,_,dotsX,dotsY=DRU.geometry("dots")
+        dotX=PAD+dotsX;dotY=y-dotsY
+        for i, name in ipairs(list) do
+            local f = tile(i); f.name = name
+            f:SetSize(40, 40); f:ClearAllPoints()
+            f:SetScale(dotScale)
+            f:SetPoint("TOPLEFT", main, "TOPLEFT", dotX / dotScale + ((i - 1) % dotColumns) * 46, -dotY / dotScale - math.floor((i - 1) / dotColumns) * 47)
+            f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name])); f:Show()
+            used[#used + 1] = f
+        end
+        if #list > 0 or CLASS == "DRUID" then
+            y = y + math.ceil((CLASS == "DRUID" and 6 or #list) / dotColumns) * 47 * dotScale
+        end
+        local healthScale=playerScale*DRU.partScale("health")
+        local healthH=DRU.placePart(healthBar,"health",blockW,14,PAD,y,healthScale)
+        healthBar:SetStatusBarTexture(BAR_TEX); healthBar:SetStatusBarColor(0.19, 0.55, 0.38)
+        healthBar.frame:Hide(); styleText(healthBar.text, 12, 1, 1, 1)
+        healthBar.left:SetText("")
+        healthBar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.5)
+        y = y + (healthH+3) * healthScale
+        local powerScale=playerScale*DRU.partScale("power")
+        local powerH=DRU.placePart(rageBar,"power",blockW,18,PAD,y,powerScale)
+        rageBar:SetStatusBarTexture(BAR_TEX); rageBar.frame:Hide(); rageBar.tick:Hide()
+        if POWER == RAGE then rageBar:SetStatusBarColor(0.85, 0.12, 0.12)
+        elseif POWER == DRU.ENERGY then rageBar:SetStatusBarColor(1, 0.85, 0.1)
+        else rageBar:SetStatusBarColor(0.2, 0.42, 0.78) end
+        rageBar.left:SetText("")
+        rageBar.bg:SetVertexColor(0.06, 0.06, 0.07, 0.5)
+        styleText(rageBar.text, 14, 1, 1, 1)
+        y = y + (powerH+6) * powerScale
+        -- Melee keeps useful timing/threat as quiet 3 px strips, instead of bulky bars.
+        if not DRU.caster then
+            local threatScale=playerScale*DRU.partScale("threat")
+            local swingScale=playerScale*DRU.partScale("swing")
+            local threatH=DRU.placePart(threatBar,"threat",blockW,3,PAD,y,threatScale)
+            threatBar.frame:Hide();threatBar:Show()
+            local swingH=DRU.placePart(swingBar,"swing",blockW,3,PAD,y+threatH*threatScale+2,swingScale)
+            swingBar.frame:Hide()
+            y=y+threatH*threatScale+swingH*swingScale+7*playerScale
+        elseif CLASS=="WARLOCK" and not DB.off.swing then
+            local scale=playerScale*DRU.partScale("swing")
+            local height=DRU.placePart(swingBar,"swing",blockW,10,PAD,y,scale)
+            y=y+(height+4)*scale
+        end
+        castY = y
+        local cc = CLASS == "PALADIN" and {0.80, 0.54, 0.62}
+            or CLASS == "DRUID" and {0.68, 0.44, 0.20}
+            or CLASS == "WARRIOR" and {0.67, 0.53, 0.37} or {0.48, 0.32, 0.70}
+        castPlayer.col = cc
+        castPlayer:SetStatusBarColor(cc[1], cc[2], cc[3])
+        castPlayer:SetStatusBarTexture(BAR_TEX); castPlayer.frame:Hide()
+        local playerCastScale=castScale*DRU.partScale("playerCast")
+        local _,playerCastH=DRU.geometry("playerCast",blockW-27,26)
+        DRU.placePart(castPlayer,"playerCast",blockW-27,26,PAD+(playerCastH+1)*playerCastScale,y,playerCastScale)
+        castPlayer.icon:SetSize(playerCastH,playerCastH)
+        styleText(castPlayer.name, 14, 1, 1, 1); styleText(castPlayer.left, 14, 1, 1, 1)
+        if DB.casts then y = y + (playerCastH+6) * playerCastScale end
+        utilityY = y
+        shardText:ClearAllPoints(); shardText:SetPoint("TOPRIGHT", main, "TOPLEFT", width - PAD, -(y + 6))
+        local n = 0
+        local _,_,cdX,cdY=DRU.geometry("cooldowns")
+        local cdColumns = math.max(1, math.min(6, math.floor((width - 2 * PAD) / (31 * cdScale))))
+        if not DB.off.cooldowns then
+            for _, name in ipairs(CD_SPELLS) do
+                if spell[name] then
+                    local f = cdIcons[name] or makeCD(name); cdIcons[name] = f
+                    f.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
+                    f:ClearAllPoints(); f:SetSize(26, 26)
+                    f:SetScale(cdScale); f:SetPoint("TOPLEFT", main, "TOPLEFT", (PAD+cdX) / cdScale + (n % cdColumns) * 31, (-y+cdY) / cdScale - math.floor(n / cdColumns) * 31)
+                    f.glow:SetSize(26, 26); f.glow:SetAlpha(0) -- no duplicate glowing suggestions
+                    f:Show(); n = n + 1
+                end
+            end
+        end
+        if n > 0 then y = y + math.ceil(n / cdColumns) * 31 * cdScale end
+        if CLASS ~= "WARLOCK" then shardText:SetText("") end
+        main:SetSize(W, 260); main:SetScale(DB.scale)
+        main:ClearAllPoints(); main:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
+        main:EnableMouse(not DB.locked); main:EnableMouseWheel(not DB.locked); main.bg:SetShown(not DB.locked)
+        -- Target is a compact header attached to the same column.
+        tf:ClearAllPoints(); tf:SetScale(targetScale); tf:SetPoint("TOPLEFT", main, "TOPLEFT", (PAD + targetX) / targetScale, (-8 + targetY) / targetScale)
+        tf:SetSize(targetW, 21 + targetH)
+        tf.name:ClearAllPoints(); tf.name:SetPoint("TOPLEFT"); tf.name:SetWidth(targetW - 34); styleText(tf.name, 14, 0.9, 0.9, 0.94)
+        tf.level:ClearAllPoints(); tf.level:SetPoint("TOPRIGHT"); styleText(tf.level, 12, 0.8, 0.77, 0.63)
+        tf.hp:ClearAllPoints(); tf.hp:SetPoint("TOPLEFT", tf, "TOPLEFT", 0, -19)
+        tf.hp:SetSize(targetW, targetH); styleText(tf.hp.text, 10, 1, 1, 1)
+        tf.hp:SetStatusBarTexture(BAR_TEX); tf.hp.frame:Hide()
+        tf.pw:Hide(); tf.tot:SetShown(DB.targetOfTarget and true or false)
+        tf.totBar:ClearAllPoints(); tf.totBar:SetPoint("TOPLEFT",tf.hp,"BOTTOMLEFT",0,-4)
+        tf.totBar:SetWidth(targetW); tf.tot:SetWidth(targetW - 8); tf.totBar:SetShown(DB.targetOfTarget and plain(UnitExists("targettarget"), false) and true or false)
+        -- Target casts get a separate lane above the header, clear of helper icons.
+        local targetCastScale=castScale*DRU.partScale("targetCast")
+        local tcW,tcH,tcX,tcY=DRU.geometry("targetCast",blockW-23,20)
+        tf.cast:ClearAllPoints();tf.cast:SetScale(targetCastScale/targetScale)
+        tf.cast:SetPoint("BOTTOMLEFT",tf,"TOPLEFT",tcH+3+tcX/targetCastScale,12+tcY/targetCastScale)
+        tf.cast:SetSize(tcW,tcH);tf.cast.icon:SetSize(tcH,tcH);tf.cast.frame:Hide()
+        tDirty.all = true
+        DBagsAlertsState.dotTiles = used
+        DBagsAlertsState.casterHUD = {width=width, dotY=dotY, castY=castY, utilityY=utilityY, frame=deck, frameless=true, class=CLASS, form=ctx.form, power=POWER, melee=not DRU.caster}
+        if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end
+    end
+    local elapsed, shardAt = 0, 0
+    -- Native own-aura display: no spell-name lookup or target GUID required.
+    -- Secret icons/timing pass straight to Blizzard display widgets.
+    local nativeAt, nativeCache = -1, nil
+    local function nativeDruidDots(now)
+        if CLASS ~= "DRUID" then return false end
+        -- Secret aura access can be forbidden outright, not merely return
+        -- hidden fields. Check permission BEFORE enumerating any aura IDs.
+        local allowed = not InCombatLockdown()
+        if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+            local ok, restricted = pcall(C_Secrets.ShouldAurasBeSecret)
+            allowed = ok and not secret(restricted) and restricted == false
+        end
+        if not allowed then
+            if DRU.nativeDotsMode ~= false then trackedDots() end
+            nativeAt, nativeCache = -1, nil
+            return false -- use readable own-cast timers, never inspect hidden auras
+        end
+        local api = C_UnitAuras
+        if not (api and api.GetUnitAuraInstanceIDs and api.GetAuraDataByAuraInstanceID and api.GetAuraDuration) then return false end
+        if DRU.nativeDotsMode ~= true then nativeAt = -1 end
+        DRU.nativeDotsMode = true
+        if nativeCache ~= DRU.targetAuraCache or now - nativeAt >= 0.5 then
+            nativeAt, nativeCache = now, DRU.targetAuraCache
+            for _, f in ipairs(dots) do f:Hide() end
+            wipe(used)
+            if ctx.hostile then
+                local ids = api.GetUnitAuraInstanceIDs("target", "HARMFUL|PLAYER", 6)
+                if not secret(ids) and not sectable(ids) and type(ids) == "table" then
+                    for _, id in ipairs(ids) do
+                        if not secret(id) and type(id) == "number" and #used < 6 then
+                            local aura = api.GetAuraDataByAuraInstanceID("target", id)
+                            if not secret(aura) and not sectable(aura) and aura then
+                                local i = #used + 1
+                                local f = tile(i)
+                                f.name = plain(aura.name, nil)
+                                f.auraID = id
+                                f:SetSize(40,40); f:ClearAllPoints()
+                                f:SetScale(dotScale)
+                                f:SetPoint("TOPLEFT", main, "TOPLEFT", dotX / dotScale + ((i - 1) % dotColumns) * 46, -dotY / dotScale - math.floor((i - 1) / dotColumns) * 47)
+                                f.icon:SetTexture(aura.icon)
+                                f.icon:SetDesaturated(false); f.shade:SetAlpha(0); f:SetAlpha(1)
+                                f.num:SetText(""); f.bar:SetValue(0)
+                                local exp, duration = plain(aura.expirationTime, nil), plain(aura.duration, nil)
+                                local threshold = f.name and refreshAt[f.name] or 0
+                                setRefreshGlow(f, ctx.combat and exp and duration and duration > 0
+                                    and exp > now and exp - now <= duration * threshold)
+                                local ok, durationObject = pcall(api.GetAuraDuration, "target", id)
+                                if ok and durationObject then f.nativeCD:SetCooldownFromDurationObject(durationObject)
+                                else f.nativeCD:Clear() end
+                                f.nativeCD:Show(); f:Show()
+                                used[#used + 1] = f
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return true
+    end
+    local driver = CreateFrame("Frame")
+    driver:SetScript("OnUpdate", function(_, dt)
+        if not DRU.lux or not DB then return end
+        elapsed = elapsed + dt
+        if elapsed < 0.1 then return end
+        elapsed = 0
+        local now = GetTime()
+        if now >= shardAt then
+            shardAt = now + 0.5
+            if CLASS == "WARLOCK" and spell["Drain Soul"] then shardText:SetFormattedText("Shards %d/%d", DRU.bags(), DB.shardGoal or 5)
+            else shardText:SetText("") end
+        end
+        -- The unit frame shows every target; combat helpers still require an enemy.
+        tf:SetShown(DB.target and plain(UnitExists("target"), false) and true or false)
+        if nativeDruidDots(now) then return end
+        local key = ctx.hostile and targetKey()
+        for _, f in ipairs(used) do
+            f:SetShown(ctx.hostile and true or false)
+            local left, length, nativeDuration
+            if ctx.hostile then left, length, nativeDuration = dotLeft(f.name, now, key) end
+            local refreshSoon = left ~= nil and length ~= nil and length > 0
+                and left <= length * (refreshAt[f.name] or 0)
+            setRefreshGlow(f, ctx.hostile and ctx.combat and not nativeDuration and (not left or left <= 0 or refreshSoon))
+            f.nativeCD:SetShown(nativeDuration ~= nil)
+            if nativeDuration then
+                f.nativeCD:SetCooldownFromDurationObject(nativeDuration)
+                f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
+                f.num:SetText(""); f.bar:SetValue(0)
+            elseif left and left > 0 then
+                f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
+                f.num:SetFormattedText("%d", math.ceil(left))
+                f.bar:SetValue(length > 0 and left / length or 0)
+                local soon = refreshSoon
+                f.num:SetTextColor(1, soon and 0.73 or 1, soon and 0.28 or 1)
+                f.bar:SetStatusBarColor(soon and 0.95 or 0.55, soon and 0.62 or 0.38, soon and 0.20 or 0.78)
+            else
+                f.shade:SetAlpha(1); f.icon:SetDesaturated(true)
+                f:SetAlpha(ctx.hostile and 0.8 or 0.35)
+                f.num:SetText(""); f.bar:SetValue(0)
+            end
+        end
+    end)
+    if DBagsAlertsDebug then
+        local callback = driver:GetScript("OnUpdate")
+        if callback then driver:SetScript("OnUpdate", DBagsAlertsDebug.guard("DoT HUD", callback)) end
+    end
+end
+
+local REACTION = { [1] = { 0.85, 0.1, 0.1 }, [2] = { 0.85, 0.1, 0.1 }, [3] = { 0.85, 0.35, 0.1 },
+                   [4] = { 0.9, 0.8, 0.1 }, [5] = { 0.1, 0.8, 0.1 }, [6] = { 0.1, 0.8, 0.1 },
+                   [7] = { 0.1, 0.8, 0.1 }, [8] = { 0.1, 0.8, 0.1 } }
+local POWER_COLOR = { [0] = { 0.2, 0.45, 1 }, [1] = { 0.85, 0.15, 0.15 }, [2] = { 1, 0.5, 0.25 },
+                      [3] = { 1, 0.85, 0.1 }, [6] = { 0, 0.8, 1 } }
+
+local function updateTargetHealth()
+    pcall(tf.hp.SetMinMaxValues, tf.hp, 0, UnitHealthMax("target"))
+    setBar(tf.hp, UnitHealth("target"))
+    local h, m = UnitHealth("target"), UnitHealthMax("target")
+    if not secret(h) and not secret(m) and m and m > 0 then
+        tf.hp.text:SetFormattedText("%d%%", h / m * 100 + 0.5)
+    elseif UnitHealthPercent and CurveConstants and CurveConstants.ScaleTo100 then
+        local ok, pct = pcall(UnitHealthPercent, "target", false, CurveConstants.ScaleTo100)
+        if ok then pcall(tf.hp.text.SetFormattedText, tf.hp.text, "%.0f%%", pct) end
+    end
+end
+
+local function updateTargetPower()
+    local pt = plain(UnitPowerType("target"), 0)
+    local c = POWER_COLOR[pt] or POWER_COLOR[0]
+    tf.pw:SetStatusBarColor(c[1], c[2], c[3])
+    pcall(tf.pw.SetMinMaxValues, tf.pw, 0, UnitPowerMax("target", pt))
+    setBar(tf.pw, UnitPower("target", pt))
+end
+
+local function updateToT()
+    local show = DB.target and DB.targetOfTarget and plain(UnitExists("targettarget"), false)
+    tf.totBar:SetShown(show and true or false); tf.tot:SetShown(show and true or false)
+    if not show then tf.tot:SetText("") return end
+    tf.totBar:SetMinMaxValues(0, UnitHealthMax("targettarget"))
+    tf.totBar:SetValue(UnitHealth("targettarget"), Enum.StatusBarInterpolation and Enum.StatusBarInterpolation.ExponentialEaseOut)
+    pcall(tf.tot.SetFormattedText, tf.tot, "> %s", UnitName("targettarget"))
+    tf.tot:SetTextColor(1, 1, 1)
+end
+
+local function updateTarget()
+    if not DB.target or not plain(UnitExists("target"), false) then tf:Hide() return end
+    tf:Show()
+    if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end   -- keep the right-click area on it
+    pcall(tf.name.SetText, tf.name, UnitName("target"))
+    local lvl = UnitLevel("target")
+    local cls = plain(UnitClassification("target"), "normal")
+    local elite = (cls == "elite" or cls == "rareelite" or cls == "worldboss") and "+" or ""
+    if secret(lvl) then tf.level:SetText(elite)
+    else tf.level:SetText((lvl == -1 and "??" or tostring(lvl)) .. elite) end
+    local r, g, b = 0.85, 0.1, 0.1
+    if plain(UnitIsPlayer("target"), false) then
+        local _, c = UnitClass("target")
+        c = plain(c, nil)
+        local cc = c and RAID_CLASS_COLORS and RAID_CLASS_COLORS[c]
+        if cc then r, g, b = cc.r, cc.g, cc.b end
+    else
+        local re = plain(UnitReaction("target", "player"), nil)
+        if re and REACTION[re] then r, g, b = REACTION[re][1], REACTION[re][2], REACTION[re][3] end
+    end
+    if plain(UnitIsTapDenied("target"), false) then r, g, b = 0.5, 0.5, 0.5 end   -- someone else's mob
+    tf.hp:SetStatusBarColor(r, g, b)
+    updateTargetHealth(); updateTargetPower(); updateToT()
+    refreshCast(tf.cast, "target", true)
+end
+
+-- Place your cast bar under the bars, and the target frame to the right of the block.
+layoutExtras = function(width, x, y)
+    local gb = classic() and 9 or 1           -- room for the gold frames in Classic style
+    if not DRU.caster then                    -- caster look: the cast bar sits under your mana instead
+        castPlayer:ClearAllPoints()
+        castPlayer:SetWidth(blockW - 23)
+        castPlayer:SetPoint("TOPLEFT", main, "TOPLEFT", x + 23, -(y + gb + 2))
+        y = y + 22 + gb + 6
+    end
+    local rowTop = (DB.stack ~= false and SPOT[CLASS]) and (SPOT_SIZE.buff + (classic() and 15 or 2)) or 0
+    tf:ClearAllPoints()
+    tf:SetPoint("TOPLEFT", main, "TOPLEFT", width + 22, -rowTop)
+    tf.name:ClearAllPoints(); tf.name:SetPoint("TOPLEFT", tf, "TOPLEFT", 0, 0); tf.name:SetWidth(TARGET_W - 40)
+    tf.level:ClearAllPoints(); tf.level:SetPoint("TOPRIGHT", tf, "TOPRIGHT", 0, 0)
+    tf.hp:SetWidth(TARGET_W); tf.hp:ClearAllPoints(); tf.hp:SetPoint("TOPLEFT", tf, "TOPLEFT", 0, -(18 + gb))
+    tf.pw:SetWidth(TARGET_W); tf.pw:ClearAllPoints(); tf.pw:SetPoint("TOPLEFT", tf.hp, "BOTTOMLEFT", 0, -gb)
+    tf.totBar:ClearAllPoints(); tf.totBar:SetPoint("TOPLEFT",tf.pw,"BOTTOMLEFT",0,-4)
+    tf.cast:SetScale(1); tf.cast:SetWidth(TARGET_W - 23); tf.cast:ClearAllPoints()
+    tf.cast:SetPoint("TOPLEFT", DB.targetOfTarget and tf.totBar or tf.pw, "BOTTOMLEFT", 23, -(gb + 2))
+    tf.totBar:SetWidth(TARGET_W)
+    tf.tot:ClearAllPoints(); tf.tot:SetPoint("LEFT", tf.totBar, "LEFT", 4, 0); tf.tot:SetWidth(TARGET_W - 8)
+    tf:SetScale(DRU.partScale("target")); tf.totBar:SetShown(DB.targetOfTarget and plain(UnitExists("targettarget"), false) and true or false)
+    tDirty.all = true
+    return y
+end
+
+-- Hide Blizzard's own frames (out of combat only; /reload brings them back).
+local blizzHider = CreateFrame("Frame"); blizzHider:Hide()
+local function hideBlizzard()
+    if not DB.hideBlizz or InCombatLockdown() then return end
+    for _, f in ipairs({ PlayerFrame, TargetFrame, PlayerCastingBarFrame or CastingBarFrame }) do
+        if f then pcall(function() f:UnregisterAllEvents(); f:SetParent(blizzHider) end) end
+    end
+end
+
+do   -- missing buff reminder (own block: Lua's 200 top-level locals limit)
+    -- Battle Shout fell off? A gold-glowing icon sits left of the block, in or out of
+    -- combat. Out of combat with too little rage it shows Bloodrage first (free rage),
+    -- then Battle Shout. Hidden in towns/inns, on a mount, and when dead.
+    local NAG = { WARRIOR = { buff = "Battle Shout", helper = "Bloodrage" } }
+    do      -- class is only known after login, so the frame is always made and checks it live
+        local cfg
+        local f = CreateFrame("Frame", nil, main)
+        f:SetSize(44, 44)
+        f:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, 0)
+        f:Hide()
+        f.icon = f:CreateTexture(nil, "ARTWORK")
+        f.icon:SetAllPoints(); f.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        addBorder(f, 0, 0, 0, 1, 1)
+        f.gold = goldFrame(f, 4)
+        f.glow = f:CreateTexture(nil, "OVERLAY", nil, 7)
+        f.glow:SetTexture(MEDIA .. "ProcGlow.tga"); f.glow:SetBlendMode("ADD")
+        f.glow:SetVertexColor(1, 0.82, 0.25); f.glow:SetPoint("CENTER")
+        f.glow:SetSize(44 / 0.64, 44 / 0.64)
+        local ga = f:CreateAnimationGroup()
+        ga:SetLooping("BOUNCE")
+        local fa = ga:CreateAnimation("Alpha")
+        fa:SetFromAlpha(1); fa:SetToAlpha(0.55); fa:SetDuration(0.6)
+        ga:Play()
+        f.text = f:CreateFontString(nil, "OVERLAY")
+        styleText(f.text, 13, 1, 0.82, 0.2)
+        f.text:SetPoint("TOP", f, "BOTTOM", 0, -3)
+        DBagsAlertsState.buffNag = f
+
+        -- seconds of buff left: the real aura when the game shows it, else our cast timer
+        -- In combat WoW hides auras from addons: then "no aura" does NOT mean "no buff".
+        -- So: read the aura only when the game isn't hiding them, remember the end time
+        -- we last saw, and in combat use that (or our own cast timer, whichever is later).
+        local seenEnd                   -- plain expiration time from the last real read
+        local seenNone                  -- last real read said: not on you
+        local function aurasHidden()
+            if not (C_Secrets and C_Secrets.ShouldAurasBeSecret) then return false end
+            local ok, r = pcall(C_Secrets.ShouldAurasBeSecret)
+            return not ok or secret(r) or r == true
+        end
+        local function buffLeft()   -- (cfg set by check)
+            local now = GetTime()
+            if not aurasHidden() and C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName then
+                local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", cfg.buff, "HELPFUL")
+                if ok and not secret(a) and not sectable(a) then
+                    if not a then seenEnd = nil; seenNone = true; return 0 end
+                    seenNone = false
+                    local e = a.expirationTime
+                    if not secret(e) then
+                        if not e or e == 0 then seenEnd = math.huge; return 999 end
+                        seenEnd = e
+                        return e - now
+                    end
+                end
+            end
+            local mine = timeLeft(cfg.buff)
+            local seen = seenEnd and (seenEnd - now) or 0
+            -- never seen it either way and no cast of ours: don't guess "missing"
+            if not seenEnd and not seenNone and mine <= 0 then return 999 end
+            return math.max(mine, seen)
+        end
+        local function plainYes(v) return v == true end    -- secret or table -> no
+        local shownKey, floatingAnchor
+        local function check()
+            cfg = CLASS and NAG[CLASS]
+            -- Both layouts use this single reminder. Keep it above the helper cues
+            -- in the floating HUD, clear of the Rend timer and next-spell icon.
+            local floating = DRU.lux and true or false
+            if floatingAnchor ~= floating then
+                floatingAnchor = floating
+                f:ClearAllPoints()
+                local _,_,x,y=DRU.geometry("buff")
+                local scale=DRU.partScale("helpers")*DRU.partScale("buff")
+                if floating then f:SetPoint("BOTTOMLEFT", main, "TOPRIGHT", (12+x)/scale, (8+y)/scale)
+                else f:SetPoint("TOPRIGHT", main, "TOPLEFT", (-10+x)/scale, y/scale) end
+            end
+            if not cfg or not DB or DB.buffNag == false or not spell[cfg.buff] or UnitIsDeadOrGhost("player") or IsMounted()
+               or (IsResting() and not ctx.combat) then
+                f:Hide(); shownKey = nil return
+            end
+            if buffLeft() > 10 then f:Hide(); shownKey = nil return end
+            -- out of combat, rage too low to shout: Bloodrage first
+            local show = cfg.buff
+            if not ctx.combat and not plainYes(usable(cfg.buff)) and spell[cfg.helper] and plainYes(ready(cfg.helper)) then
+                show = cfg.helper
+            end
+            if show ~= shownKey then
+                shownKey = show
+                f.icon:SetTexture(C_Spell.GetSpellTexture(spell[show]) or DEFAULT_ICON)
+                f.text:SetText(show == cfg.helper and "BLOODRAGE" or "SHOUT")
+            end
+            f.gold:SetShown(classic())
+            f:Show()
+        end
+        local t = 0
+        local drv = CreateFrame("Frame")
+        drv:SetScript("OnUpdate", function(_, e)
+            t = t + e
+            if t < 0.25 then return end
+            t = 0
+            pcall(check)
+        end)
+    end
+end
+
+do   -- stance reminder (own block: Lua's 200 top-level locals limit)
+    -- Icy Veins (Forever prot leveling): "Open with Charge when possible, then swap to
+    -- Defensive Stance" - Revenge and your main tank tools need it. So: in a fight with
+    -- an enemy, out of Defensive for more than 2 seconds (time to Charge / Overpower /
+    -- Intercept), a big DEFENSIVE icon flashes a bit above the middle of the screen.
+    local f = CreateFrame("Frame", nil, UIParent)
+    f:SetSize(64, 64)
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 190)
+    f:SetFrameStrata("HIGH")
+    f:Hide()
+    f.icon = f:CreateTexture(nil, "ARTWORK")
+    f.icon:SetAllPoints(); f.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    addBorder(f, 0, 0, 0, 1, 1)
+    f.gold = goldFrame(f, 4)
+    f.glow = f:CreateTexture(nil, "OVERLAY", nil, 7)
+    f.glow:SetTexture(MEDIA .. "ProcGlow.tga"); f.glow:SetBlendMode("ADD")
+    f.glow:SetVertexColor(1, 0.3, 0.2); f.glow:SetPoint("CENTER")
+    f.glow:SetSize(64 / 0.64, 64 / 0.64)
+    f.text = f:CreateFontString(nil, "OVERLAY")
+    styleText(f.text, 22, 1, 0.3, 0.25)
+    f.text:SetPoint("TOP", f, "BOTTOM", 0, -4)
+    f.text:SetText("DEFENSIVE")
+    local ga = f:CreateAnimationGroup()          -- flashing
+    ga:SetLooping("BOUNCE")
+    local fa = ga:CreateAnimation("Alpha")
+    fa:SetFromAlpha(1); fa:SetToAlpha(0.25); fa:SetDuration(0.4)
+    DBagsAlertsState.stanceNag = f
+
+    -- is Defensive Stance the active stance? true / false, or nil when we can't tell
+    local function inDefensive()
+        local id = spell["Defensive Stance"]
+        if not id or not GetNumShapeshiftForms or not GetShapeshiftFormInfo then return nil end
+        local okN, n = pcall(GetNumShapeshiftForms)
+        if not okN or secret(n) or not n then return nil end
+        for i = 1, n do
+            local ok, _, active, _, sid = pcall(GetShapeshiftFormInfo, i)
+            if ok and not secret(sid) and not secret(active) then
+                local okName, nm = pcall(C_Spell.GetSpellName, sid)
+                if sid == id or (okName and nm == "Defensive Stance") then return active and true or false end
+            end
+        end
+        return nil
+    end
+    DBagsAlertsState.inDefensive = inDefensive
+
+    local offSince
+    local t = 0
+    local drv = CreateFrame("Frame")
+    drv:SetScript("OnUpdate", function(_, e)
+        t = t + e
+        if t < 0.2 then return end
+        t = 0
+        pcall(function()
+            local want = DB and DB.stanceNag ~= false and CLASS == "WARRIOR" and ctx.combat and ctx.hostile
+                         and not UnitIsDeadOrGhost("player")
+            local def = want and inDefensive()
+            if want and def == false then
+                offSince = offSince or GetTime()
+                if GetTime() - offSince >= 2 then
+                    if not f:IsShown() then
+                        f.icon:SetTexture(C_Spell.GetSpellTexture(spell["Defensive Stance"]) or DEFAULT_ICON)
+                        f.gold:SetShown(classic()); f.glow:SetShown(not DRU.lux)
+                        f:SetSize(DRU.lux and 40 or 64, DRU.lux and 40 or 64)
+                        styleText(f.text, DRU.lux and 12 or 22, 1, 0.3, 0.25)
+                        f:ClearAllPoints()
+                        if DRU.lux then f:SetPoint("TOPLEFT", main, "TOPRIGHT", 2, -146)
+                        else f:SetPoint("CENTER", UIParent, "CENTER", 0, 190) end
+                        f:Show(); ga:Play()
+                    end
+                    return
+                end
+            else
+                offSince = nil
+            end
+            if f:IsShown() then ga:Stop(); f:Hide() end
+        end)
+    end)
+end
+
+do   -- eat-food reminder (own block: Lua's 200 top-level locals limit)
+    -- Forever: every cooked food gives Well Fed + "Well Fed XP Boost" (+5% XP from
+    -- kills, Wowhead spell 1243969, a hidden aura). Out of combat, when you have no
+    -- Well Fed and a food in your bags says "well fed", an EAT button shows. Click it
+    -- to eat (one click = one use, like an action button). Hidden in combat, on a
+    -- mount, when dead, at max level, and while you're already eating.
+    local XP_AURA = 1243969
+    local b = CreateFrame("Button", "DBagsAlertsEatButton", UIParent, "SecureActionButtonTemplate")
+    b:SetSize(44, 44)
+    b:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, -72)
+    b:RegisterForClicks("AnyUp", "AnyDown")
+    b:SetAttribute("type", "item")
+    b:Hide()
+    b.icon = b:CreateTexture(nil, "ARTWORK")
+    b.icon:SetAllPoints(); b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    addBorder(b, 0, 0, 0, 1, 1)
+    b.gold = goldFrame(b, 4)
+    b.glow = b:CreateTexture(nil, "OVERLAY", nil, 7)
+    b.glow:SetTexture(MEDIA .. "ProcGlow.tga"); b.glow:SetBlendMode("ADD")
+    b.glow:SetVertexColor(0.4, 1, 0.4); b.glow:SetPoint("CENTER")
+    b.glow:SetSize(44 / 0.64, 44 / 0.64)
+    local ga = b:CreateAnimationGroup()
+    ga:SetLooping("BOUNCE")
+    local fa = ga:CreateAnimation("Alpha")
+    fa:SetFromAlpha(1); fa:SetToAlpha(0.6); fa:SetDuration(0.7)
+    ga:Play()
+    b.text = b:CreateFontString(nil, "OVERLAY")
+    styleText(b.text, 13, 0.45, 1, 0.45)
+    b.text:SetPoint("TOP", b, "BOTTOM", 0, -3)
+    b.text:SetText("EAT")
+    b:SetScript("OnEnter", function(self)
+        if not self.itemID then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        pcall(GameTooltip.SetItemByID, GameTooltip, self.itemID)
+        GameTooltip:AddLine("Click to eat: +5% XP (Well Fed).", 0.45, 1, 0.45)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    DBagsAlertsState.eatButton = b
+
+    -- true = fed (or eating), false = not, nil = the game hides auras right now
+    local function hasAura(name)
+        local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", name, "HELPFUL")
+        if not ok or secret(a) or sectable(a) then return nil end
+        return a ~= nil
+    end
+    -- Out of combat buffs are readable; the "secret" flag is only trusted in combat
+    -- (this only runs out of combat anyway). Second value = which buff, for /pa food.
+    local function fed()
+        if not C_UnitAuras then return nil, "no aura API" end
+        if InCombatLockdown() and C_Secrets and C_Secrets.ShouldAurasBeSecret then
+            local ok, r = pcall(C_Secrets.ShouldAurasBeSecret)
+            if not ok or secret(r) or r == true then return nil, "buffs hidden" end
+        end
+        local wf, food, fd = hasAura("Well Fed"), hasAura("Food"), hasAura("Food & Drink")
+        if wf == nil then return nil, "buffs hidden" end
+        if wf then return true, "Well Fed" end
+        if food or fd then return true, "eating" end
+        return false, "not fed"
+    end
+
+    -- Does this item's tooltip promise Well Fed? Cached per item (nil = not loaded yet).
+    local isFood = {}
+    local function wellFedFood(id)
+        if isFood[id] ~= nil then return isFood[id] end
+        if not (C_TooltipInfo and C_TooltipInfo.GetItemByID) then return false end
+        local ok, data = pcall(C_TooltipInfo.GetItemByID, id)
+        if not ok or type(data) ~= "table" or sectable(data) or type(data.lines) ~= "table" then return nil end
+        local yes, hasUse = false, false
+        for _, line in ipairs(data.lines) do
+            local t = line.leftText
+            if type(t) == "string" and not secret(t) then
+                local low = t:lower()
+                if low:find("well fed", 1, true) then yes = true break end
+                if low:find("use:", 1, true) or low:find("sell price", 1, true) or low:find("max stack", 1, true) then hasUse = true end
+            end
+        end
+        -- a half-loaded tooltip (item not cached yet) has only a line or two: ask again later
+        if not yes and not hasUse and #data.lines < 4 then return nil end
+        isFood[id] = yes
+        return yes
+    end
+    local function minLevel(id)
+        local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+        if not getInfo then return 0 end
+        local ok, _, _, _, _, lvl = pcall(getInfo, id)
+        if ok and type(lvl) == "number" then return lvl end
+        return 0
+    end
+    -- the best well-fed food you can eat now: highest required level wins
+    local function findFood()
+        if not (C_Container and C_Container.GetContainerNumSlots and C_Container.GetContainerItemInfo) then return nil end
+        local myLevel = plain(UnitLevel("player"), 1) or 1
+        local best, bestLvl, bestIcon
+        local seen, done = {}, {}         -- what we looked at, for /pa food
+        for bag = 0, 4 do
+            local okN, n = pcall(C_Container.GetContainerNumSlots, bag)
+            for slot = 1, (okN and type(n) == "number" and n or 0) do
+                local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+                if ok and type(info) == "table" and not sectable(info) and info.itemID then
+                    local id = info.itemID
+                    local wf = wellFedFood(id)
+                    local lvl = minLevel(id)
+                    if not done[id] and #seen < 12 then
+                        done[id] = true
+                        seen[#seen + 1] = id .. "=" .. (wf == nil and "?" or (wf and "food" or "no")) .. "/lv" .. lvl
+                    end
+                    if wf and lvl <= myLevel and (not bestLvl or lvl > bestLvl) then
+                        best, bestLvl, bestIcon = id, lvl, info.iconFileID
+                    end
+                end
+            end
+        end
+        return best, bestIcon, table.concat(seen, " ")
+    end
+
+    local driven = false
+    local function hide()
+        if driven and UnregisterStateDriver then UnregisterStateDriver(b, "visibility") end
+        driven = false
+        b:Hide()
+    end
+    -- why the button is hidden, for "/pa food" and "check logs" (saved in DBagsAlertsDB)
+    local function note(why, extra)
+        if DB then DB.foodDebug = { why = why, extra = extra, at = date and date("%H:%M:%S") or "" } end
+    end
+    local function update()
+        if InCombatLockdown() then return end          -- secure button: only change it out of combat
+        local okM, maxLvl = pcall(GetMaxPlayerLevel or function() return 60 end)
+        if not okM or type(maxLvl) ~= "number" or secret(maxLvl) or maxLvl < 10 then maxLvl = 60 end
+        if not DB or DB.foodNag == false then hide() note("turned off") return end
+        if UnitIsDeadOrGhost("player") then hide() note("dead") return end
+        local lvl = plain(UnitLevel("player"), 1) or 1
+        if lvl >= maxLvl then hide() note("max level", maxLvl) return end
+        local f, which = fed()
+        if f ~= false then hide() note(f == nil and "can't read buffs" or "already fed / eating", which) return end
+        local id, icon, seen = findFood()
+        if not id then hide() note("no well-fed food found", seen) return end
+        note("showing", id)
+        if b.itemID ~= id then
+            b.itemID = id
+            b:SetAttribute("item", "item:" .. id)
+            b.icon:SetTexture(icon or (C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(id)) or DEFAULT_ICON)
+        end
+        b.gold:SetShown(classic()); b.glow:SetAlpha(DRU.lux and 0 or 1)
+        if not driven and RegisterStateDriver then
+            RegisterStateDriver(b, "visibility", "[combat][mounted][dead] hide; show")
+            driven = true
+        elseif not RegisterStateDriver then
+            b:Show()
+        end
+    end
+    DBagsAlertsState.foodUpdate = update
+
+    local ev = CreateFrame("Frame")
+    for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "BAG_UPDATE_DELAYED", "PLAYER_REGEN_ENABLED", "PLAYER_LEVEL_UP" }) do
+        pcall(ev.RegisterEvent, ev, e)
+    end
+    pcall(ev.RegisterUnitEvent, ev, "UNIT_AURA", "player")
+    local due = 0
+    ev:SetScript("OnEvent", function() due = 0 end)   -- check again on the next tick
+    ev:SetScript("OnUpdate", function(_, e)
+        due = due - e
+        if due > 0 then return end
+        due = 2                                          -- also every 2 s (buff running out)
+        pcall(update)
+    end)
+end
+
+do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
+    -- Main hand has no stone on it (sharpening stone for blades, weightstone for
+    -- blunt)? Out of combat a button shows: click = use the stone on your main hand
+    -- (a normal 2-line macro: /use stone, /use 16). No stone in your bags: a grey
+    -- "NO STONE" icon instead (can be turned off). Hidden in combat, mounted, dead.
+    local SHARP = { [0] = true, [1] = true, [6] = true, [7] = true, [8] = true, [9] = true, [15] = true, [13] = true }
+    local BLUNT = { [4] = true, [5] = true, [10] = true, [13] = true }
+    local b = CreateFrame("Button", "DBagsAlertsStoneButton", UIParent, "SecureActionButtonTemplate")
+    b:SetSize(44, 44)
+    b:SetPoint("TOPRIGHT", main, "TOPLEFT", -10, -144)
+    b:RegisterForClicks("AnyUp", "AnyDown")
+    b:Hide()
+    b.icon = b:CreateTexture(nil, "ARTWORK")
+    b.icon:SetAllPoints(); b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    addBorder(b, 0, 0, 0, 1, 1)
+    b.gold = goldFrame(b, 4)
+    b.glow = b:CreateTexture(nil, "OVERLAY", nil, 7)
+    b.glow:SetTexture(MEDIA .. "ProcGlow.tga"); b.glow:SetBlendMode("ADD")
+    b.glow:SetVertexColor(0.55, 0.8, 1); b.glow:SetPoint("CENTER")
+    b.glow:SetSize(44 / 0.64, 44 / 0.64)
+    local ga = b:CreateAnimationGroup()
+    ga:SetLooping("BOUNCE")
+    local fa = ga:CreateAnimation("Alpha")
+    fa:SetFromAlpha(1); fa:SetToAlpha(0.6); fa:SetDuration(0.7)
+    ga:Play()
+    b.text = b:CreateFontString(nil, "OVERLAY")
+    styleText(b.text, 13, 0.6, 0.85, 1)
+    b.text:SetPoint("TOP", b, "BOTTOM", 0, -3)
+    b:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        if self.itemID then
+            pcall(GameTooltip.SetItemByID, GameTooltip, self.itemID)
+            GameTooltip:AddLine("Click: put it on your main hand weapon.", 0.6, 0.85, 1)
+        else
+            GameTooltip:SetText(self.need or "Weapon stone", 1, 0.82, 0.2)
+            GameTooltip:AddLine("No stone in your bags. Blacksmiths make them; trade goods vendors and the Auction House sell them.", 1, 1, 1, true)
+            GameTooltip:AddLine("Turn this off: /pa > Show if I have none.", 0.7, 0.7, 0.7, true)
+        end
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    DBagsAlertsState.stoneButton = b
+
+    -- "sharp", "blunt" or nil for your main hand weapon
+    local function weaponKind()
+        local okI, id = pcall(GetInventoryItemID, "player", 16)
+        if not okI or not id or secret(id) then return nil end
+        local getI = C_Item and C_Item.GetItemInfoInstant or GetItemInfoInstant
+        if not getI then return nil end
+        local ok, _, _, _, _, _, classID, subID = pcall(getI, id)
+        if not ok or classID ~= 2 then return nil end      -- 2 = weapon
+        if SHARP[subID] and BLUNT[subID] then return "both" end
+        if SHARP[subID] then return "sharp" end
+        if BLUNT[subID] then return "blunt" end
+        return nil
+    end
+    -- stone on the main hand? true / false / nil (can't tell)
+    local function stoned()
+        if not GetWeaponEnchantInfo then return nil end
+        local ok, has, ms = pcall(GetWeaponEnchantInfo)
+        if not ok or secret(has) then return nil end
+        if not has then return false end
+        if not secret(ms) and type(ms) == "number" and ms < 60000 then return false end   -- under a minute left
+        return true
+    end
+    local function stoneKind(name)
+        if type(name) ~= "string" or secret(name) then return nil end
+        if name:find("Sharpening Stone", 1, true) then return "sharp" end
+        if name:find("Weightstone", 1, true) then return "blunt" end
+        return nil
+    end
+    local function itemName(id)
+        local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+        if not getInfo then return nil end
+        local ok, name, _, _, _, lvl = pcall(getInfo, id)
+        if ok then return name, (type(lvl) == "number" and lvl or 0) end
+    end
+    -- best stone for this weapon in your bags (highest required level you can use)
+    local function findStone(kind)
+        if not (C_Container and C_Container.GetContainerNumSlots and C_Container.GetContainerItemInfo) then return nil end
+        local myLevel = plain(UnitLevel("player"), 1) or 1
+        local best, bestLvl, bestIcon
+        for bag = 0, 4 do
+            local okN, n = pcall(C_Container.GetContainerNumSlots, bag)
+            for slot = 1, (okN and type(n) == "number" and n or 0) do
+                local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+                if ok and type(info) == "table" and not sectable(info) and info.itemID then
+                    local name, lvl = itemName(info.itemID)
+                    local k = stoneKind(name or info.itemName)
+                    if k and (kind == "both" or k == kind) and (lvl or 0) <= myLevel
+                       and (not bestLvl or lvl > bestLvl) then
+                        best, bestLvl, bestIcon = info.itemID, lvl, info.iconFileID
+                    end
+                end
+            end
+        end
+        return best, bestIcon
+    end
+
+    local driven = false
+    local function hide()
+        if driven and UnregisterStateDriver then UnregisterStateDriver(b, "visibility") end
+        driven = false
+        b:Hide()
+    end
+    local function show()
+        b.gold:SetShown(classic()); b.glow:SetAlpha(DRU.lux and 0 or 1)
+        if not driven and RegisterStateDriver then
+            RegisterStateDriver(b, "visibility", "[combat][mounted][dead] hide; show")
+            driven = true
+        elseif not RegisterStateDriver then
+            b:Show()
+        end
+    end
+    local function update()
+        if InCombatLockdown() then return end          -- secure button: only change it out of combat
+        if not DB or DB.stoneNag == false or CLASS == "DRUID" or CLASS == "WARLOCK" or CLASS == "PRIEST" or UnitIsDeadOrGhost("player") then hide() return end
+        local kind = weaponKind()
+        if not kind or stoned() ~= false then hide() return end
+        local id, icon = findStone(kind)
+        if id then
+            if b.itemID ~= id then
+                b.itemID = id
+                b:SetAttribute("type", "macro")
+                b:SetAttribute("macrotext", "/use item:" .. id .. "\n/use 16")
+                b.icon:SetTexture(icon or (C_Item and C_Item.GetItemIconByID and C_Item.GetItemIconByID(id)) or DEFAULT_ICON)
+                b.icon:SetDesaturated(false)
+                b.text:SetText(kind == "blunt" and "WEIGHT" or "SHARPEN")
+                b.text:SetTextColor(0.6, 0.85, 1)
+                b.glow:Show()
+            end
+            show()
+        elseif DB.stoneNeed ~= false then
+            if b.itemID or not b.need then
+                b.itemID = nil
+                b:SetAttribute("type", nil)
+                b.icon:SetTexture(kind == "blunt" and "Interface\\Icons\\INV_Stone_WeightStone_01"
+                                  or "Interface\\Icons\\INV_Stone_SharpeningStone_01")
+                b.icon:SetDesaturated(true)
+                b.text:SetText("NO STONE")
+                b.text:SetTextColor(0.6, 0.6, 0.6)
+                b.glow:Hide()
+            end
+            b.need = kind == "blunt" and "Weightstone" or "Sharpening Stone"
+            show()
+        else
+            hide()
+        end
+    end
+    DBagsAlertsState.stoneUpdate = update
+
+    local ev = CreateFrame("Frame")
+    for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "BAG_UPDATE_DELAYED", "PLAYER_REGEN_ENABLED",
+                         "PLAYER_EQUIPMENT_CHANGED", "UNIT_INVENTORY_CHANGED" }) do
+        pcall(ev.RegisterEvent, ev, e)
+    end
+    local due = 0
+    ev:SetScript("OnEvent", function() due = 0 end)
+    ev:SetScript("OnUpdate", function(_, e)
+        due = due - e
+        if due > 0 then return end
+        due = 3                                          -- also every 3 s (stone wearing off)
+        pcall(update)
+    end)
+end
+
+function DRU.applyHelperSize()
+    if not DB then return end
+    local relative=DRU.partScale("helpers")
+    for _,entry in ipairs({{"buffNag","buff","TOPRIGHT","TOPLEFT",-10,0},{"stanceNag","stance","CENTER","CENTER",0,190},
+        {"eatButton","food","TOPRIGHT","TOPLEFT",-10,-72},{"stoneButton","stone","TOPRIGHT","TOPLEFT",-10,-144}}) do
+        local frame=DBagsAlertsState[entry[1]]
+        if frame and ((entry[2]~="food" and entry[2]~="stone") or not InCombatLockdown()) then
+            local _,_,x,y=DRU.geometry(entry[2])
+            local scale=relative*DRU.partScale(entry[2])
+            if entry[2]=="food" or entry[2]=="stone" or entry[2]=="stance" then scale=scale*(DB.scale or 1) end
+            frame:SetScale(scale);frame:ClearAllPoints()
+            if entry[2]=="buff" and DRU.lux then
+                frame:SetPoint("BOTTOMLEFT",main,"TOPRIGHT",(12+x)/scale,(8+y)/scale)
+            else
+                frame:SetPoint(entry[3],entry[2]=="stance" and UIParent or main,entry[4],(entry[5]+x)/scale,(entry[6]+y)/scale)
+            end
+        end
+    end
+    local follow=DBagsAlertsState.followBuddy
+    if follow and follow.frame then follow.frame:SetScale((DB.scale or 1)*relative) end
+    local pet=DBagsAlertsState.petPanel
+    if pet and pet.configure then pet.configure() end
+end
+
+do   -- click buttons (own block: Lua's 200 top-level locals limit)
+    -- Blizzard's secure unit buttons over our frames: right-click = the normal WoW
+    -- menu (invite, whisper, trade...), left-click = target, mouseover = tooltip.
+    -- They sit on UIParent (not inside our frames) so hiding/moving our frames in
+    -- combat never touches them; they can only be moved out of combat.
+    local function makeClicker(unit, name)
+        local b = CreateFrame("Button", name, UIParent, "SecureUnitButtonTemplate")
+        b:SetAttribute("unit", unit)
+        b:SetAttribute("*type1", "target")
+        b:SetAttribute("*type2", "togglemenu")
+        b:RegisterForClicks("AnyUp")
+        b.unit = unit
+        b:SetScript("OnEnter", function(self)
+            if GameTooltip_SetDefaultAnchor then GameTooltip_SetDefaultAnchor(GameTooltip, self)
+            else GameTooltip:SetOwner(self, "ANCHOR_RIGHT") end
+            GameTooltip:SetUnit(self.unit)
+            GameTooltip:Show()
+        end)
+        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        return b
+    end
+    local tClick = makeClicker("target", "DBagsAlertsTargetClick")
+    local pClick = makeClicker("player", "DBagsAlertsPlayerClick")
+    if RegisterUnitWatch then RegisterUnitWatch(tClick) end   -- shows only while you have a target
+    local wanted = false
+    -- copy a frame's on-screen box onto a click button (positions in UIParent units)
+    local function cover(btn, f, h)
+        local l, t = f:GetLeft(), f:GetTop()
+        if not l or not t then return end
+        local k = f:GetEffectiveScale() / UIParent:GetEffectiveScale()
+        btn:ClearAllPoints()
+        btn:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", l * k, t * k)
+        btn:SetSize(f:GetWidth() * k, (h or f:GetHeight()) * k)
+    end
+    local function place()
+        if InCombatLockdown() then wanted = true return end   -- Blizzard rule: move them after combat
+        wanted = false
+        cover(tClick, tf, DRU.lux and ((tf:GetHeight() or 30) + (DB.targetOfTarget and 20 or 0)) or (18 + 9 + 28 + 9 + 8))
+        cover(pClick, healthBar)
+        pClick:SetShown(DB.target ~= false)
+        if DB.target == false then
+            if UnregisterUnitWatch then UnregisterUnitWatch(tClick) end
+            tClick:Hide()
+        elseif RegisterUnitWatch then
+            RegisterUnitWatch(tClick)
+        end
+    end
+    DBagsAlertsState.placeClickers = place
+    local w = CreateFrame("Frame")
+    w:RegisterEvent("PLAYER_REGEN_ENABLED")
+    w:SetScript("OnEvent", function() if wanted then place() end end)
+end   -- click buttons
+
+do   -- cursor ring (own block: Lua's 200 top-level locals limit)
+    -- A smooth ring in your class color around the mouse. Hidden while you hold
+    -- right-click to turn the camera (the cursor is hidden then too).
+    local cr = CreateFrame("Frame", "DBagsAlertsCursorRing", UIParent)
+    cr:SetFrameStrata("TOOLTIP")
+    cr:SetSize(48, 48)
+    cr:EnableMouse(false)
+    cr.t = cr:CreateTexture(nil, "OVERLAY")
+    cr.t:SetAllPoints()
+    cr.t:SetTexture(MEDIA .. "Ring.tga")
+    cr:Hide()
+    local characterRing = CreateFrame("Frame", nil, UIParent)
+    characterRing:SetFrameStrata("LOW")
+    characterRing:EnableMouse(false)
+    local markerBars = {}
+    for _, layer in ipairs({"ARTWORK", "OVERLAY"}) do
+        for axis = 1, 2 do
+            local bar = characterRing:CreateTexture(nil, layer)
+            bar:SetPoint("CENTER")
+            markerBars[#markerBars + 1] = bar
+        end
+    end
+    markerBars[1]:SetColorTexture(0.04, 0.03, 0.03, 0.95)
+    markerBars[2]:SetColorTexture(0.04, 0.03, 0.03, 0.95)
+    characterRing:Hide()
+
+    local lastRingSize
+    local function resizeCharacterRing()
+        local size = math.max(12, math.floor(DB.characterRingSize / 4 + 0.5))
+        if size ~= lastRingSize then
+            characterRing:SetSize(size + 4, size + 4)
+            markerBars[1]:SetSize(size + 4, 7)
+            markerBars[2]:SetSize(7, size + 4)
+            markerBars[3]:SetSize(size, 3)
+            markerBars[4]:SetSize(3, size)
+            lastRingSize = size
+        end
+    end
+
+
+    local lastX, lastY
+    local function refresh()
+        if not DB then return end
+        local s = DB.cursorSize or 48
+        cr:SetSize(s, s)
+        local cc = CLASS and RAID_CLASS_COLORS and RAID_CLASS_COLORS[CLASS]
+        if cc then cr.t:SetVertexColor(cc.r, cc.g, cc.b, 0.9) else cr.t:SetVertexColor(1, 0.82, 0.2, 0.9) end
+        if DB.characterRing then resizeCharacterRing() end
+        characterRing:ClearAllPoints()
+        characterRing:SetPoint("CENTER", UIParent, "CENTER", 0, DB.characterRingHeight + 56)
+        if cc then
+            markerBars[3]:SetColorTexture(cc.r, cc.g, cc.b, 1)
+            markerBars[4]:SetColorTexture(cc.r, cc.g, cc.b, 1)
+        end
+        characterRing:SetShown(DB.characterRing == true and InCombatLockdown())
+        lastX = nil
+    end
+    local markerEvents = CreateFrame("Frame")
+    markerEvents:RegisterEvent("PLAYER_REGEN_DISABLED")
+    markerEvents:RegisterEvent("PLAYER_REGEN_ENABLED")
+    markerEvents:SetScript("OnEvent", function(_, event)
+        characterRing:SetShown(DB ~= nil and DB.characterRing == true and event == "PLAYER_REGEN_DISABLED")
+    end)
+    DBagsAlertsState.cursorRefresh = refresh
+    local drv = CreateFrame("Frame")
+    drv:SetScript("OnUpdate", function()
+        if not DB then return end
+        local want = DB.cursor ~= false and not (IsMouselooking and IsMouselooking())
+            and (not DB.cursorCombat or InCombatLockdown())
+        if not want then
+            if cr:IsShown() then cr:Hide() end
+            return
+        end
+        if not cr:IsShown() then cr:Show() end
+        local x, y = GetCursorPosition()
+        if x ~= lastX or y ~= lastY then           -- only move it when the mouse moved
+            lastX, lastY = x, y
+            local sc = UIParent:GetEffectiveScale() or 1
+            if sc <= 0 then sc = 1 end
+            cr:ClearAllPoints()
+            cr:SetPoint("CENTER", UIParent, "BOTTOMLEFT", x / sc, y / sc)
+        end
+    end)
+end   -- cursor ring
+
+do   -- events block (own scope: Lua's 200 top-level locals limit)
+---------------------------------------------------------------------------
+-- Events
+---------------------------------------------------------------------------
+-- How it runs (copied from smooth addons): events mark what changed; work happens
+-- once, on the next frame. Alerts: at most 10x a second, and only when something
+-- changed - plus a slow check (3x a second in a fight, 2x out) for timers running out.
+local elapsed, auraDirty, errShown = 0, false, false
+local alertsDirty, lastAlerts = true, 0
+local spellsDirty, spellsAt = false, 0
+
+local function run(f)
+    local ok, err = pcall(f)
+    if not ok and DBagsAlertsDebug then DBagsAlertsDebug.record("Core update: " .. tostring(err)) end
+    if not ok and not errShown then   -- report once, never spam
+        errShown = true
+        say("|cffff5555error:|r %s", tostring(err))
+    end
+end
+
+local function rebuildSpells()
+    local before = 0
+    for _, id in pairs(spell) do before = before + id end
+    buildSpells()
+    findNearSpell()
+    wipe(durCache)
+    local after = 0
+    for _, id in pairs(spell) do after = after + id end
+    if after ~= before then          -- only redo the layout when your spells really changed
+        for _, a in ipairs(ALERTS) do a.iconName = nil end
+        layout()
+    end
+end
+
+main:SetScript("OnUpdate", function(_, dt)
+    if not DB then return end
+    if barsDirty.health then barsDirty.health = false; run(updateHealth) end
+    if barsDirty.power then barsDirty.power = false; run(updatePower) end
+    if barsDirty.threat then barsDirty.threat = false; run(updateThreat) end
+    if tDirty.all then
+        tDirty.all, tDirty.hp, tDirty.pw, tDirty.tot = false, false, false, false
+        run(updateTarget)
+    else
+        if tDirty.hp then tDirty.hp = false; run(updateTargetHealth) end
+        if tDirty.pw then tDirty.pw = false; run(updateTargetPower) end
+        if tDirty.tot then tDirty.tot = false; run(updateToT) end
+    end
+    if tDirty.castP then tDirty.castP = false; run(function() refreshCast(castPlayer, "player", false) end) end
+    if tDirty.castT then tDirty.castT = false; run(function() refreshCast(tf.cast, "target", true) end) end
+    elapsed = elapsed + dt
+    if elapsed < 0.1 then return end
+    local now = GetTime()
+    local fight = ctx.combat or ctx.hostile
+    if not alertsDirty and now - lastAlerts < (fight and 0.33 or 0.5) then return end
+    elapsed, alertsDirty, lastAlerts = 0, false, now
+    if spellsDirty and now - spellsAt > 0.5 and not InCombatLockdown() then
+        spellsDirty = false
+        run(rebuildSpells)
+    end
+    if auraDirty and not InCombatLockdown() then auraDirty = false; readAll() end
+    run(update)
+end)
+
+-- Swing bar: its own every-frame driver so it slides smoothly (one SetValue per frame).
+local swingDriver = CreateFrame("Frame")
+local rangeAt = 0
+swingDriver:SetScript("OnUpdate", function(_, dt)
+    if not DB then return end
+    updateSwing()
+    fadeCDs(dt)
+    local now = GetTime()
+    if now - rangeAt >= 0.1 then rangeAt = now; run(updateRange) end   -- range dot keeps up as you move
+end)
+
+-- Druid: power type follows the form (mana / rage / energy)
+DRU.refreshPower = function()
+    if CLASS ~= "DRUID" then return end
+    local p = plain(UnitPowerType("player"), POWER)
+    local id = plain(GetShapeshiftFormID and GetShapeshiftFormID(), nil)
+    local form = DRU.FORM[id or 0] or "caster"
+    local powerChanged = type(p) == "number" and p ~= POWER
+    if not powerChanged and form == DRU.layoutForm then return end
+    if powerChanged then POWER = p end
+    barsDirty.power = true
+    pcall(layout)
+end
+
+local ev = CreateFrame("Frame")
+ev:RegisterEvent("PLAYER_LOGIN")
+ev:SetScript("OnEvent", function(self, event, ...)
+    if event == "PLAYER_LOGIN" then
+        local _, class = UnitClass("player")
+        if not CLASS_ALERTS[class] then main:Hide(); return end
+        CLASS, ALERTS, CD_SPELLS = class, CLASS_ALERTS[class], CLASS_CDS[class]
+        POWER = (class == "PALADIN" or class == "WARLOCK" or class == "PRIEST") and MANA or RAGE
+        if class == "DRUID" then POWER = plain(UnitPowerType("player"), MANA) or MANA end
+        if POWER == MANA then rageBar:SetStatusBarColor(0.15, 0.4, 1) end
+        DBagsAlertsState.alerts = ALERTS
+        -- Was "ProtAlerts": take its settings once, then turn the old addon off
+        -- (both at once = two of everything on screen).
+        if not DBagsAlertsDB and type(ProtAlertsDB) == "table" then DBagsAlertsDB = CopyTable(ProtAlertsDB) end
+        local A = C_AddOns or {}
+        local loaded = (A.IsAddOnLoaded or IsAddOnLoaded or function() return false end)("ProtAlerts")
+        if loaded then
+            pcall(A.DisableAddOn or DisableAddOn, "ProtAlerts")
+            say("|cffff5555The old ProtAlerts addon is now turned off. Type /reload once.|r")
+        end
+        DBagsAlertsDB = DBagsAlertsDB or {}
+        DB = DBagsAlertsDB
+        if DB.characterRingZoom == nil and DB.characterRingSize == 132 then
+            DB.characterRingSize = DEFAULTS.characterRingSize
+        end
+        for k, v in pairs(DEFAULTS) do if DB[k] == nil then DB[k] = type(v) == "table" and CopyTable(v) or v end end
+        buildSpells()
+        findNearSpell()
+        layout()
+        self:RegisterEvent("SPELLS_CHANGED")
+        self:RegisterEvent("LEARNED_SPELL_IN_SKILL_LINE")
+        self:RegisterEvent("PLAYER_REGEN_ENABLED")
+        self:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+        self:RegisterUnitEvent("UNIT_AURA", "player", "target")
+        -- "something changed" events: they only set flags; the work happens once per frame
+        local function reg(e, u1, u2)
+            if u1 then pcall(self.RegisterUnitEvent, self, e, u1, u2) else pcall(self.RegisterEvent, self, e) end
+        end
+        reg("UNIT_HEALTH", "player", "target", "targettarget"); reg("UNIT_MAXHEALTH", "player", "target", "targettarget")
+        reg("UNIT_POWER_FREQUENT", "player", "target"); reg("UNIT_MAXPOWER", "player", "target")
+        reg("UNIT_TARGET", "target")
+        for _, e in ipairs({ "UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_DELAYED", "UNIT_SPELLCAST_CHANNEL_UPDATE" }) do
+            reg(e, "player", "target")
+        end
+        reg("UNIT_THREAT_LIST_UPDATE"); reg("UNIT_THREAT_SITUATION_UPDATE")
+        reg("PLAYER_TARGET_CHANGED"); reg("PLAYER_REGEN_DISABLED")
+        reg("SPELL_UPDATE_COOLDOWN"); reg("SPELL_UPDATE_USABLE")
+        reg("NAME_PLATE_UNIT_ADDED"); reg("NAME_PLATE_UNIT_REMOVED")
+        reg("UPDATE_SHAPESHIFT_FORM"); reg("UNIT_DISPLAYPOWER", "player")
+        for _, e in ipairs({ "UNIT_SPELLCAST_START", "UNIT_SPELLCAST_STOP", "UNIT_SPELLCAST_INTERRUPTED",
+            "UNIT_SPELLCAST_CHANNEL_START", "UNIT_SPELLCAST_CHANNEL_STOP" }) do reg(e, "player", "target") end
+        swing.hasEvent = pcall(self.RegisterEvent, self, "PLAYER_SWING")
+        pcall(self.RegisterUnitEvent, self, "UNIT_COMBAT", "player", "target")
+        pcall(self.RegisterUnitEvent, self, "UNIT_ATTACK_SPEED", "player")
+        pcall(self.RegisterUnitEvent, self, "UNIT_RANGEDDAMAGE", "player")
+        reg("START_AUTOREPEAT_SPELL"); reg("STOP_AUTOREPEAT_SPELL")
+        reg("PLAYER_EQUIPMENT_CHANGED")
+        readSpeed()
+        readAll()
+        hideBlizzard()
+        if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end
+        DRU.applyHelperSize()
+        say("%s loaded. /pa for settings.",
+            CLASS == "PALADIN" and (DB.tank and "Paladin (tank)" or "Paladin (damage)")
+            or CLASS == "DRUID" and "Druid" or CLASS == "WARLOCK" and "Warlock" or CLASS == "PRIEST" and "Priest" or "Warrior")
+        return
+    end
+    alertsDirty = true                 -- every event below can change what should light up
+    if event == "SPELLS_CHANGED" or event == "LEARNED_SPELL_IN_SKILL_LINE" then
+        -- fires a lot (stance swaps...): rebuild once, half a second after it settles
+        spellsDirty, spellsAt = true, GetTime()
+    elseif event == "UPDATE_SHAPESHIFT_FORM" or event == "UNIT_DISPLAYPOWER" then
+        DRU.refreshPower()
+    elseif event == "UNIT_HEALTH" or event == "UNIT_MAXHEALTH" then
+        local unit = ...
+        if unit == "target" then tDirty.hp = true elseif unit == "targettarget" then tDirty.tot = true else barsDirty.health = true end
+    elseif event == "UNIT_POWER_FREQUENT" or event == "UNIT_MAXPOWER" then
+        local unit, ptype = ...
+        if unit == "target" then tDirty.pw = true
+        else
+            barsDirty.power = true
+            if ptype == "RAGE" then onRage() end
+        end
+    elseif event == "UNIT_TARGET" then
+        tDirty.tot = true
+    elseif event == "PLAYER_TARGET_CHANGED" then
+        DRU.targetAuraCache = {}
+        barsDirty.threat = true
+        tDirty.all = true
+        -- if the game hides mob IDs, all mobs share one memory slot: wipe it for the new mob
+        rendAt["?"], sunder["?"], lastDebuff = nil, nil, nil
+        for _, t in pairs(DRU.dotAt) do t["?"] = nil end
+    elseif event == "UNIT_THREAT_LIST_UPDATE" or event == "UNIT_THREAT_SITUATION_UPDATE" then
+        barsDirty.threat = true
+        tDirty.tot = true
+    elseif event:find("^UNIT_SPELLCAST_") and event ~= "UNIT_SPELLCAST_SUCCEEDED" then
+        local unit = ...
+        if unit == "player" then tDirty.castP = true elseif unit == "target" then tDirty.castT = true end
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        local _, _, spellID = ...
+        onCast(spellID)
+    elseif event == "PLAYER_SWING" then
+        onSwing(...)
+    elseif event == "UNIT_COMBAT" then
+        local unit, action = ...
+        if unit == "target" then onTargetCombat(action) else onUnitCombat(...) end
+    elseif event == "UNIT_ATTACK_SPEED" or event == "UNIT_RANGEDDAMAGE" then
+        onAttackSpeed()
+    elseif event == "START_AUTOREPEAT_SPELL" or event == "STOP_AUTOREPEAT_SPELL" then
+        -- Wait for a real shot event; starting Shoot does not mean a shot landed.
+        swing.ranged = event == "START_AUTOREPEAT_SPELL"
+        swing.start, swing.dur = 0, 0
+        readSpeed()
+    elseif event == "PLAYER_EQUIPMENT_CHANGED" then
+        local slot = ...
+        if slot == 16 or slot == 18 then
+            swing.start, swing.dur = 0, 0
+            swing.speed, swing.rangedSpeed = nil, nil
+            readSpeed()
+        end
+    elseif event == "UNIT_AURA" then
+        if ... == "target" then DRU.targetAuraCache = {} end
+        auraDirty = true          -- read once on the next tick, not on every aura event
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        if DRU.layoutPending then layout() end
+        if DRU.applyHelperSize then DRU.applyHelperSize() end
+        readAll()
+        if event == "PLAYER_REGEN_ENABLED" then readSpeed() end
+    end
+end)
+
+end   -- events block
+
+-- (settings + macro code lives in its own block: Lua allows only 200 top-level locals)
+local makeMacros, toggleSettings
+do
+---------------------------------------------------------------------------
+-- Settings window (/pa). Plain words, big boxes, no commands to remember.
+---------------------------------------------------------------------------
+-- What each alert means, in plain words (shown in the settings window).
+local PLAIN = {
+    lowhp = { "Low health", "Shows your best defensive cooldown." },
+    taunt = { "Taunt", "Your target isn't attacking you." },
+    mocking = { "Mocking Blow", "Mark a loose enemy in melee when Taunt is on cooldown." },
+    rescueShout = { "Challenging Shout", "Emergency recovery when enough loose enemies are within 10 yards." },
+    kick = { "Interrupt", "Your target is casting." },
+    loose = { "Loose mobs", "Mobs attacking your group." },
+    block = { "Shield Block", "Less damage, more rage." },
+    revenge = { "Revenge", "Ready after a block, dodge or parry." },
+    slam = { "Shield Slam", "Off cooldown." },
+    vrush = { "Victory Rush", "Heal after a kill." },
+    clap = { "Thunder Clap", "Packs and elites." },
+    demo = { "Demo Shout", "Mobs deal less damage." },
+    execute = { "Execute", "Target under 20%." },
+    cleave = { "Cleave", "Extra threat on 2+ enemies. 40 rage; 60 with Shield Slam or heavy hits. Hides when queued." },
+    dump = { "Spend rage", "Heroic Strike on one enemy. Waits longer during heavy hits." },
+    sunder = { "Sunder Armor", "Stack to your Sunder setting." },
+    rend = { "Rend", "Start of a fight." },
+    shout = { "Battle Shout", "Buff missing." },
+    bloodrage = { "Bloodrage", "Low rage or before a pull." },
+    rfury = { "Righteous Fury", "Tank threat buff missing." },
+    seal = { "Seal", "No seal active." },
+    holyshield = { "Holy Shield", "Not active." },
+    swift = { "Swift Judgement", "Off cooldown." },
+    judge = { "Judgement", "Off cooldown, seal active." },
+    consecrate = { "Consecration", "Packs and elites." },
+    holystrike = { "Holy Strike", "Off cooldown." },
+    exorcism = { "Exorcism", "Undead and demons." },
+    wrath = { "Hammer of Wrath", "Target under 20%." },
+    lowmana = { "Low mana", "Under your Low mana setting." },
+    bless = { "Blessing", "Blessing missing." },
+    aura = { "Aura", "No aura active." },
+    -- warlock
+    fear = { "Fear", "Solo, 2+ mobs, health low." },
+    trance = { "Free Shadow Bolt", "Nightfall proc." },
+    drainlife = { "Drain Life", "Health under half." },
+    drainsoul = { "Drain Soul", "Dying mob, shards low." },
+    sburn = { "Shadowburn", "Finish a mob." },
+    conflag = { "Conflagrate", "Immolate is on." },
+    brand = { "Searing Pain", "Brand your pet's target." },
+    corrupt = { "Corruption", "Missing on target." },
+    bane = { "Bane of Agony", "Missing. Never early." },
+    immolate = { "Immolate", "Missing on target." },
+    siphon = { "Siphon Life", "Long fights." },
+    filler = { "Filler", "Shadow Bolt, wand or Incinerate." },
+    armor = { "Demon Armor", "Buff missing." },
+    pet = { "Summon pet", "No pet out." },
+    soullink = { "Soul Link", "Not active." },
+    curse = { "Curse", "Elites only." },
+    mkstone = { "Make Healthstone", "None in bags." },
+    lifetap = { "Life Tap", "Mana low, health fine." },
+    funnel = { "Health Funnel", "Pet health low." },
+    rof = { "Rain of Fire", "Group, 3+ mobs." },
+}
+
+---------------------------------------------------------------------------
+-- Macro maker. WoW keeps macros inside the game (and on Blizzard's servers), so
+-- editing the file on disk gets overwritten. The addon makes them in game instead,
+-- using Blizzard's own CreateMacro. Normal macros: one press = one thing.
+---------------------------------------------------------------------------
+local Q = 134400   -- question-mark icon: with #showtooltip WoW shows the real spell icon
+-- Every attack macro starts auto-attack. Defensive-only moves swap you back to
+-- Defensive Stance first (press once = stance, again = the move), so they also
+-- work after a stance dance. Shield Block rides along on Slam/Revenge - it is off
+-- the global cooldown (Icy Veins' own "Shield Slam with Shield Block" macro idea).
+local WARRIOR_MACROS = {
+    -- rotation
+    { "PA Slam", "#showtooltip Shield Slam\n/startattack\n/cast Shield Block\n/cast Shield Slam",
+      "Shield Slam + Shield Block + auto-attack." },
+    { "PA Revenge", "#showtooltip Revenge\n/startattack\n/cast [nostance:2] Defensive Stance; Shield Block\n/cast [stance:2] Revenge",
+      "Revenge + Shield Block + auto-attack." },
+    { "PA Clap", "#showtooltip Thunder Clap\n/startattack\n/cast Thunder Clap",
+      "Thunder Clap + auto-attack." },
+    { "PA Sunder", "#showtooltip Sunder Armor\n/startattack\n/cast Sunder Armor",
+      "Sunder + auto-attack." },
+    { "PA Rend", "#showtooltip Rend\n/startattack\n/cast Rend",
+      "Rend + auto-attack." },
+    { "PA Strike", "#showtooltip\n/startattack\n/cast [mod:shift] Cleave; Heroic Strike",
+      "Heroic Strike. Shift: Cleave." },
+    { "PA VRush", "#showtooltip Victory Rush\n/startattack\n/cast Victory Rush",
+      "Victory Rush + auto-attack." },
+    { "PA Bloodrage", "#showtooltip Bloodrage\n/startattack\n/cast Bloodrage",
+      "Bloodrage (free rage) + auto-attack." },
+    { "PA Block", "#showtooltip Shield Block\n/startattack\n/cast [nostance:2] Defensive Stance; Shield Block",
+      "Shield Block (goes Defensive first if needed)." },
+    -- threat / control
+    { "PA Taunt", "#showtooltip Taunt\n/startattack\n/cast [nostance:2] Defensive Stance; [@mouseover,harm,nodead][] Taunt",
+      "Mouseover taunt (goes Defensive first if needed)." },
+    { "PA Interrupt", "#showtooltip\n/startattack\n/cast [@mouseover,harm,nodead,stance:3][stance:3] Pummel; [@mouseover,harm,nodead][] Shield Bash",
+      "Mouseover Shield Bash / Pummel." },
+    { "PA Charge", function()
+          -- Vanguard (talent, 25+): Charge works in Defensive, so don't leave it
+          local okI, info = pcall(C_Spell.GetSpellInfo, "Vanguard")
+          local vid = okI and type(info) == "table" and not sectable(info) and plain(info.spellID, nil)
+          local known = vid and IsPlayerSpell and plain(IsPlayerSpell(vid), false)
+          if known then return "#showtooltip Charge\n/startattack\n/cast Charge" end
+          return "#showtooltip Charge\n/startattack\n/cast [nostance:1] Battle Stance; Charge"
+      end,
+      "Charge. Before Vanguard (25): 1st press Battle, 2nd Charge. Run /pa macros again after 25." },
+    { "PA Pull", "#showtooltip\n/cast [equipped:Bows] Shoot Bow; [equipped:Guns] Shoot Gun; [equipped:Crossbows] Shoot Crossbow; Throw",
+      "Ranged pull." },
+    -- stance dancing in combat
+    { "PA Overpower", "#showtooltip Overpower\n/startattack\n/cast [nostance:1] Battle Stance; Overpower",
+      "Battle Stance, then Overpower." },
+    { "PA Mocking", "#showtooltip Mocking Blow\n/startattack\n/cast [nostance:1] Battle Stance; Mocking Blow",
+      "Battle Stance, then Mocking Blow." },
+    { "PA Intercept", "#showtooltip Intercept\n/startattack\n/cast [nostance:3] Berserker Stance; Intercept",
+      "Berserker Stance, then Intercept." },
+    { "PA Fear Break", "#showtooltip Berserker Rage\n/cast [nostance:3] Berserker Stance; Berserker Rage",
+      "Berserker Stance, then Berserker Rage." },
+    { "PA Retaliation", "#showtooltip Retaliation\n/startattack\n/cast [nostance:1] Battle Stance; Retaliation",
+      "Battle Stance, then Retaliation. Press again after switching stance." },
+    { "PA Wall", "#showtooltip Shield Wall\n/cast [nostance:2] Defensive Stance; Shield Wall",
+      "Shield Wall (goes Defensive first if needed)." },
+    { "PA Stance", "#showtooltip\n/cast [stance:2] Battle Stance; Defensive Stance",
+      "Swap stance: Defensive <-> Battle. Icon shows where it goes.", "PA Defensive" },
+}
+
+-- Paladin: no stances. Attacks start auto-attack; help spells work on the friend
+-- under your mouse (or you). Different names so they never clash with warrior ones.
+local PALADIN_MACROS = {
+    { "PP Judge", "#showtooltip Judgement\n/startattack\n/cast Judgement",
+      "Judgement + auto-attack (taunts with Seal of Fury)." },
+    { "PP Taunt", "#showtooltip Judgement\n/startattack\n/cast [@mouseover,harm,nodead][] Judgement",
+      "Mouseover Judgement taunt." },
+    { "PP Snap", "#showtooltip Swift Judgement\n/startattack\n/cast [@mouseover,harm,nodead][] Swift Judgement\n/cast [@mouseover,harm,nodead][] Judgement",
+      "Emergency taunt: Swift Judgement + Judgement." },
+    { "PP Strike", "#showtooltip Holy Strike\n/startattack\n/cast Holy Strike",
+      "Holy Strike + auto-attack." },
+    { "PP Consecrate", "#showtooltip Consecration\n/startattack\n/cast Consecration",
+      "Consecration + auto-attack." },
+    { "PP Shield", "#showtooltip Holy Shield\n/startattack\n/cast Holy Shield",
+      "Holy Shield + auto-attack." },
+    { "PP Exorcism", "#showtooltip Exorcism\n/startattack\n/cast Exorcism",
+      "Exorcism + auto-attack." },
+    { "PP Stun", "#showtooltip Hammer of Justice\n/startattack\n/cast [@mouseover,harm,nodead][] Hammer of Justice",
+      "Mouseover Hammer of Justice (stops casts)." },
+    { "PP LoH", "#showtooltip Lay on Hands\n/cast [@mouseover,help,nodead][@player] Lay on Hands",
+      "Lay on Hands on mouseover friend, or you." },
+    { "PP BoP", "#showtooltip Blessing of Protection\n/cast [@mouseover,help,nodead][] Blessing of Protection",
+      "Blessing of Protection on mouseover friend." },
+    { "PP Freedom", "#showtooltip Blessing of Freedom\n/cast [@mouseover,help,nodead][@player] Blessing of Freedom",
+      "Blessing of Freedom on mouseover friend, or you." },
+}
+-- Druid: forms never cancel by accident (!), attacks start auto-attack, heals and buffs
+-- work on the friend under your mouse (or you).
+local CLASS_MACROS = { WARRIOR = WARRIOR_MACROS, PALADIN = PALADIN_MACROS, DRUID = {
+    { "PD Bear", function()
+          local f = spell["Dire Bear Form"] and "Dire Bear Form" or "Bear Form"
+          return "#showtooltip " .. f .. "\n/cast !" .. f
+      end, "Bear Form. Pressing it again never drops you out." },
+    { "PD Cat", "#showtooltip Cat Form\n/cast !Cat Form", "Cat Form. Pressing it again never drops you out." },
+    { "PD Maul", "#showtooltip Maul\n/startattack\n/cast Maul", "Maul + auto-attack." },
+    { "PD Swipe", "#showtooltip Swipe\n/startattack\n/cast Swipe", "Swipe + auto-attack." },
+    { "PD Growl", "#showtooltip Growl\n/startattack\n/cast [@mouseover,harm,nodead][] Growl", "Mouseover taunt." },
+    { "PD Bash", "#showtooltip Bash\n/startattack\n/cast [@mouseover,harm,nodead][] Bash", "Mouseover Bash (stops casts)." },
+    { "PD Claw", "#showtooltip Claw\n/startattack\n/cast Claw", "Claw + auto-attack." },
+    { "PD Rake", "#showtooltip Rake\n/startattack\n/cast Rake", "Rake + auto-attack." },
+    { "PD Rip", "#showtooltip Rip\n/startattack\n/cast Rip", "Rip + auto-attack." },
+    { "PD Prowl", "#showtooltip Prowl\n/cast [nostealth] Prowl", "Prowl. Pressing it again never drops stealth." },
+    { "PD Opener", function()
+          if spell["Ravage"] then return "#showtooltip\n/startattack\n/cast [stealth] Ravage; Shred" end
+          return "#showtooltip Shred\n/startattack\n/cast Shred"
+      end, "From Prowl: Ravage (Shred before you have it)." },
+    { "PD Rejuv", "#showtooltip Rejuvenation\n/cast [@mouseover,help,nodead][@player] Rejuvenation", "Rejuvenation on mouseover friend, or you." },
+    { "PD Regrowth", "#showtooltip Regrowth\n/cast [@mouseover,help,nodead][@player] Regrowth", "Regrowth on mouseover friend, or you." },
+    { "PD Swiftmend", "#showtooltip Swiftmend\n/cast [@mouseover,help,nodead][@player] Swiftmend", "Swiftmend on mouseover friend, or you." },
+    { "PD Mark", "#showtooltip Mark of the Wild\n/cast [@mouseover,help,nodead][@player] Mark of the Wild", "Mark of the Wild on mouseover friend, or you." },
+    { "PD Thorns", "#showtooltip Thorns\n/cast [@mouseover,help,nodead][@player] Thorns", "Thorns on mouseover friend (tank), or you." },
+    { "PD Innervate", "#showtooltip Innervate\n/cast [@mouseover,help,nodead][@player] Innervate", "Innervate on mouseover healer, or you." },
+},
+-- Warlock: main nukes send your pet in too; DoTs, curses and Fear work on the mob
+-- under your mouse (spread DoTs without changing target).
+WARLOCK = {
+    { "PK Bolt", "#showtooltip Shadow Bolt\n/petattack\n/cast Shadow Bolt", "Shadow Bolt + pet attacks." },
+    { "PK Immolate", "#showtooltip Immolate\n/petattack\n/cast Immolate", "Immolate + pet attacks." },
+    { "PK Searing", "#showtooltip Searing Pain\n/petattack\n/cast Searing Pain", "Searing Pain + pet attacks." },
+    { "PK Conflag", "#showtooltip Conflagrate\n/petattack\n/cast Conflagrate", "Conflagrate + pet attacks." },
+    { "PK Corruption", "#showtooltip Corruption\n/cast [@mouseover,harm,nodead][] Corruption", "Mouseover Corruption." },
+    { "PK Agony", function()
+          local n = spell["Bane of Agony"] and "Bane of Agony" or "Curse of Agony"
+          return "#showtooltip " .. n .. "\n/cast [@mouseover,harm,nodead][] " .. n
+      end, "Mouseover Bane of Agony." },
+    { "PK Siphon", "#showtooltip Siphon Life\n/cast [@mouseover,harm,nodead][] Siphon Life", "Mouseover Siphon Life." },
+    { "PK Curse", function()
+          local n = spell["Curse of the Elements"] and "Curse of the Elements" or "Curse of Weakness"
+          return "#showtooltip " .. n .. "\n/cast [@mouseover,harm,nodead][] " .. n
+      end, "Mouseover Curse of the Elements (Weakness before you have it)." },
+    { "PK Fear", "#showtooltip Fear\n/cast [@mouseover,harm,nodead][] Fear", "Mouseover Fear." },
+    { "PK Drain Life", "#showtooltip Drain Life\n/cast Drain Life", "Drain Life." },
+    { "PK Drain Soul", "#showtooltip Drain Soul\n/cast Drain Soul", "Drain Soul (shards)." },
+    { "PK Life Tap", "#showtooltip Life Tap\n/cast Life Tap", "Life Tap." },
+    { "PK Healthstone", "#showtooltip\n/use Major Healthstone\n/use Greater Healthstone\n/use Healthstone\n"
+          .. "/use Lesser Healthstone\n/use Minor Healthstone", "Eat your Healthstone (any size)." },
+    { "PK Make Stone", "#showtooltip Create Healthstone\n/cast Create Healthstone", "Make a Healthstone." },
+    { "PK Funnel", "#showtooltip Health Funnel\n/cast Health Funnel", "Heal your pet." },
+    { "PK Wand", "#showtooltip Shoot\n/cast !Shoot", "Wand. Pressing it again never stops it." },
+    { "PK Pet", "#showtooltip\n/petattack [@mouseover,harm,nodead][]", "Pet attacks mouseover mob, or your target." },
+    { "PK Pet Back", "/petfollow", "Pet comes back to you." },
+} }
+
+CLASS_MACROS.PRIEST = {
+    { "Priest Heal", "#showtooltip Flash Heal\n/cast [@mouseover,help,nodead][help,nodead][@player] Flash Heal", "Fast heal on your mouseover, target, or self." },
+    { "Priest Shield", "#showtooltip Power Word: Shield\n/cast [@mouseover,help,nodead][help,nodead][@player] Power Word: Shield", "Shield your mouseover, target, or self." },
+    { "Priest Renew", "#showtooltip Renew\n/cast [@mouseover,help,nodead][help,nodead][@player] Renew", "Renew your mouseover, target, or self." },
+    { "Priest Penance", "#showtooltip Penance\n/cast [@mouseover,help,nodead][help,nodead][harm,nodead][@player] Penance", "Heal an ally or hit your enemy." },
+    { "Priest Mending", "#showtooltip Prayer of Mending\n/cast [@mouseover,help,nodead][help,nodead][@player] Prayer of Mending", "Send a bouncing heal." },
+    { "Priest Wand", "#showtooltip Shoot\n/cast !Shoot", "Start your wand." },
+}
+
+makeMacros = function()
+    local list = CLASS_MACROS[CLASS]
+    if not list then say("no macros for this class.") return end
+    if InCombatLockdown() then say("can't create macros in combat.") return end
+    if not (CreateMacro and EditMacro and GetMacroIndexByName) then say("macros unavailable.") return end
+    local made, updated, failed = 0, 0, 0
+    for _, m in ipairs(list) do
+        local name, body = m[1], m[2]
+        if type(body) == "function" then body = body() end   -- some macros depend on talents
+        local idx = GetMacroIndexByName(name)
+        -- renamed macro: rewrite the old one in place so it stays on your action bar
+        if (not idx or idx == 0) and m[4] then idx = GetMacroIndexByName(m[4]) end
+        local ok
+        if idx and idx > 0 then
+            ok = pcall(EditMacro, idx, name, Q, body)
+            if ok then updated = updated + 1 end
+        else
+            local okC, newIdx = pcall(CreateMacro, name, Q, body, true)   -- true = this character only
+            ok = okC and newIdx and newIdx > 0
+            if not ok then   -- character slots full: use the shared (all characters) tab instead
+                okC, newIdx = pcall(CreateMacro, name, Q, body, false)
+                ok = okC and newIdx and newIdx > 0
+            end
+            if ok then made = made + 1 end
+        end
+        if not ok then failed = failed + 1 end
+    end
+    say("macros: %d new, %d updated%s.", made, updated, failed > 0 and (", " .. failed .. " failed (slots full?)") or "")
+    say("Open /macro, character tab.")
+    for _, m in ipairs(list) do say("  |cffffd100%s|r - %s", m[1], m[3]) end
+end
+
+local settings
+local function C(r, g, b) return r, g, b end
+
+local function makeCheck(parent, label, tip, get, set)
+    local b = CreateFrame("CheckButton", nil, parent)
+    b:SetSize(22, 22)
+    b:SetNormalTexture("Interface\\Buttons\\UI-CheckBox-Up")
+    b:SetPushedTexture("Interface\\Buttons\\UI-CheckBox-Down")
+    b:SetHighlightTexture("Interface\\Buttons\\UI-CheckBox-Highlight", "ADD")
+    b:SetCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check")
+    b.text = b:CreateFontString(nil, "OVERLAY")
+    styleText(b.text, 13, C(0.95, 0.95, 0.95))
+    b.text:SetPoint("LEFT", b, "RIGHT", 2, 0)
+    b.text:SetText(label)
+    b:SetScript("OnClick", function(self) set(self:GetChecked() and true or false) end)
+    if tip then
+        b:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(label, 1, 0.82, 0.2)
+            GameTooltip:AddLine(tip, 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+    b.refresh = function() b:SetChecked(get() and true or false) end
+    return b
+end
+
+local function makeSlider(parent, label, minV, maxV, step, fmt, get, set)
+    local s = CreateFrame("Slider", nil, parent)
+    s:SetOrientation("HORIZONTAL")
+    s:SetSize(190, 16)
+    s:SetMinMaxValues(minV, maxV)
+    s:SetValueStep(step)
+    if s.SetObeyStepOnDrag then s:SetObeyStepOnDrag(true) end
+    s:EnableMouseWheel(true)
+    local track = s:CreateTexture(nil, "BACKGROUND")
+    track:SetColorTexture(0.2, 0.2, 0.24, 1)
+    track:SetPoint("LEFT"); track:SetPoint("RIGHT"); track:SetHeight(4)
+    s:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
+    s.title = s:CreateFontString(nil, "OVERLAY")
+    styleText(s.title, 13, C(1, 0.82, 0.2))
+    s.title:SetPoint("BOTTOMLEFT", s, "TOPLEFT", 0, 2)
+    s.title:SetText(label)
+    s.val = s:CreateFontString(nil, "OVERLAY")
+    styleText(s.val, 14, C(1, 1, 1))
+    s.val:SetPoint("LEFT", s, "RIGHT", 10, 0)
+    s:SetScript("OnValueChanged", function(self, v)
+        v = math.floor(v / step + 0.5) * step
+        if self.busy then return end
+        set(v)
+        self.val:SetText(string.format(fmt, v))
+    end)
+    s:SetScript("OnMouseWheel", function(self, d) self:SetValue(self:GetValue() + d * step) end)
+    s.refresh = function()
+        s.busy = true; s:SetValue(get()); s.busy = false
+        s.val:SetText(string.format(fmt, get()))
+    end
+    return s
+end
+
+local function makeButton(parent, label, width, onClick)
+    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    b:SetSize(width, 28); b:SetText(label); b:SetScript("OnClick", onClick)
+    return b
+end
+
+local function heading(parent, text, y)
+    local fs = parent:CreateFontString(nil, "OVERLAY")
+    styleText(fs, 15, C(1, 0.82, 0.2))
+    fs:SetPoint("TOPLEFT", 16, y)
+    fs:SetText(text)
+    local line = parent:CreateTexture(nil, "ARTWORK")
+    line:SetColorTexture(1, 0.82, 0.2, 0.25)
+    line:SetPoint("TOPLEFT", fs, "BOTTOMLEFT", 0, -3); line:SetSize(328, 1)
+    return fs
+end
+
+-- Starter setup only changes presentation/features, never spell history or macros.
+function DBagsAlertsState.starterSetup(restore)
+    if not DB or InCombatLockdown() then say("Change the setup after combat.");return false end
+    local keys={"scale","customSizes","locked","lux","off","stack","names","advice","target","casts","hideBlizz","cursor","buffNag","stanceNag","foodNag","stoneNag","stoneNeed","range","sound"}
+    local modules={healerMana={"enabled","range"},partyDefensives={"enabled","groupRange","placeholders"},petPanel={"enabled"},followBuddy={"enabled"}}
+    if restore then
+        local old=DB.starterBackup;if not old then say("No previous setup saved.");return false end
+        for key,value in pairs(old.fields) do DB[key]=value.value end
+        for name,fields in pairs(old.modules) do
+            DB[name]=DB[name] or {};for key,value in pairs(fields) do DB[name][key]=value.value end
+        end
+        DB.starterBackup=nil
+    else
+        local old={fields={},modules={}}
+        for _,key in ipairs(keys) do old.fields[key]={value=DB[key]};DB[key]=type(DEFAULTS[key])=="table" and CopyTable(DEFAULTS[key]) or DEFAULTS[key] end
+        for name,fields in pairs(modules) do
+            DB[name]=DB[name] or {};old.modules[name]={}
+            for _,key in ipairs(fields) do old.modules[name][key]={value=DB[name][key]};DB[name][key]=false end
+        end
+        -- Retain the first pre-review setup if Starter is pressed twice.
+        DB.starterBackup=DB.starterBackup or old
+    end
+    layout();DRU.applyHelperSize()
+    say("Setup changed. /reload to finish applying it.")
+    return true
+end
+local function buildSettings()
+    local outer = CreateFrame("Frame", "DBagsAlertsSettings", UIParent, "BackdropTemplate")
+    outer:SetSize(760, 580); outer:SetPoint("CENTER"); outer:SetFrameStrata("DIALOG")
+    DBagsAlertsState.prepareSettingsWindow(outer, "main"); outer.opened = false
+    outer:SetBackdrop({bgFile="Interface\\DialogFrame\\UI-DialogBox-Background",edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile=true,tileSize=32,edgeSize=24,insets={left=6,right=6,top=6,bottom=6}})
+    local title=outer:CreateFontString(nil,"OVERLAY");styleText(title,20,1,0.82,0.2)
+    title:SetPoint("TOPLEFT",24,-18);title:SetText("DBagsAlerts")
+    local close=CreateFrame("Button",nil,outer,"UIPanelCloseButton");close:SetPoint("TOPRIGHT",-8,-8)
+    close:SetScript("OnClick",function() outer:Hide() end)
+    local items,pages,tabs,independent={},{},{},{}
+    outer.controls={};outer.pages=pages;outer.tabs=tabs
+    local function refresh()
+        for _,item in ipairs(items) do item.refresh() end
+        for _,item in ipairs(independent) do
+            item:EnableMouse(DB.customSizes);item:EnableMouseWheel(DB.customSizes);item:SetAlpha(DB.customSizes and 1 or 0.4)
+        end
+    end
+    local function selectPage(key)
+        if not pages[key] then key="display" end
+        for name,page in pairs(pages) do page.scroll:SetShown(name==key);tabs[name]:SetAlpha(name==key and 1 or 0.65) end
+        DB.settingsPage=key;outer.selectedPage=key;refresh()
+    end
+    outer.selectPage=selectPage
+    local function page(key,label)
+        local index=#outer.tabs+1
+        outer.tabs[index]=key
+        local tab=makeButton(outer,label,140,function() selectPage(key) end)
+        tab:SetPoint("TOPLEFT",20,-65-(index-1)*40);tabs[key]=tab
+        local scroll=CreateFrame("ScrollFrame",nil,outer,"UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT",184,-62);scroll:SetPoint("BOTTOMRIGHT",-38,24)
+        local body=CreateFrame("Frame",nil,scroll);body:SetWidth(510);scroll:SetScrollChild(body)
+        local heading=body:CreateFontString(nil,"OVERLAY");styleText(heading,17,1,0.82,0.2)
+        heading:SetPoint("TOPLEFT",8,0);heading:SetText(label)
+        local result={body=body,scroll=scroll,y=-40};pages[key]=result
+        return result
+    end
+    local function relayout() layout();tDirty.all=true;if DRU.applyHelperSize then DRU.applyHelperSize() end end
+    local function check(page,key,label,tip,get,set)
+        local widget=makeCheck(page.body,label,tip,get or function() return DB[key] end,set or function(v) DB[key]=v;relayout() end)
+        widget:SetPoint("TOPLEFT",4,page.y);page.y=page.y-32
+        widget.text:SetWidth(455);styleText(widget.text,14,0.94,0.94,0.9)
+        items[#items+1]=widget;outer.controls[key]=widget;return widget
+    end
+    local function slider(page,key,label,lo,hi,step,fmt,get,set,custom)
+        local widget=makeSlider(page.body,label,lo,hi,step,fmt,get,set)
+        widget:SetWidth(340);widget:SetPoint("TOPLEFT",12,page.y-22);page.y=page.y-66
+        items[#items+1]=widget;outer.controls[key]=widget
+        if custom then independent[#independent+1]=widget end
+        return widget
+    end
+    local function button(page,key,label,callback)
+        local widget=makeButton(page.body,label,300,callback)
+        widget:SetPoint("TOPLEFT",8,page.y);page.y=page.y-42;outer.controls[key]=widget;return widget
+    end
+    local display=page("display","Display")
+    check(display,"locked","Lock HUD position","Uncheck to drag the HUD.")
+    check(display,"stack","Large spell cue","Show one clear next-spell cue.")
+    check(display,"names","Spell names","Show the spell name below the cue.")
+    check(display,"classic","Classic borders","Use WoW borders and glossy bars.",function() return DB.style~="clean" end,function(v) DB.style=v and "classic" or "clean";relayout() end)
+    check(display,"sound","Alert sound","Play a sound for danger alerts.")
+    button(display,"preview","Preview HUD",function() testUntil=GetTime()+8 end)
+    button(display,"starter","Use starter setup",function() DBagsAlertsState.starterSetup();refresh() end)
+    button(display,"restoreStarter","Restore my previous setup",function() DBagsAlertsState.starterSetup(true);refresh() end)
+    local frames=page("frames","Frames")
+    check(frames,"target","Target frame","Show the selected player's or enemy's health.")
+    check(frames,"targetOfTarget","Target of Target","Show who your target is targeting, with a small health bar. Off by default.",nil,function(v) DB.targetOfTarget=v;if v then DB.target=true end;relayout();refresh() end)
+    check(frames,"casts","Cast bars","Show your casts and target casts.")
+    check(frames,"range","Aggro dots","Green: on you. Yellow: threat at risk. Red: on someone else.")
+    check(frames,"swing","Swing timer","Show melee or ranged attack timing.",function() return not DB.off.swing end,function(v) DB.off.swing=not v or nil;relayout() end)
+    check(frames,"hideBlizz","Hide Blizzard frames","Turning this off needs /reload to restore the default frames.",nil,function(v) DB.hideBlizz=v;if v then hideBlizzard() else say("/reload restores Blizzard frames.") end end)
+    local sizes=page("sizes","Sizes")
+    slider(sizes,"scale","Whole HUD",0.6,2,0.05,"%.2fx",function() return DB.scale end,function(v) DB.scale=v;relayout() end)
+    check(sizes,"customSizes","Separate sizes","Off by default. Turn on to resize each part.",nil,function(v) DB.customSizes=v;relayout();refresh() end)
+    -- One selected component at a time, rather than a wall of sliders.
+    local parts={
+        {"target","Target frame",280,9},{"health","Health bar",280,14},{"power","Power bar",280,18},
+        {"playerCast","Your cast bar",253,26},{"targetCast","Target cast bar",257,20},
+        {"threat","Threat bar",280,3},{"swing","Swing timer",280,3},{"pet","Pet frame",356,19},
+        {"alerts","Spell cues"},{"dots","Debuff timers"},{"cooldowns","Cooldown row"},
+        {"buff","Buff reminder"},{"stance","Stance reminder"},{"food","Food reminder"},{"stone","Weapon stone"},
+        {"player","All player bars",false},{"casts","Both cast bars",false},{"helpers","All reminders",false},
+    }
+    local partLabel=sizes.body:CreateFontString(nil,"OVERLAY");styleText(partLabel,16,1,0.82,0.2)
+    partLabel:SetPoint("TOP",sizes.body,"TOP",0,sizes.y-6)
+    local partGroups={};outer.partGroups=partGroups;local selected=1
+    local function selectPart(key)
+        for i,entry in ipairs(parts) do if entry[1]==key then selected=i end end
+        for i,group in ipairs(partGroups) do group.body:SetShown(i==selected) end
+        partLabel:SetText(parts[selected][2]);DB.layoutPart=parts[selected][1]
+    end
+    outer.selectPart=selectPart
+    local previous=makeButton(sizes.body,"<",38,function() selectPart(parts[(selected-2)%#parts+1][1]) end)
+    previous:SetPoint("TOPLEFT",8,sizes.y)
+    local nextPart=makeButton(sizes.body,">",38,function() selectPart(parts[selected%#parts+1][1]) end)
+    nextPart:SetPoint("TOPRIGHT",-8,sizes.y)
+    sizes.y=sizes.y-50
+    for i,entry in ipairs(parts) do
+        local key,label,w,h=unpack(entry)
+        local frame=CreateFrame("Frame",nil,sizes.body);frame:SetSize(490,350);frame:SetPoint("TOPLEFT",0,sizes.y)
+        local group={body=frame,y=0};partGroups[i]=group
+        slider(group,"size_"..key,"Size",0.6,2,0.05,"%.2fx",function() return DB.partSizes[key] or 1 end,
+            function(v) if DB.customSizes then DB.partSizes[key]=v;relayout() end end,true)
+        if w then
+            for _,field in ipairs({{"width","Width",120,600,5,w},{"height",key=="pet" and "Pet health height" or "Health bar height",3,80,1,h}}) do
+                local fieldKey,fieldLabel,lo,hi,step,default=unpack(field)
+                if fieldKey=="height" and key~="target" and key~="pet" then fieldLabel="Height" end
+                local dbKey=key=="target" and (fieldKey=="width" and "targetWidth" or "targetHeight")
+                slider(group,dbKey or ("geometry_"..key.."_"..fieldKey),fieldLabel,lo,hi,step,"%d px",function()
+                    return dbKey and DB[dbKey] or (DB.geometry[key] and DB.geometry[key][fieldKey]) or default
+                end,function(v)
+                    if not DB.customSizes then return end
+                    if dbKey then DB[dbKey]=v else DB.geometry[key]=DB.geometry[key] or {};DB.geometry[key][fieldKey]=v end
+                    relayout()
+                end,true)
+            end
+        end
+        if w~=false then
+            for _,axis in ipairs({{"x","Left / right",-800,800},{"y","Up / down",-600,600}}) do
+                local field,label,lo,hi=unpack(axis)
+                local dbKey=key=="target" and (field=="x" and "targetX" or "targetY")
+                slider(group,dbKey or ("geometry_"..key.."_"..field),label,lo,hi,5,"%d px",function()
+                    return dbKey and DB[dbKey] or (DB.geometry[key] and DB.geometry[key][field]) or 0
+                end,function(v)
+                    if not DB.customSizes then return end
+                    if dbKey then DB[dbKey]=v else DB.geometry[key]=DB.geometry[key] or {};DB.geometry[key][field]=v end
+                    relayout()
+                end,true)
+            end
+        end
+    end
+    selectPart(DB.layoutPart or "target")
+    sizes.y=sizes.y-350
+    slider(sizes,"partySize","Party cooldown icons",20,44,2,"%d px",function() return DB.partyDefensives and DB.partyDefensives.size or 28 end,
+        function(v) DB.partyDefensives=DB.partyDefensives or {};DB.partyDefensives.size=v;if DBagsAlertsState.partyDefensives then DBagsAlertsState.partyDefensives.update() end end)
+    slider(sizes,"characterRingSize","Character marker size",24,200,2,"%d px",function() return DB.characterRingSize end,
+        function(v) DB.characterRingSize=v; DBagsAlertsState.cursorRefresh() end)
+    slider(sizes,"characterRingHeight","Character marker height",-240,120,5,"%d px",function() return DB.characterRingHeight end,
+        function(v) DB.characterRingHeight=v; DBagsAlertsState.cursorRefresh() end)
+    slider(sizes,"cursorSize","Cursor ring",24,120,4,"%d px",function() return DB.cursorSize or 48 end,
+        function(v) DB.cursorSize=v;if DBagsAlertsState.cursorRefresh then DBagsAlertsState.cursorRefresh() end end)
+    button(sizes,"petSize","Pet size and position",function() if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end end)
+    button(sizes,"resetSizes","Reset separate sizes",function() for key in pairs(DB.partSizes) do DB.partSizes[key]=1 end;DB.targetWidth=280;DB.targetHeight=9;DB.targetX=0;DB.targetY=0;DB.geometry={};relayout();refresh() end)
+    local reminders=page("reminders","Reminders")
+    for _,entry in ipairs({{"buffNag","Missing buff","Remind me about Battle Shout and other upkeep buffs."},
+        {"stanceNag","Defensive Stance","Warn when tanking in the wrong stance."},{"foodNag","Food buff","Show food I can eat for the XP buff."},
+        {"stoneNag","Weapon stone","Remind me to sharpen or weight my weapon."},{"stoneNeed","Missing weapon stone","Show when I have no stone in my bags."},
+        {"advice","Rage tips","Show short rage-spending advice."},{"cursor","Cursor ring","Keep the cursor easy to find."},
+        {"cursorCombat","Cursor ring in combat only","Hide the ring outside combat."},
+        {"characterRing","Character marker","Show a class-colored plus during combat."}}) do
+        if entry[1] == "characterRing" or entry[1] == "characterRingZoom" then
+            check(reminders,entry[1],entry[2],entry[3],function() return DB[entry[1]] end,
+                function(v) DB[entry[1]] = v; DBagsAlertsState.cursorRefresh() end)
+        else
+            check(reminders,entry[1],entry[2],entry[3])
+        end
+    end
+    local alerts=page("alerts","Alerts")
+    for _,alert in ipairs(ALERTS) do
+        local key=alert.key;local text=PLAIN[key] or {key,""}
+        check(alerts,"alert_"..key,text[1],text[2],function() return not DB.off[key] end,function(v) DB.off[key]=not v or nil;relayout() end)
+    end
+    check(alerts,"cooldowns","Cooldown row","Show learned cooldowns below your bars.",function() return not DB.off.cooldowns end,function(v) DB.off.cooldowns=not v or nil;relayout() end)
+    local thresholds=page("thresholds","Class settings")
+    slider(thresholds,"lowHp","Low health",10,80,5,"%d%%",function() return DB.lowHp end,function(v) DB.lowHp=v end)
+    if CLASS=="WARRIOR" then
+        slider(thresholds,"dumpAt","Spend rage",30,100,5,"%d",function() return DB.dumpAt end,function(v) DB.dumpAt=v;relayout() end)
+        slider(thresholds,"dumpTank","Spend rage while taking heavy hits",50,100,5,"%d",function() return DB.dumpTank or 90 end,function(v) DB.dumpTank=v end)
+        slider(thresholds,"shoutMinimum","Loose enemies for Challenging Shout",2,8,1,"%d",
+            function() return DB.shoutMinimum or 3 end,function(v) DB.shoutMinimum=v end)
+        slider(thresholds,"sunderGoal","Sunder stacks on normal mobs",0,5,1,"%d",function() return DB.sunderGoal end,function(v) DB.sunderGoal=v end)
+    else
+        slider(thresholds,"lowMana","Low mana",5,60,5,"%d%%",function() return DB.lowMana end,function(v) DB.lowMana=v end)
+        if CLASS=="WARLOCK" then slider(thresholds,"shardGoal","Keep Soul Shards",1,20,1,"%d",function() return DB.shardGoal or 5 end,function(v) DB.shardGoal=v end) end
+        if CLASS=="PALADIN" then check(thresholds,"tank","Tank mode","Use tank buff reminders.") end
+    end
+    local group=page("group","Group")
+    button(group,"healer","Healer checks",function() if DBagsAlertsState.openHealerSettings then DBagsAlertsState.openHealerSettings() end end)
+    button(group,"party","Party cooldowns",function() if DBagsAlertsState.openPartyDefensives then DBagsAlertsState.openPartyDefensives() end end)
+    button(group,"groupRange","Group distance warning",function() if DBagsAlertsState.openGroupRange then DBagsAlertsState.openGroupRange() end end)
+    button(group,"follow","Follow buddy",function() if DBagsAlertsState.openFollowBuddy then DBagsAlertsState.openFollowBuddy() end end)
+    local tools=page("tools","Tools")
+    button(tools,"pets","Pet controls",function() if DBagsAlertsState.openPetSettings then DBagsAlertsState.openPetSettings() end end)
+    if CLASS == "PRIEST" then
+        button(thresholds, "priestMode", "Change Priest mode", function()
+            local nextMode = { Auto = "Shadow", Shadow = "Holy", Holy = "Discipline", Discipline = "Auto" }
+            DB.priestMode = nextMode[DB.priestMode or "Auto"] or "Auto"
+            say("Priest mode: " .. DB.priestMode)
+        end)
+    end
+    if CLASS_MACROS[CLASS] then button(tools,"macros","Create or update macros",makeMacros) end
+    button(tools,"debug","Debug and Lua errors",function() if DBagsAlertsDebug then DBagsAlertsDebug.open() end end)
+    for _,page in pairs(pages) do
+        local height=math.max(460,-page.y+24);page.body:SetHeight(height)
+        local scrollbar=rawget(page.scroll,"ScrollBar")
+        if scrollbar then scrollbar:SetShown(height>494) end
+    end
+    outer.refresh=refresh;selectPage(DB.settingsPage or "display")
+    if UISpecialFrames then table.insert(UISpecialFrames,"DBagsAlertsSettings") end
+    DBagsAlertsState.settingsFrame=outer
+    return outer
+end
+
+toggleSettings = function()
+    if not settings then settings = buildSettings() end
+    if settings:IsShown() and settings.opened then settings:Hide() return end
+    settings.opened = true
+    settings.refresh()
+    DBagsAlertsState.showSettingsWindow(settings, "main")
+end
+
+end   -- settings + macro block
+
+---------------------------------------------------------------------------
+-- Slash commands
+---------------------------------------------------------------------------
+local function desc(v)
+    if secret(v) then return "|cffff5555SECRET|r" end
+    if sectable(v) then return "|cffff5555SECRET TABLE|r" end
+    return tostring(v)
+end
+
+SLASH_DBAGSALERTS1 = "/pa"
+SLASH_DBAGSALERTS2 = "/dba"
+SlashCmdList.DBAGSALERTS = function(msg)
+    if not DB then
+        local option = (msg or ""):lower():match("^%s*(%S*)")
+        if (option=="" or option=="settings" or option=="options") and DBagsAlertsState.openPetSettings then
+            DBagsAlertsState.openPetSettings()
+        else say("Use /dbapet for pet controls on this class.") end
+        return
+    end
+    local cmd, rest = (msg or ""):lower():match("^(%S*)%s*(.-)$")
+    if cmd == "" or cmd == "settings" or cmd == "options" then
+        toggleSettings()
+    elseif cmd == "starter" or cmd == "restore" then
+        DBagsAlertsState.starterSetup(cmd=="restore")
+    elseif cmd == "unlock" or cmd == "lock" then
+        DB.locked = cmd == "lock"; layout()
+        say(DB.locked and "locked." or "unlocked. Drag to move, scroll to resize.")
+    elseif cmd == "macros" or cmd == "macro" then
+        makeMacros()
+    elseif cmd == "oldlook" or cmd == "newlook" then
+        DB.lux = cmd == "newlook"
+        layout()
+        say(DB.lux and "floating layout on. /pa oldlook to go back." or "previous layout on. /pa newlook for the floating one.")
+    elseif cmd == "test" then
+        testUntil = GetTime() + 8; say("preview on.")
+    elseif cmd == "scale" and tonumber(rest) then
+        DB.scale = math.max(0.5, math.min(2, tonumber(rest))); layout()
+    elseif cmd == "toggle" and rest ~= "" then
+        local found = rest == "cooldowns" or rest == "swing"
+        for _, a in ipairs(ALERTS) do if a.key == rest then found = a end end
+        if not found then say("no alert named %s. /pa list", rest) return end
+        DB.off[rest] = not DB.off[rest] or nil; layout()
+        say("%s is now %s.", rest, DB.off[rest] and "OFF" or "ON")
+    elseif cmd == "list" then
+        for _, a in ipairs(ALERTS) do say("  %s (%s) - %s", a.key, a.label, DB.off[a.key] and "OFF" or "on") end
+        say("  cooldowns (cooldown row) - %s", DB.off.cooldowns and "OFF" or "on")
+        say("  swing (swing timer bar) - %s", DB.off.swing and "OFF" or "on")
+    elseif cmd == "sunder" and tonumber(rest) then
+        DB.sunderGoal = math.max(0, math.min(5, tonumber(rest))); say("Sunder goal on normal mobs: %d", DB.sunderGoal)
+    elseif cmd == "tank" then
+        DB.tank = not DB.tank
+        say("tank mode %s.", DB.tank and "on" or "off")
+    elseif cmd == "mana" and tonumber(rest) then
+        DB.lowMana = math.max(5, math.min(90, tonumber(rest))); say("LOW MANA alert below %d%%.", DB.lowMana)
+    elseif cmd == "dump" and tonumber(rest) then
+        DB.dumpAt = math.max(20, math.min(100, tonumber(rest))); say("Rage dump alert at %d%%.", DB.dumpAt)
+    elseif cmd == "hp" and tonumber(rest) then
+        DB.lowHp = math.max(5, math.min(90, tonumber(rest))); say("LOW HP alert below %d%%.", DB.lowHp)
+    elseif cmd == "sound" then
+        DB.sound = not DB.sound; say("danger sound %s.", DB.sound and "ON" or "OFF")
+    elseif cmd == "reset" then
+        DBagsAlertsDB = nil; ReloadUI()
+    elseif cmd == "food" then
+        if DBagsAlertsState.foodUpdate then pcall(DBagsAlertsState.foodUpdate) end
+        local d = DB.foodDebug
+        if d then say("eat button: %s %s", tostring(d.why), tostring(d.extra or ""))
+        else say("eat button: not checked yet (try out of combat).") end
+    elseif cmd == "range" then
+        local d = DB.rangeDebug
+        if d then say("range %s: bar=%s book=%s 10yd=%s", tostring(d.spell), d.bar, d.book, d.close)
+        else say("range: target an enemy first.") end
+    elseif cmd == "debug" and DBagsAlertsDebug then
+        SlashCmdList.DBAGSDEBUG(rest)
+    elseif cmd == "debug" or cmd == "diagnostics" then
+        -- Run this once out of combat and once IN combat; it shows what Forever lets addons read.
+        say("combat=%s  enemies=%s  loose=%s", tostring(InCombatLockdown()), tostring(ctx.enemies), tostring(ctx.loose))
+        say("%s UnitPower=%s max=%s", POWER == MANA and "mana" or "rage", desc(UnitPower("player", POWER)), desc(UnitPowerMax("player", POWER)))
+        say("health=%s  target health=%s", desc(UnitHealth("player")), desc(UnitHealth("target")))
+        local id = spell["Revenge"] or spell["Heroic Strike"]
+        if id then
+            local c = C_Spell.GetSpellCooldown(id)
+            if type(c) == "table" and not sectable(c) then
+                say("cooldown isActive=%s isOnGCD=%s duration=%s", desc(c.isActive), desc(c.isOnGCD), desc(c.duration))
+            end
+            local u = C_Spell.IsSpellUsable(id)
+            say("IsSpellUsable=%s", desc(u))
+        end
+        local t = UnitDetailedThreatSituation("player", "target")
+        say("threat isTanking=%s  target casting=%s", desc(t), desc(UnitCastingInfo("target")))
+        say("curve helpers: power=%s health=%s bool=%s", tostring(UnitPowerPercent ~= nil),
+            tostring(UnitHealthPercent ~= nil), tostring(C_CurveUtil and C_CurveUtil.EvaluateColorValueFromBoolean ~= nil))
+        local okS, mh = pcall(UnitAttackSpeed, "player")
+        say("swing: PLAYER_SWING event=%s  weapon speed=%s  last swing=%.1fs", tostring(swing.hasEvent),
+            okS and desc(mh) or "error", swing.dur)
+        local n = 0 for _ in pairs(spell) do n = n + 1 end
+        say("%d spells known. Shield Block lasts %ss, Battle Shout %ss.", n, durationOf("Shield Block"), durationOf("Battle Shout"))
+    else
+        say("commands:")
+        say("  /pa unlock | lock  - move it")
+        say("  /pa test           - show all alerts for 8s")
+        say("  /pa scale 1.2      - size")
+        say("  /pa list | toggle <name> - turn alerts on/off")
+        say("  /pa sunder 2 | dump 70 | hp 35 - tune thresholds (warrior)")
+        say("  /pa tank | mana 20 - paladin: tank or damage setup, low mana %%")
+        say("  /pa sound          - sound on danger alerts")
+        say("  /pa debug          - what the game lets addons read (try in combat)")
+    end
+end

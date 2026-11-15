@@ -1,0 +1,4 @@
+<Bindings>
+    <Binding name="CLICK DBagsAlertsFollowButton:LeftButton" header="BINDING_HEADER_DBAGSALERTS" category="ADDONS"/>
+    <Binding name="CLICK DBagsAlertsMuteWakeButton:LeftButton" category="ADDONS"/>
+</Bindings>
