@@ -1,6 +1,15 @@
-# DBagsAlerts changes
+# Battle Buddy changes (formerly DBagsAlerts)
 
 Every released version, newest first.
+
+## 1.1.0 (2026-11-16)
+
+- **New name: Battle Buddy.** DBagsAlerts is now called Battle Buddy. It's the same addon with the same settings, so there's nothing to set up again. A one-time popup explains this after you update.
+- New command `/bbuddy`. The old `/dba` and the other commands still work.
+- **Taunt and Mocking Blow icons** above nameplates no longer show while those spells are on cooldown.
+- **Update notices.** If someone in your guild or group has a newer version, you get one message saying an update is out in the CurseForge app. Only version numbers are shared, and nothing is sent in combat.
+
+Fully restart WoW after updating (a new file was added).
 
 ## 1.0.23 (2026-11-15)
 

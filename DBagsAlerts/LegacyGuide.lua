@@ -191,7 +191,7 @@ local function attach()
     f:SetBackdrop({bgFile="Interface\\DialogFrame\\UI-DialogBox-Background", edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=16, insets={left=4,right=4,top=4,bottom=4}})
     f:SetBackdropBorderColor(0.55, 0.47, 0.3)
     local title = label(f, 16, 14, -14, 250)
-    title:SetText("DBags  |  Legacy picks"); title:SetTextColor(1, 0.82, 0.3)
+    title:SetText("Battle Buddy  |  Legacy picks"); title:SetTextColor(1, 0.82, 0.3)
     local mode = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     mode:SetSize(250, 24); mode:SetPoint("TOPLEFT", 14, -42)
     S.mode = mode

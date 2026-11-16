@@ -72,7 +72,7 @@ local function version()
  return api and api("DBagsAlerts","Version") or "unknown"
 end
 function D.report()
- local c=config();local out={"DBagsAlerts "..safe(version()),context(),"Debug recording: "..safe(c.enabled)}
+ local c=config();local out={"Battle Buddy (DBagsAlerts) "..safe(version()),context(),"Debug recording: "..safe(c.enabled)}
  local cd=DBagsAlertsState and DBagsAlertsState.partyCooldowns
  if cd and cd.summary then out[#out+1]=cd.summary() end
  local shared=DBagsAlertsDB and DBagsAlertsDB.partyDefensives or {}
@@ -143,11 +143,11 @@ D.open=open
 SLASH_DBAGSDEBUG1="/dbadebug"
 SlashCmdList.DBAGSDEBUG=function(message)
  message=(message or ""):lower()
- if message=="on" then install(true);print("DBagsAlerts: debug recording ON. /dbadebug to copy the report.")
- elseif message=="off" then install(false);print("DBagsAlerts: debug recording OFF.")
+ if message=="on" then install(true);print("Battle Buddy: debug recording ON. /dbadebug to copy the report.")
+ elseif message=="off" then install(false);print("Battle Buddy: debug recording OFF.")
  elseif message=="errors on" or message=="errors off" then
   if SetCVar then SetCVar("scriptErrors",message=="errors on" and "1" or "0") end
-  print("DBagsAlerts: Lua error display "..(message=="errors on" and "ON" or "OFF"))
+  print("Battle Buddy: Lua error display "..(message=="errors on" and "ON" or "OFF"))
  else open() end
 end
 local frame=CreateFrame("Frame");D.driver=frame

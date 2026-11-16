@@ -48,7 +48,7 @@ local ALERTS, CD_SPELLS   -- picked at login from the class tables below
 local spendLine           -- function, defined with the advice code below
 local tankingHard         -- function, defined with the advice code below
 local DB
-local function say(fmt, ...) print("|cffff7d0aDBags|r|cffc79c6eAlerts|r: " .. string.format(fmt, ...)) end
+local function say(fmt, ...) print("|cffff7d0aBattle|r |cffc79c6eBuddy|r: " .. string.format(fmt, ...)) end
 
 local DEFAULTS = {
     point = { "CENTER", "CENTER", 0, -170 },
@@ -236,9 +236,26 @@ end
 ---------------------------------------------------------------------------
 -- Readers that never throw. They return a plain boolean, or a secret one.
 ---------------------------------------------------------------------------
+-- Cooldowns we time ourselves from your own casts. In combat the game can hide cooldown numbers,
+-- and a hidden cooldown used to count as "ready", so Taunt / Mocking Blow showed while on cooldown.
+local OWN_CD = { ["Taunt"] = 10, ["Mocking Blow"] = 120, ["Challenging Shout"] = 600 }
+DRU.usedAt = {}
+local function ownCooldown(name)
+    local id = spell[name]
+    if id and GetSpellBaseCooldown then
+        local ok, ms = pcall(GetSpellBaseCooldown, id)
+        if ok and type(ms) == "number" and not secret(ms) and ms > 1500 then return ms / 1000 end
+    end
+    return OWN_CD[name]
+end
 local function ready(name)
     local id = spell[name]
     if not id then return false end
+    local used = DRU.usedAt[name]
+    if used then
+        if GetTime() - used < (ownCooldown(name) or 0) - 0.1 then return false end
+        DRU.usedAt[name] = nil
+    end
     local ok, c = pcall(C_Spell.GetSpellCooldown, id)
     if not ok or type(c) ~= "table" or sectable(c) then return true end
     if not secret(c.isOnGCD) and c.isOnGCD == true then return true end
@@ -379,6 +396,7 @@ local function onCast(spellID)
     local name = C_Spell.GetSpellName and C_Spell.GetSpellName(spellID)
     if type(name) ~= "string" or secret(name) then return end
     local now = GetTime()
+    if OWN_CD[name] then DRU.usedAt[name] = now end
     local group = GROUP_OF[name]
     if group then
         expires[group] = PERMANENT[group] and math.huge or now + durationOf(name)
@@ -692,7 +710,7 @@ end
 -- Alerts. Order inside a row = priority (left = most important).
 ---------------------------------------------------------------------------
 local ctx = {}
-DBagsAlertsState = { ctx = ctx, partScale = DRU.partScale, geometry = DRU.geometry }   -- read-only peek for /pa debug and testing
+DBagsAlertsState = { ctx = ctx, partScale = DRU.partScale, geometry = DRU.geometry, ready = ready }   -- read-only peek for /pa debug and testing
 DBagsAlertsState.tankSetup = function()
     if CLASS == "PALADIN" then return DB and DB.tank ~= false end
     if CLASS == "DRUID" then return ctx.form == "bear" end
@@ -5356,7 +5374,7 @@ local function buildSettings()
     outer:SetBackdrop({bgFile="Interface\\DialogFrame\\UI-DialogBox-Background",edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border",
         tile=true,tileSize=32,edgeSize=24,insets={left=6,right=6,top=6,bottom=6}})
     local title=outer:CreateFontString(nil,"OVERLAY");styleText(title,20,1,0.82,0.2)
-    title:SetPoint("TOPLEFT",24,-18);title:SetText("DBagsAlerts")
+    title:SetPoint("TOPLEFT",24,-18);title:SetText("Battle Buddy")
     local close=CreateFrame("Button",nil,outer,"UIPanelCloseButton");close:SetPoint("TOPRIGHT",-8,-8)
     close:SetScript("OnClick",function() outer:Hide() end)
     local items,pages,tabs,independent={},{},{},{}
@@ -5573,6 +5591,8 @@ end
 
 SLASH_DBAGSALERTS1 = "/pa"
 SLASH_DBAGSALERTS2 = "/dba"
+SLASH_DBAGSALERTS3 = "/bbuddy"
+SLASH_DBAGSALERTS4 = "/battlebuddy"
 SlashCmdList.DBAGSALERTS = function(msg)
     if not DB then
         local option = (msg or ""):lower():match("^%s*(%S*)")

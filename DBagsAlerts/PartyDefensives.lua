@@ -351,7 +351,7 @@ SlashCmdList.DBAGSPARTY = function(msg)
     if msg and msg:lower():match("^status") then
         refresh()
         if DBagsAlertsState.partyCooldowns then print(DBagsAlertsState.partyCooldowns.summary()) end
-        print("DBagsAlerts: " .. state.status .. ". RDY = confirmed; RDY~ = estimated; UP = active. Dim = not observed.")
+        print("Battle Buddy: " .. state.status .. ". RDY = confirmed; RDY~ = estimated; UP = active. Dim = not observed.")
         return
     end
     DBagsAlertsState.openPartyDefensives()

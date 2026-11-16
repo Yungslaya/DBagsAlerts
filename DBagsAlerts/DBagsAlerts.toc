@@ -1,9 +1,9 @@
 ## Interface: 16001
 ## X-Curse-Project-ID: 1791030
-## Title: |cffff7d0aDBags|r Alerts
-## Notes: Alerts, bars and helpers for Warrior, Paladin, Druid (all forms) and Warlock. Was ProtAlerts.
+## Title: |cffff7d0aBattle|r Buddy
+## Notes: Battle Buddy: alerts, bars and helpers for Warrior, Paladin, Druid (all forms) and Warlock. Was DBagsAlerts. Type /bbuddy
 ## Author: Yungslaya
-## Version: 1.0.23
+## Version: 1.1.0
 ## SavedVariables: DBagsAlertsDB
 
 Debug.lua
@@ -16,3 +16,4 @@ GroupRange.lua
 FollowBuddy.lua
 PetPanel.lua
 LegacyGuide.lua
+Notices.lua

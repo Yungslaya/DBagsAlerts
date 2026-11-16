@@ -159,7 +159,7 @@ state.snooze=function(seconds)
     local duration=math.max(10,math.min(300,tonumber(seconds) or config().muteSeconds))
     state.mutedUntil=GetTime()+duration;candidateSince=nil;hide()
     state.status=string.format("WAKE UP paused for %ds",duration)
-    print("DBagsAlerts: "..state.status)
+    print("Battle Buddy: "..state.status)
 end
 local muteButton=CreateFrame("Button","DBagsAlertsMuteWakeButton",UIParent)
 muteButton:SetSize(1,1);muteButton:SetPoint("BOTTOMLEFT",UIParent,"BOTTOMLEFT",-24,-24)
@@ -252,7 +252,7 @@ end
 SLASH_DBAGSGROUP1 = "/dbagroup"
 SlashCmdList.DBAGSGROUP = function(msg)
     if type(msg)~="string" or not msg:lower():match("^%s*status%s*$") then DBagsAlertsState.openGroupRange();return end
-    refresh(); print("DBagsAlerts: " .. state.status)
+    refresh(); print("Battle Buddy: " .. state.status)
     for _, e in ipairs(state.snapshot or {}) do
         print(string.format("%s: map %s, %s, %s", e.name, tostring(e.mapID or "unknown"),
             e.included and "counted" or "excluded", e.distance and string.format("%.1f yd", e.distance) or "distance unknown"))

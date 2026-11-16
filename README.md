@@ -1,6 +1,11 @@
-# DBagsAlerts (work in progress)
+# Battle Buddy (formerly DBagsAlerts)
 
-Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Paladin, Druid** (Bear, Cat, Balance and Restoration) **and Warlock** (Affliction, Demonology, Destruction). This was **ProtAlerts**.
+## What's new
+
+- **1.1.0:** DBagsAlerts is now called **Battle Buddy**. Same addon, same settings. New command `/bbuddy`. Taunt icons no longer show on cooldown, and you get a message when a newer version is out. Fully restart WoW after updating (a new file was added).
+
+
+Alerts, bars and helpers for **WoW: Forever** (Interface 16001): **Warrior, Paladin, Druid** (Bear, Cat, Balance and Restoration) **and Warlock** (Affliction, Demonology, Destruction). It was called **DBagsAlerts**, and before that **ProtAlerts**.
 
 > **WIP:** it's being built and tested while leveling. Expect changes and rough edges.
 

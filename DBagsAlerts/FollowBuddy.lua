@@ -3,7 +3,7 @@ local secret = issecretvalue or function() return false end
 local function plain(v) if not secret(v) then return v end end
 local state = {status="Choose a buddy", following=false}
 DBagsAlertsState.followBuddy = state
-_G.BINDING_HEADER_DBAGSALERTS = "DBagsAlerts"
+_G.BINDING_HEADER_DBAGSALERTS = "Battle Buddy"
 _G["BINDING_NAME_CLICK DBagsAlertsFollowButton:LeftButton"] = "Follow buddy"
 local function config()
     DBagsAlertsDB = DBagsAlertsDB or {}

@@ -417,6 +417,6 @@ end
 SLASH_DBAGSHEALER1 = "/dbahealer"
 SlashCmdList.DBAGSHEALER = function(msg)
     if type(msg) == "string" and msg:lower():match("^%s*status%s*$") then
-        refresh(); print("DBagsAlerts healer: " .. state.status)
+        refresh(); print("Battle Buddy healer: " .. state.status)
     else DBagsAlertsState.openHealerSettings() end
 end
