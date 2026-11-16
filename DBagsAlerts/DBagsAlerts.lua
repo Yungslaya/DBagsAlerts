@@ -351,8 +351,27 @@ local rendAt = {}        -- target key -> time cast
 local lastDebuff             -- { name, at, key } of our last Rend / Sunder cast
 local function targetKey()
     local g = UnitGUID("target")
-    if g == nil or secret(g) then return "?" end
-    return g
+    if g ~= nil and not secret(g) then return g end
+    -- In combat the game can hide mob IDs. The target's nameplate still tells mobs apart,
+    -- so Rend on two mobs stays two separate timers when you tab between them.
+    if C_NamePlate and C_NamePlate.GetNamePlateForUnit then
+        local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, "target")
+        if ok and type(plate) == "table" then
+            local unit = plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)
+            if type(unit) == "string" and not secret(unit) then return "np:" .. unit end
+        end
+    end
+    return "?"
+end
+DRU.targetKey = targetKey
+
+-- A nameplate that goes away (mob died or left view) may come back on a different mob:
+-- forget what we remembered for it, so the new mob starts clean.
+function DRU.forgetPlate(unit)
+    if type(unit) ~= "string" or secret(unit) then return end
+    local k = "np:" .. unit
+    rendAt[k], sunder[k] = nil, nil
+    for _, t in pairs(DRU.dotAt or {}) do t[k] = nil end
 end
 
 local function onCast(spellID)
@@ -488,19 +507,21 @@ function DRU.needDot(st, name, refresh)
     need(st, DRU.dotGone(name, refresh))
 end
 -- unit health above pct% (below=false) or under pct% (below=true); unreadable = no block
-function DRU.needUnitHP(st, unit, pct, below)
+function DRU.needUnitHP(st, unit, pct, below, requireKnown)
     if not st.ok then return end
     local h, m = UnitHealth(unit), UnitHealthMax(unit)
     if not secret(h) and not secret(m) then
         if m and m > 0 then
             if below then need(st, h / m < pct / 100) else need(st, h / m >= pct / 100) end
+        elseif requireKnown then
+            st.ok = false
         end
         return
     end
     local cv = UnitHealthPercent and stepCurve("uhp" .. unit .. pct .. tostring(below), below, pct / 100)
-    if not cv then return end
+    if not cv then if requireKnown then st.ok = false end; return end
     local ok, a = pcall(UnitHealthPercent, unit, false, cv)
-    if ok then needAlpha(st, a) end
+    if ok and (secret(a) or type(a) == "number") then needAlpha(st, a) elseif requireKnown then st.ok = false end
 end
 
 ---------------------------------------------------------------------------
@@ -751,7 +772,7 @@ local WARRIOR_ALERTS = {
       end },
     { key = "revenge", row = 2, label = "REVENGE", icon = "Revenge",
       test = function(st)
-          need(st, ctx.combat); need(st, ready("Revenge")); need(st, usable("Revenge"))
+          need(st, ctx.combat and ctx.hostile); need(st, ready("Revenge")); need(st, usable("Revenge"))
       end },
     { key = "slam", row = 2, label = "SHIELD SLAM", icon = "Shield Slam",
       test = function(st)
@@ -769,10 +790,17 @@ local WARRIOR_ALERTS = {
       end },
     { key = "demo", row = 2, label = "DEMO SHOUT", icon = "Demoralizing Shout",
       test = function(st)
-          -- Icy Veins (Forever prot leveling): "Use Demoralizing Shout early in the fight
-          -- to reduce damage taken" - single mob AND packs. Less damage = less eating.
-          -- Skipped when the mob is almost dead (wasted rage).
-          need(st, ctx.combat and ctx.hostile and timeLeft("Demoralizing Shout") <= durationOf("Demoralizing Shout") * 0.3)   -- pandemic: refresh at 30% left
+          need(st, ctx.combat and ctx.hostile)
+          if not st.ok then return end
+          local real, aura = targetDebuff("Demoralizing Shout")
+          local left = timeLeft("Demoralizing Shout")
+          if real == "on" then
+              local exp = plain(aura.expirationTime, nil)
+              need(st, exp and exp > 0 and exp - GetTime() <= 5)
+          elseif real == "off" then
+              -- Allow the aura to land before showing the reminder again.
+              need(st, left < durationOf("Demoralizing Shout") - 1)
+          else need(st, left <= 5) end
           need(st, usable("Demoralizing Shout"))
           if (ctx.enemies or 0) < 2 and not ctx.elite then needTargetAbove(st, 40) end
       end },
@@ -798,6 +826,7 @@ local WARRIOR_ALERTS = {
           if not st.ok then return end
           local queued = IsCurrentSpell(spell[name])
           need(st, queued, true)          -- already queued? then stay quiet
+          need(st, usable(name))
           needRage(st, spendLine and spendLine() or DB.dumpAt, false)
           return name, "HEROIC STRIKE"
       end },
@@ -807,14 +836,20 @@ local WARRIOR_ALERTS = {
           if not st.ok then return end
           local s = sunder[targetKey()]
           local stacks = (s and GetTime() - s.last < durationOf("Sunder Armor")) and s.n or 0
+          local left = s and durationOf("Sunder Armor") - (GetTime() - s.last)
           local real, aura = targetDebuff("Sunder Armor")          -- real stacks when readable
-          if real == "off" then stacks = 0
-          elseif real == "on" then stacks = plain(aura.applications, stacks) or stacks end
+          if real == "off" then stacks, left = 0, nil
+          elseif real == "on" then
+              stacks = plain(aura.applications, stacks) or stacks
+              local exp = plain(aura.expirationTime, nil)
+              if exp then left = exp > 0 and exp - GetTime() or nil end
+          end
           local goal = ctx.elite and 5 or DB.sunderGoal
-          need(st, stacks < goal)
+          local refresh = stacks >= goal and left and left > 0 and left <= 5
+          need(st, stacks < goal or refresh)
           need(st, usable("Sunder Armor"))
           needTargetAbove(st, 30)
-          if st.ok then return nil, "SUNDER " .. stacks .. "/" .. goal end
+          if st.ok then return nil, refresh and "REFRESH SUNDER" or "SUNDER " .. stacks .. "/" .. goal end
       end },
     { key = "rend", row = 2, label = "REND", icon = "Rend",
       test = function(st)
@@ -839,6 +874,8 @@ local WARRIOR_ALERTS = {
       end },
     { key = "bloodrage", row = 2, label = "BLOODRAGE", icon = "Bloodrage",
       test = function(st)
+          -- It costs health. Keep the prompt quiet at the player's low-health threshold.
+          DRU.needUnitHP(st, "player", math.max(35, DB.lowHp), false, true)
           need(st, ready("Bloodrage")); need(st, usable("Bloodrage"))
           if not st.ok then return end
           if ctx.combat then needRage(st, 20, true) else need(st, ctx.hostile) end
@@ -1636,7 +1673,7 @@ local CLASS_ALERTS = { WARRIOR = WARRIOR_ALERTS, PALADIN = PALADIN_ALERTS, DRUID
 local SPOT = {
     WARRIOR = {
         danger = { "lowhp", "kick", "taunt", "rescueShout", "mocking", "loose" },
-        next   = { "slam", "revenge", "vrush", "clap", "sunder", "execute" },
+        next   = { "revenge", "slam", "vrush", "clap", "sunder", "execute" },
         buff   = { "demo", "rend", "shout" },               -- upkeep: never buried under the rotation
         extra  = { "block", "cleave", "dump", "bloodrage" },   -- off the global cooldown: press any time
     },
@@ -1662,6 +1699,8 @@ local SPOT = {
     },
 }
 SPOT.PRIEST = { danger = { "priestHeal" }, next = { "priestDamage" }, buff = { "priestBuff" }, extra = { "lowmana" } }
+DRU.warriorSingleNext = SPOT.WARRIOR.next
+DRU.warriorPackNext = { "clap", "revenge", "slam", "vrush", "sunder", "execute" }
 local SPOT_SIZE = { danger = 64, next = 64, buff = 44, extra = 64 }   -- big, easy to see
 
 -- Racials (Wowhead WoW Forever race pages, Nov 2026). Every class gets them; an alert
@@ -1857,6 +1896,7 @@ end
 
 -- Put an alert's frames on their own layer (L .. L+6), so stacks draw in order.
 local function setLevels(a, L)
+    a.layer = L
     a.root:SetFrameLevel(L)
     for i = 1, 4 do a.gates[i]:SetFrameLevel(L + i) end
     a.c:SetFrameLevel(L + 5)
@@ -2433,7 +2473,8 @@ local function setIcon(a, name, label)
         local tex = id and C_Spell.GetSpellTexture(id) or DRU.icons[name]
         a.c.icon:SetTexture(tex or (CLASS == "WARLOCK" and "Interface\\Icons\\INV_Misc_QuestionMark") or FALLBACK_ICON[a.key] or DEFAULT_ICON)
     end
-    setText(a.c.text, (DRU.lux and a.hudSpot == "next") and (a.key == "trance" and "Free Shadow Bolt" or name) or (label or a.label))
+    setText(a.c.text, (DRU.lux and a.hudSpot == "next") and
+        ((a.key == "sunder" and label) or (a.key == "trance" and "Free Shadow Bolt") or name) or (label or a.label))
 end
 
 local function safeAlpha(f, v)
@@ -3077,6 +3118,24 @@ local function update()
     if not byKey or ctx.byKeyFor ~= ALERTS then
         byKey = {}; for _, a in ipairs(ALERTS) do byKey[a.key] = a end
         ctx.byKey, ctx.byKeyFor = byKey, ALERTS
+    end
+    if CLASS == "WARRIOR" then
+        -- Use only the existing readable enemy count, never hidden cooldown/health values.
+        -- The same ordering drives both the big icon layers and the cooldown-strip glow.
+        local keys = (ctx.enemies or 0) >= 2 and DRU.warriorPackNext or DRU.warriorSingleNext
+        SPOT.WARRIOR.next = keys
+        if DB.stack ~= false then
+            local base = main:GetFrameLevel() + (DRU.lux and 10 or 5)
+            for i, key in ipairs(keys) do
+                local a = byKey[key]
+                local level = base + (#keys - i + 1) * 8
+                if a and a.root and a.inSpot ~= false and a.layer ~= level then
+                    setLevels(a, level)
+                    if rawget(a.c, "gold") then a.c.gold:SetFrameLevel(a.c:GetFrameLevel() + 2) end
+                    if rawget(a.c, "glowF") then a.c.glowF:SetFrameLevel(a.c:GetFrameLevel() + 3) end
+                end
+            end
+        end
     end
     local sp = (DB.stack ~= false) and SPOT[CLASS]
     if sp and not testing then
@@ -4887,6 +4946,8 @@ ev:SetScript("OnEvent", function(self, event, ...)
         end
     elseif event == "UNIT_TARGET" then
         tDirty.tot = true
+    elseif event == "NAME_PLATE_UNIT_REMOVED" and DRU.forgetPlate then
+        DRU.forgetPlate(...)
     elseif event == "PLAYER_TARGET_CHANGED" then
         DRU.targetAuraCache = {}
         barsDirty.threat = true
@@ -4950,18 +5011,18 @@ local PLAIN = {
     kick = { "Interrupt", "Your target is casting." },
     loose = { "Loose mobs", "Mobs attacking your group." },
     block = { "Shield Block", "Less damage, more rage." },
-    revenge = { "Revenge", "Ready after a block, dodge or parry." },
+    revenge = { "Revenge", "Ready after a block, dodge or parry. First attack on one enemy." },
     slam = { "Shield Slam", "Off cooldown." },
     vrush = { "Victory Rush", "Heal after a kill." },
-    clap = { "Thunder Clap", "Packs and elites." },
+    clap = { "Thunder Clap", "Use when ready. First attack when 2+ nearby enemies are detected." },
     demo = { "Demo Shout", "Mobs deal less damage." },
     execute = { "Execute", "Target under 20%." },
     cleave = { "Cleave", "Extra threat on 2+ enemies. 40 rage; 60 with Shield Slam or heavy hits. Hides when queued." },
     dump = { "Spend rage", "Heroic Strike on one enemy. Waits longer during heavy hits." },
-    sunder = { "Sunder Armor", "Stack to your Sunder setting." },
+    sunder = { "Sunder Armor", "Build your chosen stacks (5 on elites). Refresh with 5 seconds left." },
     rend = { "Rend", "Start of a fight." },
     shout = { "Battle Shout", "Buff missing." },
-    bloodrage = { "Bloodrage", "Low rage or before a pull." },
+    bloodrage = { "Bloodrage", "Low rage or before a pull. Hides below your low-health warning (at least 35%)." },
     rfury = { "Righteous Fury", "Tank threat buff missing." },
     seal = { "Seal", "No seal active." },
     holyshield = { "Holy Shield", "Not active." },

@@ -2,6 +2,17 @@
 
 Every released version, newest first.
 
+## 1.0.22 (2026-11-15)
+
+- **Rend fix:** with Rend on two mobs, tabbing between them now shows each mob's own Rend timer, even in combat. The same fix keeps Sunder stacks and Druid and Warlock DoT timers on the right mob.
+- **Revenge** leads your attack cue on one enemy. **Thunder Clap** takes the lead when a pack is nearby.
+- **Sunder Armor** asks for a refresh in its last 5 seconds, even at your stack goal.
+- **Demoralizing Shout** follows the real debuff on your target when the game shows it, with a reminder 5 seconds before it runs out.
+- **Revenge** and **Heroic Strike** stay quiet when you can't use them.
+- **Bloodrage** stays quiet when your health is low (below your low-health warning, at least 35%).
+
+Type `/reload` after updating.
+
 ## 1.0.21 (2026-11-14)
 
 - **Legacy picks** checked against Method, Icy Veins, Mobalytics and Wowhead. The leveling picks are unchanged.
@@ -20,12 +31,18 @@ Recover from temporary cooldown message limits and pause group distance warnings
 
 ## 1.0.18 (2026-11-08)
 
-Party cooldown test update
-
-- Keeps defensive tracking intact through combat stance changes.
-- Improves Shield Block sharing and party-name matching.
-- Adds connection details to /dbadebug for troubleshooting missing cooldowns.
-
+Party cooldown test update
+
+
+
+- Keeps defensive tracking intact through combat stance changes.
+
+- Improves Shield Block sharing and party-name matching.
+
+- Adds connection details to /dbadebug for troubleshooting missing cooldowns.
+
+
+
 Update everyone testing together, then /reload outside combat. If cooldowns still fail during a pull, copy /dbadebug from both players after using Shield Block.
 
 ## 1.0.17 (2026-11-08)
@@ -38,222 +55,382 @@ Restart WoW after updating.
 
 ## 1.0.16 (2026-11-08)
 
-
-- Quieter first-install setup: core combat HUD stays on; extra frames, reminders, cursor/aggro tools and party warnings are opt-in. Existing settings are preserved.
-- Starter setup and Restore my setup let existing users try the new defaults without losing custom geometry, macros or spell history.
-- Party cooldown sync v2 separates sharing from showing icons. Matching addon clients exchange readable live cooldowns even when the sender hides their own icons. Hidden timing uses clearly labeled estimates.
-- Players without the addon can be tracked from readable casts and defensive buffs. Estimates can differ with talents, resets or missed events.
-- Removed the restricted combat-log subscription that triggered a blocked-action popup on reload. Startup protected-action warnings now remain visible in the debug report.
-- /dbaparty status and /dbadebug include sync diagnostics.
-
+
+
+- Quieter first-install setup: core combat HUD stays on; extra frames, reminders, cursor/aggro tools and party warnings are opt-in. Existing settings are preserved.
+
+- Starter setup and Restore my setup let existing users try the new defaults without losing custom geometry, macros or spell history.
+
+- Party cooldown sync v2 separates sharing from showing icons. Matching addon clients exchange readable live cooldowns even when the sender hides their own icons. Hidden timing uses clearly labeled estimates.
+
+- Players without the addon can be tracked from readable casts and defensive buffs. Estimates can differ with talents, resets or missed events.
+
+- Removed the restricted combat-log subscription that triggered a blocked-action popup on reload. Startup protected-action warnings now remain visible in the debug report.
+
+- /dbaparty status and /dbadebug include sync diagnostics.
+
+
+
 Update, then /reload. Everyone using live sync needs this updated build. Party helpers operate in five-player dungeons.
 
 ## 1.0.15 (2026-11-08)
 
-
-- Fixed the Druid DoT HUD error: **Auras cannot be accessed when secret while tainted by DBagsAlerts**.
-- Checks aura access before requesting aura IDs. While access is restricted, the display uses readable timers from your own casts. Native aura displays resume when access is allowed.
-- Fixed blocked HUD resizing and positioning during Druid form changes in combat. Layout changes now wait until combat ends, then apply the latest form.
-
-### Updating
-
+
+
+- Fixed the Druid DoT HUD error: **Auras cannot be accessed when secret while tainted by DBagsAlerts**.
+
+- Checks aura access before requesting aura IDs. While access is restricted, the display uses readable timers from your own casts. Native aura displays resume when access is allowed.
+
+- Fixed blocked HUD resizing and positioning during Druid form changes in combat. Layout changes now wait until combat ends, then apply the latest form.
+
+
+
+### Updating
+
+
+
 Type **/reload** after updating. In **/dbadebug**, use **Clear log** to remove errors saved before this fix.
 
 ## 1.0.14 (2026-11-08)
 
-
-- Added a small **Legacy picks** guide beside the Legacy talent window.
-- Shows your current ranks, the next recommended rank, and a short explanation.
-- Outdoor leveling order: **Thrill of Adventure 5/5 → Well Rested 5/5 → Talented 5/5 → Field Medicine 1/2**.
-- Switch to **Dungeon leveling** to prioritize Well Rested and Talented. Thrill of Adventure does not work inside dungeons.
-- Recommendations follow point changes and refunds. Unavailable ranks show **?** instead of guessing.
-- At level 60, the guide explains that Talented no longer helps and stops recommending leveling picks.
-- Advice only: you choose and apply every talent yourself.
-
-### How to use
-
+
+
+- Added a small **Legacy picks** guide beside the Legacy talent window.
+
+- Shows your current ranks, the next recommended rank, and a short explanation.
+
+- Outdoor leveling order: **Thrill of Adventure 5/5 → Well Rested 5/5 → Talented 5/5 → Field Medicine 1/2**.
+
+- Switch to **Dungeon leveling** to prioritize Well Rested and Talented. Thrill of Adventure does not work inside dungeons.
+
+- Recommendations follow point changes and refunds. Unavailable ranks show **?** instead of guessing.
+
+- At level 60, the guide explains that Talented no longer helps and stops recommending leveling picks.
+
+- Advice only: you choose and apply every talent yourself.
+
+
+
+### How to use
+
+
+
 Restart WoW fully after installing this update because it adds a new file. Open **Legacy → talent trees**; the guide appears beside the window.
 
 ## 1.0.13 (2026-11-08)
 
-
-- Fixed the debug window Lua error when opening or refreshing a report.
-
-- Long reports resize correctly for scrolling; short reports shrink back to the minimum height.
-
-### Update
-
-Update, then `/reload`.
-
+
+
+- Fixed the debug window Lua error when opening or refreshing a report.
+
+
+
+- Long reports resize correctly for scrolling; short reports shrink back to the minimum height.
+
+
+
+### Update
+
+
+
+Update, then `/reload`.
+
+
+
 Debug history survives reloads. Use `/dbadebug` → Clear log to remove old saved errors.
 
 ## 1.0.12 (2026-11-08)
 
-
-- Independent width, height and left/right/up/down controls for target, health, power, both cast bars, threat and swing timer in the floating HUD.
-
-- Pet frame width, health height and position controls, also accessible on Hunters through `/dbapet`. Narrow frames wrap pet buttons into rows; protected changes wait until combat ends.
-
-- Separate size and position controls for spell cues, DoT timers, cooldown icons and buff/stance/food/weapon-stone reminders. Icons stay square.
-
-- Sizes settings show one selected component at a time. The shared HUD drag anchor stays fixed.
-
-### Use it
-
+
+
+- Independent width, height and left/right/up/down controls for target, health, power, both cast bars, threat and swing timer in the floating HUD.
+
+
+
+- Pet frame width, health height and position controls, also accessible on Hunters through `/dbapet`. Narrow frames wrap pet buttons into rows; protected changes wait until combat ends.
+
+
+
+- Separate size and position controls for spell cues, DoT timers, cooldown icons and buff/stance/food/weapon-stone reminders. Icons stay square.
+
+
+
+- Sizes settings show one selected component at a time. The shared HUD drag anchor stays fixed.
+
+
+
+### Use it
+
+
+
 Update, then `/reload`. Open `/dba` → Sizes, enable Separate sizes, and use `<` / `>` to choose the component.
 
 ## 1.0.11 (2026-11-08)
 
-
-- Pet action right-clicks use Blizzard's native pet buttons to toggle autocast, avoiding the protected call in addon Lua.
-
-- Individual size sliders keep the shared HUD drag anchor fixed, so resizing a section does not resize and shift the parent anchor.
-
-### Update
-
+
+
+- Pet action right-clicks use Blizzard's native pet buttons to toggle autocast, avoiding the protected call in addon Lua.
+
+
+
+- Individual size sliders keep the shared HUD drag anchor fixed, so resizing a section does not resize and shift the parent anchor.
+
+
+
+### Update
+
+
+
 Update, then type `/reload` in game.
 
 ## 1.0.10 (2026-11-08)
 
-- Settings are organized into Display, Frames, Sizes, Reminders, Alerts, Class settings, Group and Tools pages.
-- Familiar WoW buttons and borders, readable labels and consistent spacing replace the long settings wall.
-- Frames > Target of Target adds an optional name and health strip. Off by default.
-- Sizes > Separate sizes lets the floating HUD resize the target, health/power bars, spell cues, debuff timers, cast bars and cooldown row independently. Off by default; your existing whole-HUD scale is retained.
-- Layout spacing adapts to larger sections. Helper reminders, party icons, cursor and pet size controls are available too.
-
-### Update
+- Settings are organized into Display, Frames, Sizes, Reminders, Alerts, Class settings, Group and Tools pages.
+
+- Familiar WoW buttons and borders, readable labels and consistent spacing replace the long settings wall.
+
+- Frames > Target of Target adds an optional name and health strip. Off by default.
+
+- Sizes > Separate sizes lets the floating HUD resize the target, health/power bars, spell cues, debuff timers, cast bars and cooldown row independently. Off by default; your existing whole-HUD scale is retained.
+
+- Layout spacing adapts to larger sections. Helper reminders, party icons, cursor and pet size controls are available too.
+
+
+
+### Update
+
 Update, then /reload. Open /dba for settings.
 
 ## 1.0.9 (2026-11-08)
 
-### Party defensive tracker
-- Other party members do not need DBagsAlerts installed.
-- Dim spell icons are class/level placeholders. Training and talents are unconfirmed until observed.
-- A public observed cast starts a base-cooldown estimate, including in combat. Higher ranks match by spell name.
-- RDY~ means estimated ready; RDY means confirmed from a current self-report; UP means an active buff. Estimates may differ with talents, resets and missed/restricted casts.
-- Optional addon reports improve accuracy. Generic question-mark icons are removed. Toggle Placeholders under /dbaparty.
-- Retains public cooldown observations across combat restrictions. Failed active-aura reads cannot hide the entire cooldown row.
-
-### Debug tools
-- /dbadebug opens Record debug log and Show Lua errors options plus a copyable report.
-- /dbadebug on starts bounded recording. Reproduce the issue, then /dbadebug and Select report, Ctrl+C.
-- /dbadebug errors on turns on WoW's Lua error display; errors off disables it.
-- Reports group repeated errors and include stack traces, combat/instance context and recent relevant events.
-- Timer update guards back off after failures instead of throwing every frame.
-
-The generic too-many-errors popup does not identify which addon caused it.
-
-### Install
-Update, then fully restart WoW for the new modules.
+### Party defensive tracker
+
+- Other party members do not need DBagsAlerts installed.
+
+- Dim spell icons are class/level placeholders. Training and talents are unconfirmed until observed.
+
+- A public observed cast starts a base-cooldown estimate, including in combat. Higher ranks match by spell name.
+
+- RDY~ means estimated ready; RDY means confirmed from a current self-report; UP means an active buff. Estimates may differ with talents, resets and missed/restricted casts.
+
+- Optional addon reports improve accuracy. Generic question-mark icons are removed. Toggle Placeholders under /dbaparty.
+
+- Retains public cooldown observations across combat restrictions. Failed active-aura reads cannot hide the entire cooldown row.
+
+
+
+### Debug tools
+
+- /dbadebug opens Record debug log and Show Lua errors options plus a copyable report.
+
+- /dbadebug on starts bounded recording. Reproduce the issue, then /dbadebug and Select report, Ctrl+C.
+
+- /dbadebug errors on turns on WoW's Lua error display; errors off disables it.
+
+- Reports group repeated errors and include stack traces, combat/instance context and recent relevant events.
+
+- Timer update guards back off after failures instead of throwing every frame.
+
+
+
+The generic too-many-errors popup does not identify which addon caused it.
+
+
+
+### Install
+
+Update, then fully restart WoW for the new modules.
+
 Only the person viewing the tracker needs the addon.
 
 ## 1.0.8 (2026-11-08)
 
-- Druid DoT row now uses your actual current-target debuff icons and Blizzard's native countdowns.
-- Works with hidden aura names/timing without comparing those values or relying on target GUIDs.
-- Your existing DoTs remain visible after switching away and back, including after a form change.
-- Readable refresh glows remain. Restricted timing is displayed without guessing its refresh window.
-
-### Update
-Update, then /reload.
+- Druid DoT row now uses your actual current-target debuff icons and Blizzard's native countdowns.
+
+- Works with hidden aura names/timing without comparing those values or relying on target GUIDs.
+
+- Your existing DoTs remain visible after switching away and back, including after a form change.
+
+- Readable refresh glows remain. Restricted timing is displayed without guessing its refresh window.
+
+
+
+### Update
+
+Update, then /reload.
+
 Apply two DoTs, switch to another target, then switch back. Check that both countdowns return.
 
 ## 1.0.7 (2026-11-08)
 
-- DoT timers restore from your own existing target debuffs when switching back. Refreshes and removals update immediately; aura reads are cached.
-- Retaliation is tracked in the Warrior cooldown row.
-- Dungeon party defensive icons recognize readable Forever defensive buffs without the native category and locate nested party frames.
-- /dbaparty status reports whether frames and active defensives are found.
-
-Party defensive icons show active buffs, not ready abilities or cooldowns after those buffs end.
-
-### Update
+- DoT timers restore from your own existing target debuffs when switching back. Refreshes and removals update immediately; aura reads are cached.
+
+- Retaliation is tracked in the Warrior cooldown row.
+
+- Dungeon party defensive icons recognize readable Forever defensive buffs without the native category and locate nested party frames.
+
+- /dbaparty status reports whether frames and active defensives are found.
+
+
+
+Party defensive icons show active buffs, not ready abilities or cooldowns after those buffs end.
+
+
+
+### Update
+
 Update, then /reload.
 
 ## 1.0.6 (2026-11-08)
 
-- Pet health/resource frame, native pet commands and movable layout. Warlock demon and Hunter care buttons show only learned spells. Hunter pet support does not include a Hunter rotation.
-- Follow uses your keypress and the game's normal follow command. Set the buddy and key in /dbafollow; drag the status or lock it in settings.
-- WAKE UP uses confirmed same-map distances, waits two seconds, and has slower red edges. Set a temporary pause key in /dbagroup.
-- Active personal defensive icons next to native party frames in five-player dungeons.
-- Cleaner draggable settings, one window at a time, and scrolling.
-- Fixed Druid form resources triggering healer LOW MANA and moved the target cast bar away from alert icons.
-
-### Install
-Update, then fully restart WoW for the new files and bindings.
-
+- Pet health/resource frame, native pet commands and movable layout. Warlock demon and Hunter care buttons show only learned spells. Hunter pet support does not include a Hunter rotation.
+
+- Follow uses your keypress and the game's normal follow command. Set the buddy and key in /dbafollow; drag the status or lock it in settings.
+
+- WAKE UP uses confirmed same-map distances, waits two seconds, and has slower red edges. Set a temporary pause key in /dbagroup.
+
+- Active personal defensive icons next to native party frames in five-player dungeons.
+
+- Cleaner draggable settings, one window at a time, and scrolling.
+
+- Fixed Druid form resources triggering healer LOW MANA and moved the target cast bar away from alert icons.
+
+
+
+### Install
+
+Update, then fully restart WoW for the new files and bindings.
+
+
+
 Pet settings: /dbapet. Follow: /dbafollow. Group warning: /dbagroup. Party defensives: /dbaparty.
 
 ## 1.0.5 (2026-11-08)
 
-- Tank-only pre-pull healer helper, styled to match the HUD: LOW MANA or DRINKING, with a separate TOO FAR badge. Drinking and distance warnings can appear together.
-- Automatic detection of a single marked healer, or enter your healer's name manually. Unresolved selection shows SET HEALER instead of staying silent.
-- Default mana threshold is 30%, adjustable in /pa → Healer checks or /dbahealer. Separate drinking/range toggles and a Test button.
-- Fixed low-level Protection Warrior eligibility and hidden-mana display. Hidden range flags go directly to native display gates.
-- /dbahealer status prints what the healer checker is doing.
-
-### Update
-Extract DBagsAlerts.zip into your Forever Interface/AddOns folder. Restart WoW after updating to load the new healer module. Configure it under /pa → Healer checks.
-
-### Limits
-These warnings hide during combat. Distance uses the game's group-range check; it does not measure exact yards or check line of sight. Drinking detection requires an accessible Drink aura.
-
+- Tank-only pre-pull healer helper, styled to match the HUD: LOW MANA or DRINKING, with a separate TOO FAR badge. Drinking and distance warnings can appear together.
+
+- Automatic detection of a single marked healer, or enter your healer's name manually. Unresolved selection shows SET HEALER instead of staying silent.
+
+- Default mana threshold is 30%, adjustable in /pa → Healer checks or /dbahealer. Separate drinking/range toggles and a Test button.
+
+- Fixed low-level Protection Warrior eligibility and hidden-mana display. Hidden range flags go directly to native display gates.
+
+- /dbahealer status prints what the healer checker is doing.
+
+
+
+### Update
+
+Extract DBagsAlerts.zip into your Forever Interface/AddOns folder. Restart WoW after updating to load the new healer module. Configure it under /pa → Healer checks.
+
+
+
+### Limits
+
+These warnings hide during combat. Distance uses the game's group-range check; it does not measure exact yards or check line of sight. Drinking detection requires an accessible Drink aura.
+
+
+
 Work in progress.
 
 ## 1.0.4 (2026-11-07)
 
-- Separate glowing CLEAVE helper for two or more nearby engaged enemies. Shows with at least 40 rage, or 60 with Shield Slam learned or heavy incoming hits. Hides when queued; toggle Cleave in /pa.
-- Added PA Retaliation to the Warrior macro generator: starts auto-attack, switches to Battle Stance, then casts Retaliation on the next press if a stance change was needed.
-- Existing swing bar tracks ranged shots in blue, then returns to melee on a main-hand swing. Ignores offhand swings, handles ranged speed changes and resets on weapon swaps. Shot timing begins after a real shot event.
-
-### Update
+- Separate glowing CLEAVE helper for two or more nearby engaged enemies. Shows with at least 40 rage, or 60 with Shield Slam learned or heavy incoming hits. Hides when queued; toggle Cleave in /pa.
+
+- Added PA Retaliation to the Warrior macro generator: starts auto-attack, switches to Battle Stance, then casts Retaliation on the next press if a stance change was needed.
+
+- Existing swing bar tracks ranged shots in blue, then returns to melee on a main-hand swing. Ignores offhand swings, handles ranged speed changes and resets on weapon swaps. Shot timing begins after a real shot event.
+
+
+
+### Update
+
 Extract DBagsAlerts.zip into your Forever Interface/AddOns folder. Type /reload, then /pa macros to create the new Retaliation macro.
 
 ## 1.0.3 (2026-11-07)
 
-- Dedicated glowing BLOCK reminder when your target is attacking you and Shield Block is ready and usable. It stays separate from your next attack and other helper icons.
-- Friendly players and NPCs now appear in the target frame, with health and the normal right-click menu. The click area fits the compact header.
-- Upkeep timer icons glow when missing or due for refresh. Rend lights at 30% remaining and stops glowing when reapplied.
-- Restored the single Battle Shout reminder in the floating HUD, including out of combat.
-
-### Update
+- Dedicated glowing BLOCK reminder when your target is attacking you and Shield Block is ready and usable. It stays separate from your next attack and other helper icons.
+
+- Friendly players and NPCs now appear in the target frame, with health and the normal right-click menu. The click area fits the compact header.
+
+- Upkeep timer icons glow when missing or due for refresh. Rend lights at 30% remaining and stops glowing when reapplied.
+
+- Restored the single Battle Shout reminder in the floating HUD, including out of combat.
+
+
+
+### Update
+
 Extract DBagsAlerts.zip into your Forever Interface/AddOns folder. Type /reload after updating.
 
 ## 1.0.2 (2026-11-06)
 
-
-#### A cleaner layout for every class
-- Warrior, Paladin, Druid, and Warlock now use a floating layout that leaves the game visible.
-- Removed the enclosing box, purple title stripe, large gold glows, and empty cast-bar background.
-- One large next-spell cue sits beside your bars. Smaller icons handle danger, buffs, and other helpers.
-- Idle DoT icons and dead-target clutter stay hidden.
-- Melee classes keep slim threat and swing strips.
-
-#### Warlock added
-- Alerts for Corruption, Bane of Agony, Immolate, Siphon Life, and other learned spells.
-- Life Tap, pet, Demon Armor, Healthstone, Drain Soul, and Nightfall reminders.
-- Readable DoT countdowns and a simple Soul Shard bag count.
-- 18 "PK" macros available through `/pa macros`.
-
-#### Druid follows your form
-- Bear, Cat, caster, and travel forms each show the right resources and timers.
-- Cat keeps energy and combo points. Bear uses rage; caster and travel forms use mana.
-- Fixed layout updates when changing forms without changing the power type.
-
-#### Cast bar corrections
-- Cast fill and countdown follow the game's own cast duration.
-- The thin blue end marker means you can queue your next spell early.
-- Removed the unreliable "MOVE" prediction. Finish the cast before moving.
-- The queue marker stays hidden when the game hides its timing.
-
-#### Small fixes
-- Removed unknown-spell defensive placeholders on early-level Warlocks.
-- Toned down stance and item reminders to match the quieter layout.
-- Fixed overlapping cast-bar labels.
-
-### How to update
-Install the ZIP below. If DBagsAlerts is already installed, type `/reload` in WoW. A first install needs a full game restart.
-
+
+
+#### A cleaner layout for every class
+
+- Warrior, Paladin, Druid, and Warlock now use a floating layout that leaves the game visible.
+
+- Removed the enclosing box, purple title stripe, large gold glows, and empty cast-bar background.
+
+- One large next-spell cue sits beside your bars. Smaller icons handle danger, buffs, and other helpers.
+
+- Idle DoT icons and dead-target clutter stay hidden.
+
+- Melee classes keep slim threat and swing strips.
+
+
+
+#### Warlock added
+
+- Alerts for Corruption, Bane of Agony, Immolate, Siphon Life, and other learned spells.
+
+- Life Tap, pet, Demon Armor, Healthstone, Drain Soul, and Nightfall reminders.
+
+- Readable DoT countdowns and a simple Soul Shard bag count.
+
+- 18 "PK" macros available through `/pa macros`.
+
+
+
+#### Druid follows your form
+
+- Bear, Cat, caster, and travel forms each show the right resources and timers.
+
+- Cat keeps energy and combo points. Bear uses rage; caster and travel forms use mana.
+
+- Fixed layout updates when changing forms without changing the power type.
+
+
+
+#### Cast bar corrections
+
+- Cast fill and countdown follow the game's own cast duration.
+
+- The thin blue end marker means you can queue your next spell early.
+
+- Removed the unreliable "MOVE" prediction. Finish the cast before moving.
+
+- The queue marker stays hidden when the game hides its timing.
+
+
+
+#### Small fixes
+
+- Removed unknown-spell defensive placeholders on early-level Warlocks.
+
+- Toned down stance and item reminders to match the quieter layout.
+
+- Fixed overlapping cast-bar labels.
+
+
+
+### How to update
+
+Install the ZIP below. If DBagsAlerts is already installed, type `/reload` in WoW. A first install needs a full game restart.
+
+
+
 `/pa oldlook` restores the previous layout. `/pa newlook` switches back to the floating layout.
 
 ## 1.0.1 (2026-11-06)
