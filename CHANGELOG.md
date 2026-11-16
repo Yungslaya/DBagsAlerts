@@ -2,6 +2,13 @@
 
 Every released version, newest first.
 
+## 1.0.23 (2026-11-15)
+
+- **Follow buddy:** the FOLLOWING text no longer gets stuck on screen after follow ends. It clears when you stand still for 3 seconds, when your buddy is out of sight, or after a loading screen.
+- Pressing your follow key while it says FOLLOWING now follows again, so a follow that quietly broke is fixed with one press.
+
+Type `/reload` after updating.
+
 ## 1.0.22 (2026-11-15)
 
 - **Rend fix:** with Rend on two mobs, tabbing between them now shows each mob's own Rend timer, even in combat. The same fix keeps Sunder stacks and Druid and Warlock DoT timers on the right mob.

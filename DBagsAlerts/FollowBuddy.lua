@@ -87,6 +87,8 @@ button:SetScript("OnClick",function(_, _, down)
         show("SET FOLLOW BUDDY","Open /dbafollow",1,0.65,0.2);noticeUntil=GetTime()+4;return
     end
     if state.following and state.followingName and normalized(state.followingName)==normalized(state.target) then
+        -- Press again = follow again. Harmless if still following, and fixes a follow that quietly ended.
+        if FollowUnit then pcall(FollowUnit,state.unit or state.target) end
         show("FOLLOWING",state.followingName,0.3,1,0.4);return
     end
     pendingUntil=GetTime()+2;show("FOLLOW REQUESTED",state.target,1,0.82,0.25)
@@ -102,9 +104,19 @@ button:SetScript("OnClick",function(_, _, down)
     end
 end)
 local driver=CreateFrame("Frame")
-for _,e in ipairs({"PLAYER_LOGIN","GROUP_ROSTER_UPDATE","PLAYER_REGEN_ENABLED","AUTOFOLLOW_BEGIN","AUTOFOLLOW_END","UI_ERROR_MESSAGE"}) do driver:RegisterEvent(e) end
+-- WoW does not always send a "follow ended" event (loading screens, buddy runs out of range).
+-- Then the FOLLOWING text would stay up forever, so these clear it.
+local stillSince
+local function quietStop()
+    state.following=false;stillSince=nil;pendingUntil=nil;noticeUntil=nil
+    state.status="Follow stopped";hud:Hide()
+end
+for _,e in ipairs({"PLAYER_LOGIN","GROUP_ROSTER_UPDATE","PLAYER_REGEN_ENABLED","AUTOFOLLOW_BEGIN","AUTOFOLLOW_END","UI_ERROR_MESSAGE","PLAYER_ENTERING_WORLD"}) do driver:RegisterEvent(e) end
 driver:SetScript("OnEvent",function(_,event,name,message)
-    if event=="AUTOFOLLOW_BEGIN" then
+    if event=="PLAYER_ENTERING_WORLD" then
+        if state.following then quietStop() end
+    elseif event=="AUTOFOLLOW_BEGIN" then
+        stillSince=nil
         pendingUntil=nil;noticeUntil=nil;state.following=true;state.followingName=plain(name) or state.target or "Buddy"
         state.status="Following "..state.followingName;show("FOLLOWING",state.followingName,0.3,1,0.4)
     elseif event=="AUTOFOLLOW_END" then
@@ -120,6 +132,13 @@ end)
 local elapsed=0
 driver:SetScript("OnUpdate",function(_,dt)
     elapsed=elapsed+dt;if elapsed<0.25 then return end;elapsed=0
+    if state.following then
+        -- Standing still for 3 seconds, or the buddy is gone from view: you are not following anymore.
+        local speed=GetUnitSpeed and plain(GetUnitSpeed("player"))
+        if speed==0 then stillSince=stillSince or GetTime() elseif speed then stillSince=nil end
+        local gone=state.unit and UnitIsVisible and plain(UnitIsVisible(state.unit))==false
+        if (stillSince and GetTime()-stillSince>=3) or gone then quietStop();return end
+    end
     if pendingUntil and GetTime()>=pendingUntil then
         pendingUntil=nil;noticeUntil=GetTime()+4
         state.status="Follow did not start: get closer and press your key again"

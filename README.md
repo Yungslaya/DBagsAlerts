@@ -22,6 +22,7 @@ Combat coverage: Protection Warrior; Protection Paladin with basic Retribution d
 
 ## What's new
 
+- **1.0.23:** The FOLLOWING text no longer gets stuck after follow ends, and your follow key always follows again. Type `/reload` after updating.
 - **1.0.22:** Rend shows the right timer when you tab between mobs. Revenge leads on one enemy, Thunder Clap on packs, Sunder refresh reminder, smarter Demo Shout and Bloodrage. Type `/reload` after updating.
 
 - **1.0.21:** Legacy picks checked against Method, Icy Veins, Mobalytics and Wowhead. Two new builds: Leveling + professions, and Gathering and gold. The panel now reads every Legacy tree. Type `/reload` after updating.
