@@ -2,6 +2,12 @@
 
 Every released version, newest first.
 
+## 1.1.1 (2026-11-17)
+
+- **Update messages** now only come from real CurseForge releases, so you never hear about a version that isn't out yet.
+
+Type `/reload` after updating.
+
 ## 1.1.0 (2026-11-16)
 
 - **New name: Battle Buddy.** DBagsAlerts is now called Battle Buddy. It's the same addon with the same settings, so there's nothing to set up again. A one-time popup explains this after you update.

@@ -4,6 +4,9 @@
      guildmates and group members which version it is (a hidden addon message). If anyone has a
      newer one, you get one message: "Battle Buddy X is out. Update it in the CurseForge app."
      Only version numbers are sent. Nothing is sent in combat.
+     Only a real release download sends its version: the release zip's .toc has
+     "## X-Release-Build: 1" (added by CurseForgePublishinguild_release_zip.py). A test copy
+     without it never tells anyone about a version that isn't on CurseForge yet; it still listens.
   2. Renamed notice: players who used DBagsAlerts before see one popup saying it is now Battle Buddy.
 
   Generated from CurseForgePublishing\notices\Notices.template.lua - edit the template, not this copy.
@@ -43,6 +46,7 @@ local function newer(a, b)
 end
 
 local mine = getMeta and getMeta(ADDON, "Version") or nil
+local released = getMeta and getMeta(ADDON, "X-Release-Build") == "1"
 local state = { installedBefore = false, told = {}, lastSent = {}, replied = {}, pending = {} }
 
 local function store()
@@ -83,7 +87,7 @@ local function tellNewer(version)
 end
 
 local function send(channel, target)
-    if not (mine and chat.SendAddonMessage) or inCombat() then return end
+    if not (released and mine and chat.SendAddonMessage) or inCombat() then return end
     local key = channel .. (target or "")
     local now = GetTime and GetTime() or 0
     if state.lastSent[key] and now - state.lastSent[key] < 60 then return end
