@@ -2,6 +2,18 @@
 
 Every released version, newest first.
 
+## 1.2.0 (2026-11-18)
+
+- **All nine classes.** Mage, Hunter, Rogue and Shaman now get the next button to press, danger cues and buff reminders, like the other classes. Mage: procs, finishers and your filler spell. Hunter: Hunter's Mark, Serpent Sting, Summon Hawk, Aimed Shot and Mend Pet. Rogue: Stealth openers, Slice and Dice, Eviscerate at 5 points and poison reminders. Shaman: Stormstrike, shocks, free Lightning Bolts, shields and weapon buffs. These are new, so tell us what feels wrong.
+- **Priest in combat.** Priests now also get shield, self-heal, Shadow Word: Pain, Mind Blast and filler cues during a fight, when the game hides exact health numbers from addons.
+- **Five more languages.** In German, French, Spanish, Russian and Simplified Chinese games, cues show the game's own spell names, and cue words like LOW HP and the main Settings lines are translated. Chat messages and some smaller windows are still in English. Only English has been tested in the game. If something looks wrong in your language, please report it.
+- **New look.** The Settings window and the Legacy picks panel now look like a big WoW tooltip, the same as ProfessionPal, Market Ledger and Savings Pal.
+- **Voice alerts.** Battle Buddy can say danger alerts out loud, like "low health". Off until you tick **Alert voice** in Settings or type `/pa voice`. It uses the game's own text-to-speech.
+- **Trainer reminder.** When you reach an even level, it reminds you to visit your class trainer for new spell ranks, and again when you walk into town, until you open a trainer. Type `/bbtrain` to turn it off.
+- **Warlock: Wrack.** Affliction Warlocks at level 51 and up get a WRACK cue once Corruption and your Bane are on a target that will live a while. Low health still shows Drain Life first.
+
+Fully restart WoW after updating (a new file was added).
+
 ## 1.1.1 (2026-11-17)
 
 - **Update messages** now only come from real CurseForge releases, so you never hear about a version that isn't out yet.

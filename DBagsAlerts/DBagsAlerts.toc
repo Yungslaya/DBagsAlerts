@@ -1,12 +1,18 @@
 ## Interface: 16001
 ## X-Curse-Project-ID: 1791030
 ## Title: |cffff7d0aBattle|r Buddy
-## Notes: Battle Buddy: alerts, bars and helpers for Warrior, Paladin, Druid (all forms) and Warlock. Was DBagsAlerts. Type /bbuddy
+## Notes: Battle Buddy: alerts, bars and helpers for all nine classes. Was DBagsAlerts. Type /bbuddy
 ## Author: Yungslaya
-## Version: 1.1.1
+## Version: 1.2.0
 ## SavedVariables: DBagsAlertsDB
 
 Debug.lua
+Locale.lua
+Locale_deDE.lua
+Locale_frFR.lua
+Locale_esES.lua
+Locale_ruRU.lua
+Locale_zhCN.lua
 DBagsAlerts.lua
 WandTimer.lua
 HealerMana.lua
@@ -16,4 +22,5 @@ GroupRange.lua
 FollowBuddy.lua
 PetPanel.lua
 LegacyGuide.lua
+TrainReminder.lua
 Notices.lua

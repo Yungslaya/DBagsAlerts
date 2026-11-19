@@ -64,6 +64,7 @@ local DEFAULTS = {
     dumpAt = 70,         -- rage % to start telling you to Heroic Strike / Cleave
     lowHp = 35,          -- health % for the LOW HP warning
     sound = false,       -- raid-warning sound on danger alerts (only when not secret)
+    voice = false,       -- say the danger alert out loud with the game's own text-to-speech
     durations = {},      -- learned buff/debuff lengths, by spell name
     tank = true,         -- paladin: tanking setup (Righteous Fury, Seal of Fury, Sanctuary)
     lux = true,          -- standard floating HUD
@@ -1449,6 +1450,18 @@ do
               need(st, usable("Siphon Life"))
               lives(st, 60)                         -- 30 sec dot: long fights only
           end },
+        { key = "wrack", row = 2, label = "WRACK", icon = "Wrack",
+          test = function(st)
+              -- Affliction 51+: damage channel that makes your Shadow DoTs on this enemy hit harder.
+              -- DoTs first, and only on a mob that will live through it. Low health uses Drain Life (above).
+              fight(st); need(st, spell["Wrack"] and not trivial())
+              if not st.ok then return end
+              need(st, not DRU.dotGone("Corruption", 0.1))
+              local n = bane()
+              if n then need(st, not DRU.dotGone(n, 0)) end
+              need(st, usable("Wrack"))
+              lives(st, 40)
+          end },
         { key = "filler", row = 2, label = "SHADOW BOLT", icon = "Shadow Bolt",
           test = function(st)
               -- Incinerate (Destruction 40+), else wand when you have one, else Shadow Bolt
@@ -1663,6 +1676,7 @@ do
         if canCast("Shoot", "target") then return "Shoot", "USE WAND" end
     end
 
+    DRU.kit = { canCast = canCast, aura = aura, moving = moving, casting = casting, hp = hp }
     DRU.PRIEST_ALERTS = {
         { key = "priestHeal", row = 1, label = "HEAL", icon = "Lesser Heal", danger = true,
           test = function(st) local name, label = heal(); need(st, name ~= nil); return name, label end },
@@ -1682,8 +1696,373 @@ do
     }
 end
 
+-- Mage, Hunter, Rogue and Shaman leveling priorities for Forever.
+-- Built 2026-11-18 from the Icy Veins WoW: Forever leveling guides:
+--   frost-mage-leveling, fire-mage-leveling, beast-mastery-hunter-leveling, combat-rogue-leveling,
+--   enhancement-shaman-leveling, elemental-shaman-leveling
+-- Every check goes through the condition gates, so the cues keep working in combat when the game
+-- hides health, power and cooldowns. A spell you have not learned never shows, so one list covers
+-- every spec of a class.
+do
+    for name, seconds in pairs({ ["Serpent Sting"] = 15, ["Hunter's Mark"] = 120, ["Flame Shock"] = 12 }) do
+        DRU.DOTS[name] = true
+        DEFAULT_DURATION[name] = DEFAULT_DURATION[name] or seconds
+    end
+
+    -- Our own casts and the game's "this button is lit" glow, by spell name.
+    local castAt, glow = {}, {}
+    DRU.classCastAt, DRU.classGlow = castAt, glow
+    local watch = CreateFrame("Frame")
+    pcall(watch.RegisterEvent, watch, "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
+    pcall(watch.RegisterEvent, watch, "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
+    pcall(watch.RegisterUnitEvent, watch, "UNIT_SPELLCAST_SUCCEEDED", "player")
+    watch:SetScript("OnEvent", function(_, event, a1, _, a3)
+        local id = event == "UNIT_SPELLCAST_SUCCEEDED" and a3 or a1
+        if id == nil or secret(id) then return end
+        local ok, name = pcall(C_Spell.GetSpellName, id)
+        if not ok or type(name) ~= "string" or secret(name) then return end
+        if event == "UNIT_SPELLCAST_SUCCEEDED" then castAt[name] = GetTime()
+        else glow[name] = event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" or nil end
+    end)
+
+    local function fight(st) need(st, ctx.combat and ctx.hostile) end
+    local function lives(st, pct) if not ctx.elite then needTargetAbove(st, pct) end end
+    -- learned, off cooldown and affordable
+    local function can(st, name)
+        need(st, spell[name])
+        if not st.ok then return end
+        need(st, ready(name))
+        need(st, usable(name))
+    end
+    -- our own timed buff ran out (by our cast time; unknown counts as out)
+    local function faded(name, seconds)
+        local at = castAt[name]
+        return not at or GetTime() - at >= seconds
+    end
+    -- a buff on you, read plainly: true, false, or nil when the game hides it
+    local function has(name)
+        if not (C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName) then return nil end
+        if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+            local okR, restricted = pcall(C_Secrets.ShouldAurasBeSecret)
+            if not okR or plain(restricted) ~= false then return nil end
+        end
+        local ok, data = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", name, "HELPFUL")
+        if not ok or secret(data) or sectable(data) then return nil end
+        return data ~= nil, data
+    end
+    local function stacks(name)
+        local on, data = has(name)
+        local n = on and type(data) == "table" and plain(data.applications)
+        return type(n) == "number" and n or nil
+    end
+    -- a proc: the buff when readable, else the game's glow on the spell it empowers
+    local function proc(buff, spellName, count)
+        if count then
+            local n = stacks(buff)
+            if n then return n >= count end
+        elseif has(buff) == true then
+            return true
+        end
+        return glow[spellName] == true
+    end
+    local function inRange(name)
+        local id = spell[name]
+        if not (id and C_Spell.IsSpellInRange) then return false end
+        local ok, r = pcall(C_Spell.IsSpellInRange, id, "target")
+        if not ok then return false end
+        return r
+    end
+    local function weaponBare()
+        if not GetWeaponEnchantInfo then return false end
+        local okW, on = pcall(GetWeaponEnchantInfo)
+        on = okW and plain(on, nil)
+        return on == false
+    end
+    local function calm() return not ctx.combat and not IsMounted() end
+    local function lowMana(icons)
+        return { key = "lowmana", row = 2, label = "LOW MANA", icon = icons[1],
+                 test = function(st)
+                     need(st, ctx.combat)
+                     needRage(st, DB.lowMana, true)
+                     if st.ok then return firstKnown(icons), "LOW MANA" end
+                 end }
+    end
+
+    ---------------------------------------------------------------- Mage
+    local function mageSpec()
+        if spell["Pyroblast"] or spell["Combustion"] then return "Fire" end
+        if spell["Arcane Barrage"] or spell["Arcane Power"] then return "Arcane" end
+        return "Frost"
+    end
+    local MAGE_FILL = {
+        Fire = { "Scorch", "Fireball", "Frostbolt" },
+        Arcane = { "Arcane Blast", "Arcane Missiles", "Frostbolt", "Fireball" },
+        Frost = { "Frostbolt", "Fireball" },
+    }
+    DRU.MAGE_ALERTS = {
+        { key = "mBarrier", row = 1, label = "ICE BARRIER", icon = "Ice Barrier", danger = true,
+          test = function(st) need(st, ctx.combat); can(st, "Ice Barrier"); needLowHealth(st, 40) end },
+        { key = "mShield", row = 1, label = "MANA SHIELD", icon = "Mana Shield", danger = true,
+          test = function(st)
+              need(st, ctx.combat and spell["Mana Shield"] and faded("Mana Shield", 60))
+              need(st, usable("Mana Shield")); needLowHealth(st, 40)
+          end },
+        { key = "mNova", row = 1, label = "FROST NOVA", icon = "Frost Nova", danger = true,
+          test = function(st) need(st, ctx.combat and not ctx.group); can(st, "Frost Nova"); needLowHealth(st, 40) end },
+
+        { key = "mWand", row = 2, label = "FINISH WITH WAND", icon = "Shoot",
+          test = function(st)
+              fight(st); need(st, spell["Shoot"])
+              DRU.needUnitHP(st, "target", 15, true, true)
+          end },
+        { key = "mLance", row = 2, label = "ICE LANCE", icon = "Ice Lance",
+          test = function(st)
+              fight(st); need(st, spell["Ice Lance"] and proc("Fingers of Frost", "Ice Lance")); need(st, usable("Ice Lance"))
+          end },
+        { key = "mMissiles", row = 2, label = "FREE MISSILES", icon = "Arcane Missiles",
+          test = function(st)
+              fight(st); need(st, spell["Arcane Missiles"] and proc("Missile Barrage", "Arcane Missiles"))
+              need(st, usable("Arcane Missiles"))
+          end },
+        { key = "mPyro", row = 2, label = "PYROBLAST", icon = "Pyroblast",
+          test = function(st)
+              fight(st); need(st, spell["Pyroblast"] and proc("Heating Up", "Pyroblast", 3)); need(st, usable("Pyroblast"))
+          end },
+        { key = "mBlast", row = 2, label = "FIRE BLAST", icon = "Fire Blast",
+          test = function(st)
+              fight(st); can(st, "Fire Blast")
+              -- Fire: on cooldown to build Heating Up. Others: to finish a dying enemy.
+              if mageSpec() ~= "Fire" then DRU.needUnitHP(st, "target", 25, true, true) end
+          end },
+        { key = "mFill", row = 2, label = "CAST", icon = "Frostbolt",
+          test = function(st)
+              fight(st)
+              local name = firstKnown(MAGE_FILL[mageSpec()])
+              need(st, name)
+              if not st.ok then return end
+              need(st, usable(name))
+              return name, name:upper()
+          end },
+
+        { key = "mInt", row = 2, label = "ARCANE INTELLECT", icon = "Arcane Intellect",
+          test = function(st)
+              need(st, calm() and spell["Arcane Intellect"])
+              need(st, has("Arcane Intellect") == false and has("Arcane Brilliance") == false)
+          end },
+        { key = "mArmor", row = 2, label = "ARMOR", icon = "Frost Armor",
+          test = function(st)
+              local name = firstKnown({ "Mage Armor", "Ice Armor", "Frost Armor" })
+              need(st, calm() and name)
+              need(st, has("Mage Armor") == false and has("Ice Armor") == false and has("Frost Armor") == false)
+              return name, "ARMOR"
+          end },
+        lowMana({ "Evocation", "Shoot" }),
+    }
+
+    ---------------------------------------------------------------- Hunter
+    DRU.HUNTER_ALERTS = {
+        { key = "hMend", row = 1, label = "MEND PET", icon = "Mend Pet", danger = true,
+          test = function(st)
+              need(st, ctx.combat and spell["Mend Pet"] and DRU.havePet() and faded("Mend Pet", 5))
+              need(st, usable("Mend Pet"))
+              DRU.needUnitHP(st, "pet", 40, true)
+          end },
+        { key = "hFeign", row = 1, label = "FEIGN DEATH", icon = "Feign Death", danger = true,
+          test = function(st) need(st, ctx.combat); can(st, "Feign Death"); needLowHealth(st, 30) end },
+
+        { key = "hMark", row = 2, label = "HUNTER'S MARK", icon = "Hunter's Mark",
+          test = function(st)
+              fight(st); need(st, spell["Hunter's Mark"])
+              DRU.needDot(st, "Hunter's Mark", 0)
+              need(st, usable("Hunter's Mark")); lives(st, 50)
+          end },
+        { key = "hRaptor", row = 2, label = "RAPTOR STRIKE", icon = "Raptor Strike",
+          test = function(st)
+              -- an enemy in your face: melee it (your shots need range)
+              fight(st); can(st, "Raptor Strike"); need(st, inRange("Raptor Strike"))
+          end },
+        { key = "hSting", row = 2, label = "SERPENT STING", icon = "Serpent Sting",
+          test = function(st)
+              fight(st); need(st, spell["Serpent Sting"])
+              DRU.needDot(st, "Serpent Sting", 0.1)
+              need(st, usable("Serpent Sting")); lives(st, 30)
+          end },
+        { key = "hHawk", row = 2, label = "SUMMON HAWK", icon = "Summon Hawk",
+          test = function(st) fight(st); can(st, "Summon Hawk") end },
+        { key = "hMulti", row = 2, label = "MULTI-SHOT", icon = "Multi-Shot",
+          test = function(st) fight(st); need(st, (ctx.enemies or 0) >= 3); can(st, "Multi-Shot") end },
+        { key = "hAimed", row = 2, label = "AIMED SHOT", icon = "Aimed Shot",
+          test = function(st) fight(st); can(st, "Aimed Shot") end },
+        { key = "hArcane", row = 2, label = "ARCANE SHOT", icon = "Arcane Shot",
+          test = function(st)
+              -- only to dump mana when the bar is nearly full
+              fight(st); can(st, "Arcane Shot"); needRage(st, 90, false)
+          end },
+
+        { key = "hPet", row = 2, label = "CALL PET", icon = "Call Pet",
+          test = function(st) need(st, calm() and spell["Call Pet"] and not DRU.havePet()) end },
+        { key = "hAspect", row = 2, label = "ASPECT", icon = "Aspect of the Hawk",
+          test = function(st)
+              local name = firstKnown({ "Aspect of the Hawk", "Aspect of the Monkey" })
+              need(st, calm() and name)
+              for _, aspect in ipairs({ "Hawk", "Monkey", "Viper", "Cheetah", "Pack", "Wild", "Beast" }) do
+                  need(st, has("Aspect of the " .. aspect) == false)
+              end
+              return name, "ASPECT"
+          end },
+        lowMana({ "Aspect of the Viper", "Auto Shot" }),
+    }
+
+    ---------------------------------------------------------------- Rogue
+    DRU.ROGUE_ALERTS = {
+        { key = "rEvasion", row = 1, label = "EVASION", icon = "Evasion", danger = true,
+          test = function(st) need(st, ctx.combat); can(st, "Evasion"); needLowHealth(st, 40) end },
+
+        { key = "rStealth", row = 2, label = "STEALTH", icon = "Stealth",
+          test = function(st)
+              need(st, calm() and ctx.hostile); can(st, "Stealth"); need(st, has("Stealth") == false)
+          end },
+        { key = "rOpen", row = 2, label = "OPEN", icon = "Cheap Shot",
+          test = function(st)
+              local name = firstKnown({ "Cheap Shot", "Garrote", "Ambush" })
+              need(st, not ctx.combat and ctx.hostile and name and has("Stealth") == true)
+              if not st.ok then return end
+              need(st, usable(name))
+              return name, "OPEN: " .. name
+          end },
+        { key = "rRiposte", row = 2, label = "RIPOSTE", icon = "Riposte",
+          test = function(st) fight(st); can(st, "Riposte") end },
+        { key = "rSlice", row = 2, label = "SLICE AND DICE", icon = "Slice and Dice",
+          test = function(st)
+              -- only when the fight will last: an elite, a second enemy, or a healthy target
+              fight(st); need(st, spell["Slice and Dice"] and faded("Slice and Dice", 15))
+              DRU.needCP(st, 5); need(st, usable("Slice and Dice"))
+              if not (ctx.elite or (ctx.enemies or 0) >= 2) then needTargetAbove(st, 60) end
+          end },
+        { key = "rEvis", row = 2, label = "EVISCERATE", icon = "Eviscerate",
+          test = function(st) fight(st); need(st, spell["Eviscerate"]); DRU.needCP(st, 5); need(st, usable("Eviscerate")) end },
+        { key = "rStrike", row = 2, label = "SINISTER STRIKE", icon = "Sinister Strike",
+          test = function(st) fight(st); need(st, spell["Sinister Strike"]); need(st, usable("Sinister Strike")) end },
+
+        { key = "rPoison", row = 2, label = "POISON YOUR WEAPONS", icon = "Poisons",
+          test = function(st) need(st, calm() and spell["Poisons"] and weaponBare()) end },
+        -- burst for an elite or a second enemy
+        { key = "rFlurry", row = 2, label = "BLADE FLURRY", icon = "Blade Flurry",
+          test = function(st) fight(st); need(st, ctx.elite or (ctx.enemies or 0) >= 2); can(st, "Blade Flurry") end },
+        { key = "rRush", row = 2, label = "ADRENALINE RUSH", icon = "Adrenaline Rush",
+          test = function(st) fight(st); need(st, ctx.elite or (ctx.enemies or 0) >= 2); can(st, "Adrenaline Rush") end },
+    }
+
+    ---------------------------------------------------------------- Shaman
+    local function elemental()
+        return (DRU.passive["Elemental Focus"] or spell["Elemental Mastery"]) and not spell["Stormstrike"]
+    end
+    DRU.SHAMAN_ALERTS = {
+        { key = "sHeal", row = 1, label = "HEAL YOURSELF", icon = "Healing Wave", danger = true,
+          test = function(st)
+              local name = firstKnown({ "Lesser Healing Wave", "Healing Wave" })
+              need(st, name)
+              if not st.ok then return end
+              need(st, usable(name)); needLowHealth(st, 40)
+              return name, "HEAL YOURSELF"
+          end },
+
+        { key = "sStorm", row = 2, label = "STORMSTRIKE", icon = "Stormstrike",
+          test = function(st) fight(st); can(st, "Stormstrike") end },
+        { key = "sMael", row = 2, label = "FREE LIGHTNING BOLT", icon = "Lightning Bolt",
+          test = function(st)
+              fight(st); need(st, spell["Lightning Bolt"] and proc("Maelstrom Weapon", "Lightning Bolt", 5))
+              need(st, usable("Lightning Bolt"))
+          end },
+        { key = "sFlame", row = 2, label = "FLAME SHOCK", icon = "Flame Shock",
+          test = function(st)
+              -- Elemental always; melee only in a group, where the fight lasts
+              fight(st); need(st, spell["Flame Shock"] and (elemental() or ctx.group))
+              DRU.needDot(st, "Flame Shock", 0.1)
+              need(st, ready("Flame Shock")); need(st, usable("Flame Shock")); lives(st, 40)
+          end },
+        { key = "sChain", row = 2, label = "CHAIN LIGHTNING", icon = "Chain Lightning",
+          test = function(st) fight(st); need(st, elemental() and (ctx.enemies or 0) >= 2); can(st, "Chain Lightning") end },
+        { key = "sBolt", row = 2, label = "LIGHTNING BOLT", icon = "Lightning Bolt",
+          test = function(st) fight(st); need(st, elemental() and spell["Lightning Bolt"]); need(st, usable("Lightning Bolt")) end },
+        { key = "sEarth", row = 2, label = "EARTH SHOCK", icon = "Earth Shock",
+          test = function(st) fight(st); can(st, "Earth Shock") end },
+
+        { key = "sShield", row = 2, label = "SHIELD", icon = "Lightning Shield",
+          test = function(st)
+              local name = elemental() and firstKnown({ "Water Shield", "Lightning Shield" })
+                  or firstKnown({ "Lightning Shield", "Water Shield" })
+              need(st, calm() and name)
+              need(st, has("Lightning Shield") == false and has("Water Shield") == false)
+              return name, "SHIELD"
+          end },
+        { key = "sImbue", row = 2, label = "WEAPON", icon = "Rockbiter Weapon",
+          test = function(st)
+              local name = firstKnown(ctx.group and { "Windfury Weapon", "Flametongue Weapon", "Rockbiter Weapon" }
+                  or { "Windfury Weapon", "Rockbiter Weapon", "Flametongue Weapon" })
+              need(st, calm() and name and weaponBare())
+              return name, "WEAPON"
+          end },
+        lowMana({ "Mana Spring Totem", "Shamanistic Rage", "Lightning Shield" }),
+    }
+
+    ---------------------------------------------------------------- Priest (in combat)
+    -- The Priest cues above read plain numbers, which the game hides in a fight. These do the
+    -- same jobs through the condition gates, so a Priest still gets cues in combat. They sit
+    -- under the plain ones in each spot, so nothing changes when the numbers can be read.
+    for name, seconds in pairs({ ["Shadow Word: Pain"] = 18, ["Devouring Plague"] = 24 }) do
+        DRU.DOTS[name] = true
+        DEFAULT_DURATION[name] = DEFAULT_DURATION[name] or seconds
+    end
+    local function shadow() return spell["Shadowform"] ~= nil end
+    for _, alert in ipairs({
+        { key = "pShield", row = 1, label = "SHIELD YOURSELF", icon = "Power Word: Shield", danger = true,
+          test = function(st)
+              -- Weakened Soul lasts 15 seconds: do not ask again before it is gone
+              need(st, ctx.combat and spell["Power Word: Shield"] and faded("Power Word: Shield", 15))
+              need(st, usable("Power Word: Shield")); needLowHealth(st, 50)
+          end },
+        { key = "pSelfHeal", row = 1, label = "HEAL YOURSELF", icon = "Lesser Heal", danger = true,
+          test = function(st)
+              local name = firstKnown({ "Flash Heal", "Heal", "Lesser Heal" })
+              need(st, ctx.combat and name and not shadow())
+              if not st.ok then return end
+              need(st, usable(name)); needLowHealth(st, 40)
+              return name, "HEAL YOURSELF"
+          end },
+        { key = "pWand", row = 2, label = "FINISH WITH WAND", icon = "Shoot",
+          test = function(st) fight(st); need(st, spell["Shoot"]); DRU.needUnitHP(st, "target", 15, true, true) end },
+        { key = "pPain", row = 2, label = "APPLY PAIN", icon = "Shadow Word: Pain",
+          test = function(st)
+              fight(st); need(st, spell["Shadow Word: Pain"])
+              DRU.needDot(st, "Shadow Word: Pain", 0.1)
+              need(st, usable("Shadow Word: Pain")); lives(st, 30)
+          end },
+        { key = "pPlague", row = 2, label = "APPLY PLAGUE", icon = "Devouring Plague",
+          test = function(st)
+              fight(st); need(st, shadow()); can(st, "Devouring Plague")
+              DRU.needDot(st, "Devouring Plague", 0.1); lives(st, 35)
+          end },
+        { key = "pBlast", row = 2, label = "MIND BLAST", icon = "Mind Blast",
+          test = function(st) fight(st); can(st, "Mind Blast") end },
+        { key = "pFill", row = 2, label = "CAST", icon = "Smite",
+          test = function(st)
+              fight(st)
+              local name = shadow() and firstKnown({ "Mind Flay", "Smite" }) or firstKnown({ "Holy Fire", "Smite", "Mind Flay" })
+              need(st, name)
+              if not st.ok then return end
+              if name == "Holy Fire" then need(st, ready(name)) end
+              need(st, usable(name))
+              return name, name:upper()
+          end },
+    }) do
+        DRU.PRIEST_ALERTS[#DRU.PRIEST_ALERTS + 1] = alert
+    end
+end
+
 local CLASS_ALERTS = { WARRIOR = WARRIOR_ALERTS, PALADIN = PALADIN_ALERTS, DRUID = DRUID_ALERTS,
-    WARLOCK = DRU.WARLOCK_ALERTS, PRIEST = DRU.PRIEST_ALERTS }
+    WARLOCK = DRU.WARLOCK_ALERTS, PRIEST = DRU.PRIEST_ALERTS, MAGE = DRU.MAGE_ALERTS,
+    HUNTER = DRU.HUNTER_ALERTS, ROGUE = DRU.ROGUE_ALERTS, SHAMAN = DRU.SHAMAN_ALERTS }
 
 -- Big-icon mode: every alert of a spot sits in one place, stacked. First in the list
 -- is on top, so you only ever see the most important lit one. Order: Icy Veins
@@ -1711,12 +2090,26 @@ local SPOT = {
     WARLOCK = {   -- spells you don't know yet never light, so one list covers all three specs
         danger = { "lowhp", "fear" },
         next   = { "trance", "drainlife", "drainsoul", "sburn", "conflag", "brand",
-                   "corrupt", "bane", "immolate", "siphon", "filler" },
+                   "corrupt", "bane", "immolate", "siphon", "wrack", "filler" },
         buff   = { "armor", "pet", "soullink", "curse", "mkstone" },
         extra  = { "lifetap", "funnel", "rof", "lowmana" },
     },
 }
-SPOT.PRIEST = { danger = { "priestHeal" }, next = { "priestDamage" }, buff = { "priestBuff" }, extra = { "lowmana" } }
+SPOT.PRIEST = { danger = { "priestHeal", "pShield", "pSelfHeal" },
+    next = { "priestDamage", "pWand", "pPain", "pPlague", "pBlast", "pFill" },
+    buff = { "priestBuff" }, extra = { "lowmana" } }
+SPOT.MAGE = { danger = { "mBarrier", "mShield", "mNova" },
+    next = { "mWand", "mLance", "mMissiles", "mPyro", "mBlast", "mFill" },
+    buff = { "mInt", "mArmor" }, extra = { "lowmana" } }
+SPOT.HUNTER = { danger = { "hMend", "hFeign" },
+    next = { "hMark", "hRaptor", "hSting", "hHawk", "hMulti", "hAimed", "hArcane" },
+    buff = { "hPet", "hAspect" }, extra = { "lowmana" } }
+SPOT.ROGUE = { danger = { "rEvasion" },
+    next = { "rStealth", "rOpen", "rRiposte", "rSlice", "rEvis", "rStrike" },
+    buff = { "rPoison" }, extra = { "rFlurry", "rRush" } }
+SPOT.SHAMAN = { danger = { "sHeal" },
+    next = { "sStorm", "sMael", "sFlame", "sChain", "sBolt", "sEarth" },
+    buff = { "sShield", "sImbue" }, extra = { "lowmana" } }
 DRU.warriorSingleNext = SPOT.WARRIOR.next
 DRU.warriorPackNext = { "clap", "revenge", "slam", "vrush", "sunder", "execute" }
 local SPOT_SIZE = { danger = 64, next = 64, buff = 44, extra = 64 }   -- big, easy to see
@@ -2183,6 +2576,10 @@ local CLASS_CDS = {
     DRUID = { "Barkskin", "Frenzied Regeneration", "Innervate", "Tranquility", "Challenging Roar", "Dash" },
     WARLOCK = { "Death Coil", "Howl of Terror", "Shadow Ward", "Amplify Curse", "Fel Domination", "Soulshatter" },
 }
+CLASS_CDS.MAGE = { "Frost Nova", "Blink", "Counterspell", "Ice Barrier", "Ice Block", "Evocation", "Cold Snap", "Presence of Mind", "Combustion", "Arcane Power" }
+CLASS_CDS.HUNTER = { "Feign Death", "Disengage", "Intimidation", "Bestial Wrath", "Rapid Fire", "Deterrence", "Scatter Shot", "Concussive Shot" }
+CLASS_CDS.ROGUE = { "Kick", "Gouge", "Evasion", "Sprint", "Vanish", "Blade Flurry", "Adrenaline Rush", "Kidney Shot", "Blind" }
+CLASS_CDS.SHAMAN = { "Earth Shock", "Stormstrike", "Grounding Totem", "Elemental Mastery", "Nature's Swiftness", "Shamanistic Rage", "Bloodlust", "Heroism" }
 CLASS_CDS.PRIEST = { "Fade", "Psychic Scream", "Desperate Prayer", "Inner Focus", "Power Infusion", "Penance", "Prayer of Mending" }
 for _, list in pairs(CLASS_CDS) do
     for _, n in ipairs(DRU.RACIAL_CDS or {}) do list[#list + 1] = n end
@@ -2364,7 +2761,7 @@ local function layout()
         ctx.form = DRU.FORM[id or 0] or "caster"
         DRU.layoutForm = ctx.form
     end
-    DRU.caster = CLASS == "WARLOCK" or CLASS == "PRIEST" or (CLASS == "DRUID" and ctx.form ~= "bear" and ctx.form ~= "cat")
+    DRU.caster = CLASS == "WARLOCK" or CLASS == "PRIEST" or CLASS == "MAGE" or (CLASS == "DRUID" and ctx.form ~= "bear" and ctx.form ~= "cat")
     DRU.lux = DB.lux ~= false and DB.stack ~= false and SPOT[CLASS] ~= nil
     for _, a in ipairs(ALERTS) do if not a.root then makeSlot(a) end end
     if DRU.lux and DRU.layoutCaster then DRU.layoutCaster(); return end
@@ -2491,14 +2888,36 @@ local function setIcon(a, name, label)
         local tex = id and C_Spell.GetSpellTexture(id) or DRU.icons[name]
         a.c.icon:SetTexture(tex or (CLASS == "WARLOCK" and "Interface\\Icons\\INV_Misc_QuestionMark") or FALLBACK_ICON[a.key] or DEFAULT_ICON)
     end
-    setText(a.c.text, (DRU.lux and a.hudSpot == "next") and
-        ((a.key == "sunder" and label) or (a.key == "trance" and "Free Shadow Bolt") or name) or (label or a.label))
+    local words = (DRU.lux and a.hudSpot == "next") and
+        ((a.key == "sunder" and label) or (a.key == "trance" and "Free Shadow Bolt") or name) or (label or a.label)
+    local other = DBagsAlertsLocale
+    if other and other.Active() and type(words) == "string" and not secret(words) then
+        words = other.Cue(words, name, spell[name])
+    end
+    setText(a.c.text, words)
 end
 
 local function safeAlpha(f, v)
     if not pcall(f.SetAlpha, f, v) then f:SetAlpha(1) end
 end
 
+-- Says a danger alert out loud with the game's text-to-speech. Returns true when it was spoken.
+-- The game changed how SpeakText is called between versions, so both ways are tried.
+function DRU.speak(text)
+    local V = C_VoiceChat
+    if type(text) ~= "string" or secret(text) or not (V and V.SpeakText) then return false end
+    text = text:lower():gsub("%f[%a]hp%f[%A]", "health")
+    local id = 0
+    if V.GetTtsVoices then
+        local ok, voices = pcall(V.GetTtsVoices)
+        if ok and type(voices) == "table" and voices[1] and type(voices[1].voiceID) == "number" then
+            id = voices[1].voiceID
+        end
+    end
+    local dest = Enum and Enum.VoiceTtsDestination and Enum.VoiceTtsDestination.LocalPlayback
+    if dest ~= nil and pcall(V.SpeakText, id, text, dest, 0, 100) then return true end
+    return (pcall(V.SpeakText, id, text, 0, 100))
+end
 local testUntil, soundAt, lit = 0, 0, {}
 
 -- alpha from a yes/no that may be secret (never inspected when secret)
@@ -3122,8 +3541,9 @@ local function update()
                 end
                 -- Sound only for danger alerts we KNOW are lit (no secret gates).
                 local known = st.ok and st.n == 0
-                if DB.sound and a.danger and known and not lit[a.key] and GetTime() > soundAt then
-                    PlaySound(SOUNDKIT.RAID_WARNING, "Master")
+                if (DB.sound or DB.voice) and a.danger and known and not lit[a.key] and GetTime() > soundAt then
+                    local spoken = DB.voice and DRU.speak(type(label) == "string" and label or a.label)
+                    if DB.sound and not spoken then PlaySound(SOUNDKIT.RAID_WARNING, "Master") end
                     soundAt = GetTime() + 3
                 end
                 lit[a.key] = known
@@ -4580,7 +5000,7 @@ do   -- weapon stone reminder (own block: Lua's 200 top-level locals limit)
     end
     local function update()
         if InCombatLockdown() then return end          -- secure button: only change it out of combat
-        if not DB or DB.stoneNag == false or CLASS == "DRUID" or CLASS == "WARLOCK" or CLASS == "PRIEST" or UnitIsDeadOrGhost("player") then hide() return end
+        if not DB or DB.stoneNag == false or CLASS == "DRUID" or CLASS == "WARLOCK" or CLASS == "PRIEST" or CLASS == "MAGE" or CLASS == "HUNTER" or CLASS == "ROGUE" or CLASS == "SHAMAN" or UnitIsDeadOrGhost("player") then hide() return end
         local kind = weaponKind()
         if not kind or stoned() ~= false then hide() return end
         local id, icon = findStone(kind)
@@ -4886,7 +5306,9 @@ ev:SetScript("OnEvent", function(self, event, ...)
         local _, class = UnitClass("player")
         if not CLASS_ALERTS[class] then main:Hide(); return end
         CLASS, ALERTS, CD_SPELLS = class, CLASS_ALERTS[class], CLASS_CDS[class]
-        POWER = (class == "PALADIN" or class == "WARLOCK" or class == "PRIEST") and MANA or RAGE
+        POWER = (class == "PALADIN" or class == "WARLOCK" or class == "PRIEST" or class == "MAGE"
+            or class == "HUNTER" or class == "SHAMAN") and MANA or RAGE
+        if class == "ROGUE" then POWER = DRU.ENERGY end
         if class == "DRUID" then POWER = plain(UnitPowerType("player"), MANA) or MANA end
         if POWER == MANA then rageBar:SetStatusBarColor(0.15, 0.4, 1) end
         DBagsAlertsState.alerts = ALERTS
@@ -4943,7 +5365,9 @@ ev:SetScript("OnEvent", function(self, event, ...)
         DRU.applyHelperSize()
         say("%s loaded. /pa for settings.",
             CLASS == "PALADIN" and (DB.tank and "Paladin (tank)" or "Paladin (damage)")
-            or CLASS == "DRUID" and "Druid" or CLASS == "WARLOCK" and "Warlock" or CLASS == "PRIEST" and "Priest" or "Warrior")
+            or CLASS == "DRUID" and "Druid" or CLASS == "WARLOCK" and "Warlock" or CLASS == "PRIEST" and "Priest"
+            or CLASS == "MAGE" and "Mage" or CLASS == "HUNTER" and "Hunter" or CLASS == "ROGUE" and "Rogue"
+            or CLASS == "SHAMAN" and "Shaman" or "Warrior")
         return
     end
     alertsDirty = true                 -- every event below can change what should light up
@@ -5065,6 +5489,7 @@ local PLAIN = {
     bane = { "Bane of Agony", "Missing. Never early." },
     immolate = { "Immolate", "Missing on target." },
     siphon = { "Siphon Life", "Long fights." },
+    wrack = { "Wrack", "DoTs are on. Channel for damage." },
     filler = { "Filler", "Shadow Bolt, wand or Incinerate." },
     armor = { "Demon Armor", "Buff missing." },
     pet = { "Summon pet", "No pet out." },
@@ -5371,9 +5796,11 @@ local function buildSettings()
     local outer = CreateFrame("Frame", "DBagsAlertsSettings", UIParent, "BackdropTemplate")
     outer:SetSize(760, 580); outer:SetPoint("CENTER"); outer:SetFrameStrata("DIALOG")
     DBagsAlertsState.prepareSettingsWindow(outer, "main"); outer.opened = false
-    outer:SetBackdrop({bgFile="Interface\\DialogFrame\\UI-DialogBox-Background",edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border",
-        tile=true,tileSize=32,edgeSize=24,insets={left=6,right=6,top=6,bottom=6}})
-    local title=outer:CreateFontString(nil,"OVERLAY");styleText(title,20,1,0.82,0.2)
+    -- The addon family shares one look: every window is a big WoW tooltip.
+    outer:SetBackdrop({bgFile="Interface\\Buttons\\WHITE8X8",edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize=16,insets={left=4,right=4,top=4,bottom=4}})
+    outer:SetBackdropColor(0.030,0.040,0.090,0.94);outer:SetBackdropBorderColor(0.730,0.740,0.780,1)
+    local title=outer:CreateFontString(nil,"OVERLAY");styleText(title,20,1,0.82,0)
     title:SetPoint("TOPLEFT",24,-18);title:SetText("Battle Buddy")
     local close=CreateFrame("Button",nil,outer,"UIPanelCloseButton");close:SetPoint("TOPRIGHT",-8,-8)
     close:SetScript("OnClick",function() outer:Hide() end)
@@ -5391,7 +5818,12 @@ local function buildSettings()
         DB.settingsPage=key;outer.selectedPage=key;refresh()
     end
     outer.selectPage=selectPage
+    local function tr(text)
+        local other = DBagsAlertsLocale
+        return other and other.T(text) or text
+    end
     local function page(key,label)
+        label=tr(label)
         local index=#outer.tabs+1
         outer.tabs[index]=key
         local tab=makeButton(outer,label,140,function() selectPage(key) end)
@@ -5406,20 +5838,20 @@ local function buildSettings()
     end
     local function relayout() layout();tDirty.all=true;if DRU.applyHelperSize then DRU.applyHelperSize() end end
     local function check(page,key,label,tip,get,set)
-        local widget=makeCheck(page.body,label,tip,get or function() return DB[key] end,set or function(v) DB[key]=v;relayout() end)
+        local widget=makeCheck(page.body,tr(label),tr(tip),get or function() return DB[key] end,set or function(v) DB[key]=v;relayout() end)
         widget:SetPoint("TOPLEFT",4,page.y);page.y=page.y-32
         widget.text:SetWidth(455);styleText(widget.text,14,0.94,0.94,0.9)
         items[#items+1]=widget;outer.controls[key]=widget;return widget
     end
     local function slider(page,key,label,lo,hi,step,fmt,get,set,custom)
-        local widget=makeSlider(page.body,label,lo,hi,step,fmt,get,set)
+        local widget=makeSlider(page.body,tr(label),lo,hi,step,fmt,get,set)
         widget:SetWidth(340);widget:SetPoint("TOPLEFT",12,page.y-22);page.y=page.y-66
         items[#items+1]=widget;outer.controls[key]=widget
         if custom then independent[#independent+1]=widget end
         return widget
     end
     local function button(page,key,label,callback)
-        local widget=makeButton(page.body,label,300,callback)
+        local widget=makeButton(page.body,tr(label),300,callback)
         widget:SetPoint("TOPLEFT",8,page.y);page.y=page.y-42;outer.controls[key]=widget;return widget
     end
     local display=page("display","Display")
@@ -5428,6 +5860,7 @@ local function buildSettings()
     check(display,"names","Spell names","Show the spell name below the cue.")
     check(display,"classic","Classic borders","Use WoW borders and glossy bars.",function() return DB.style~="clean" end,function(v) DB.style=v and "classic" or "clean";relayout() end)
     check(display,"sound","Alert sound","Play a sound for danger alerts.")
+    check(display,"voice","Alert voice","Say danger alerts out loud.")
     button(display,"preview","Preview HUD",function() testUntil=GetTime()+8 end)
     button(display,"starter","Use starter setup",function() DBagsAlertsState.starterSetup();refresh() end)
     button(display,"restoreStarter","Restore my previous setup",function() DBagsAlertsState.starterSetup(true);refresh() end)
@@ -5640,6 +6073,9 @@ SlashCmdList.DBAGSALERTS = function(msg)
         DB.dumpAt = math.max(20, math.min(100, tonumber(rest))); say("Rage dump alert at %d%%.", DB.dumpAt)
     elseif cmd == "hp" and tonumber(rest) then
         DB.lowHp = math.max(5, math.min(90, tonumber(rest))); say("LOW HP alert below %d%%.", DB.lowHp)
+    elseif cmd == "voice" then
+        DB.voice = not DB.voice; say("danger voice %s.", DB.voice and "ON" or "OFF")
+        if DB.voice and not DRU.speak("voice on") then say("this game version has no text-to-speech.") end
     elseif cmd == "sound" then
         DB.sound = not DB.sound; say("danger sound %s.", DB.sound and "ON" or "OFF")
     elseif cmd == "reset" then
@@ -5687,6 +6123,7 @@ SlashCmdList.DBAGSALERTS = function(msg)
         say("  /pa sunder 2 | dump 70 | hp 35 - tune thresholds (warrior)")
         say("  /pa tank | mana 20 - paladin: tank or damage setup, low mana %%")
         say("  /pa sound          - sound on danger alerts")
+        say("  /pa voice          - say danger alerts out loud")
         say("  /pa debug          - what the game lets addons read (try in combat)")
     end
 end
