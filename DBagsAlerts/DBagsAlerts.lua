@@ -1293,6 +1293,15 @@ do
         end
         return true
     end
+    function DRU.eating()
+        if not C_UnitAuras or not C_UnitAuras.GetAuraDataBySpellName then return false end
+        for _, n in ipairs({ "Food", "Drink", "Food & Drink", "Refreshment" }) do
+            local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", n, "HELPFUL")
+            if ok and a ~= nil then return true end
+        end
+        return false
+    end
+
     function DRU.havePet()
         local e = UnitExists("pet")
         if secret(e) then return true end
@@ -1507,6 +1516,21 @@ do
               need(st, usable(n))
               return n, "CURSE"
           end },
+        { key = "petrest", row = 2, label = "HEAL PET", icon = "Health Funnel",
+          test = function(st)
+              -- between pulls: top your demon up before the next fight (Voidwalker can Consume Shadows)
+              need(st, not ctx.combat and spell["Health Funnel"] and DRU.havePet() and not IsMounted())
+              DRU.needUnitHP(st, "pet", 60, true)
+              DRU.needUnitHP(st, "player", 50, false)
+          end },
+        { key = "noshards", row = 2, label = "NO SHARDS", icon = "Drain Soul",
+          test = function(st)
+              -- out of shards: finish the next mob with Drain Soul
+              need(st, not ctx.combat and spell["Drain Soul"] and not IsMounted())
+              if not st.ok then return end
+              need(st, (DRU.bags()) == 0)
+              return nil, "0 SHARDS"
+          end },
         { key = "mkstone", row = 2, label = "HEALTHSTONE", icon = "Create Healthstone",
           test = function(st)
               need(st, not ctx.combat and spell["Create Healthstone"] and not IsMounted())
@@ -1539,6 +1563,23 @@ do
           test = function(st)
               need(st, ctx.combat and spell["Life Tap"])
               needRage(st, DB.lowMana, true)
+          end },
+
+        -- BETWEEN PULLS: Warlocks rarely need to drink. Life Tap turns health into mana, food brings
+        -- the health back. Hidden while you eat or drink.
+        { key = "rest", row = 2, label = "REST", icon = "Life Tap",
+          test = function(st)
+              need(st, not ctx.combat and spell["Life Tap"] and not IsMounted()
+                  and not plain(UnitIsDeadOrGhost("player"), false) and not DRU.eating())
+              if not st.ok then return end
+              local h, m = UnitHealth("player"), UnitHealthMax("player")
+              if not secret(h) and not secret(m) and m and m > 0 and h / m < 0.5 then
+                  return "Eat", "EAT"                               -- health low: eat first
+              end
+              needRage(st, 75, true)                               -- mana under 75%
+              DRU.needUnitHP(st, "player", 70, false)              -- ...and health is fine
+              need(st, usable("Life Tap"))
+              if st.ok then return "Life Tap", "LIFE TAP" end
           end },
     }
 end
@@ -2091,8 +2132,8 @@ local SPOT = {
         danger = { "lowhp", "fear" },
         next   = { "trance", "drainlife", "drainsoul", "sburn", "conflag", "brand",
                    "corrupt", "bane", "immolate", "siphon", "wrack", "filler" },
-        buff   = { "armor", "pet", "soullink", "curse", "mkstone" },
-        extra  = { "lifetap", "funnel", "rof", "lowmana" },
+        buff   = { "armor", "pet", "soullink", "curse", "petrest", "mkstone", "noshards" },
+        extra  = { "lifetap", "funnel", "rof", "lowmana", "rest" },
     },
 }
 SPOT.PRIEST = { danger = { "priestHeal", "pShield", "pSelfHeal" },
@@ -2736,6 +2777,7 @@ local function layoutStack()
                 gl:SetSize(p[3] / 0.64, p[3] / 0.64)        -- the icon fills the middle 64% of the art
                 gl:SetFrameLevel(a.c:GetFrameLevel() + 3)
                 gl:SetShown(DB.glow ~= false)
+                if DRU.restLabel then DRU.restLabel(a) end
                 if not DB.off[key] then a.root:Show() end
             end
         end
@@ -2880,6 +2922,164 @@ local function layout()
     if DBagsAlertsState.placeClickers then DBagsAlertsState.placeClickers() end   -- right-click menus follow
 end
 
+    -- Between-pull cues: out of combat the HUD is dimmed, so these ignore that and show a word.
+    DRU.REST_CUES = { rest = true, petrest = true, noshards = true, mkstone = true }
+    DRU.icons.Eat = DRU.icons.Eat or "Interface\\Icons\\INV_Misc_Food_15"
+    -- Between pulls the cues are flat rows under the mana bar, in the same look as the
+    -- bars: dark back, 1px black edge, icon on the left, gold word, white hint on the right.
+    -- Each row is a click button (out of combat only, one click = one cast, like a hotbar).
+    DRU.REST_ORDER = { "rest", "petrest", "noshards", "mkstone" }
+    DRU.REST_HINT = { EAT = "Click to eat", ["LIFE TAP"] = "Click: health into mana",
+                      ["HEAL PET"] = "Click: Health Funnel", ["0 SHARDS"] = "Drain Soul your next kill",
+                      ["MAKE STONE"] = "Click to make one", ["NO FOOD"] = "Buy food or cook" }
+    do
+        local ROW_H, ROW_GAP = 26, 4
+        local rows = {}
+        local function row(i)
+            if rows[i] then return rows[i] end
+            local b = CreateFrame("Button", "DBagsAlertsRestRow" .. i, UIParent, "SecureActionButtonTemplate")
+            b:RegisterForClicks("AnyUp", "AnyDown")
+            b:Hide()
+            b.bg = b:CreateTexture(nil, "BACKGROUND")
+            b.bg:SetAllPoints(); b.bg:SetColorTexture(0.06, 0.06, 0.07, 0.85)
+            addBorder(b, 0, 0, 0, 1, 1)
+            b.icon = b:CreateTexture(nil, "ARTWORK")
+            b.icon:SetPoint("TOPLEFT", 1, -1); b.icon:SetPoint("BOTTOMLEFT", 1, 1)
+            b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            b.word = b:CreateFontString(nil, "OVERLAY")
+            styleText(b.word, 14, 1, 0.82, 0)
+            b.word:SetPoint("LEFT", b.icon, "RIGHT", 8, 0); b.word:SetWordWrap(false)
+            b.hint = b:CreateFontString(nil, "OVERLAY")
+            styleText(b.hint, 12, 0.9, 0.9, 0.9)
+            b.hint:SetPoint("RIGHT", b, "RIGHT", -8, 0); b.hint:SetWordWrap(false)
+            b.hover = b:CreateTexture(nil, "HIGHLIGHT")
+            b.hover:SetAllPoints(); b.hover:SetColorTexture(1, 1, 1, 0.08)
+            rows[i] = b
+            return b
+        end
+        -- any food in your bags (an item whose use is "Food" or "Food & Drink")
+        local function food()
+            if not (C_Container and C_Container.GetContainerNumSlots and C_Container.GetContainerItemInfo) then return nil end
+            local getSpell = C_Item and C_Item.GetItemSpell or GetItemSpell
+            if not getSpell then return nil end
+            for bag = 0, 4 do
+                local okN, n = pcall(C_Container.GetContainerNumSlots, bag)
+                for slot = 1, (okN and type(n) == "number" and n or 0) do
+                    local ok, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+                    if ok and type(info) == "table" and not sectable(info) and info.itemID and not secret(info.itemID) then
+                        local okS, sp = pcall(getSpell, info.itemID)
+                        if okS and type(sp) == "string" and not secret(sp)
+                           and (sp == "Food" or sp == "Food & Drink" or sp == "Refreshment") then
+                            return info.itemID, info.iconFileID
+                        end
+                    end
+                end
+            end
+        end
+        -- what a click does for each cue: spell or item (nil = nothing to click)
+        local function action(key, word)
+            if key == "rest" and word == "EAT" then
+                local id, icon = food()
+                if id then return "item", "item:" .. id, icon end
+                return nil, nil, nil, "NO FOOD"
+            elseif key == "rest" then return "spell", spell["Life Tap"]
+            elseif key == "petrest" then return "spell", spell["Health Funnel"]
+            elseif key == "mkstone" then return "spell", spell["Create Healthstone"]
+            end
+        end
+        local function tip(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(self.word:GetText() or "", 1, 0.82, 0)
+            GameTooltip:AddLine(self.hint:GetText() or "", 1, 1, 1)
+            GameTooltip:Show()
+        end
+        local shownKeys = {}
+        -- called every tick from update(): one row per lit cue, top-down, no gaps
+        function DRU.restStack(byKey)
+            if InCombatLockdown() then return end          -- click buttons: only change them out of combat
+            local main = DBagsAlertsState.main
+            local ps = DRU.restPS or 1
+            local x, y0 = DRU.restPad or 0, DRU.restY
+            local w = DRU.restW or BAR_W
+            local n = 0
+            for _, key in ipairs(DRU.REST_ORDER) do
+                local a = byKey[key]
+                local st = a and a.st
+                if a and st and st.ok and st.n == 0 and a.rootA == 1 and not DB.off[key] then
+                    n = n + 1
+                    local b = row(n)
+                    local word = a.restWord or a.label
+                    local kind, what, icon, swap = action(key, word)
+                    if swap then word = swap end
+                    local sig = key .. word .. tostring(what) .. ps .. w .. tostring(y0) .. (DB.scale or 1)
+                    if shownKeys[n] ~= sig then
+                        shownKeys[n] = sig
+                        b:SetScale((DB.scale or 1) * ps)
+                        b:SetSize(w, ROW_H)
+                        b.icon:SetWidth(ROW_H - 2)
+                        b:ClearAllPoints()
+                        if y0 then
+                            b:SetPoint("TOPLEFT", main, "TOPLEFT", x / ps, -(y0 + (n - 1) * (ROW_H + ROW_GAP) * ps) / ps)
+                        else
+                            b:SetPoint("TOPLEFT", main, "BOTTOMLEFT", 0, -4 - (n - 1) * (ROW_H + ROW_GAP))
+                        end
+                        b:SetAttribute("type", kind)
+                        b:SetAttribute("spell", kind == "spell" and what or nil)
+                        b:SetAttribute("item", kind == "item" and what or nil)
+                        local tex = icon or a.c.icon:GetTexture()
+                        if word == "NO FOOD" then tex = DRU.icons.Eat end
+                        b.icon:SetTexture(tex)
+                        b.word:SetText(word)
+                        b.hint:SetText(DRU.REST_HINT[word] or "")
+                        b:SetScript("OnEnter", kind and tip or nil)
+                        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+                        if RegisterStateDriver then
+                            RegisterStateDriver(b, "visibility", "[combat][mounted][dead] hide; show")
+                        else
+                            b:Show()
+                        end
+                    end
+                end
+            end
+            for i = n + 1, #rows do
+                if shownKeys[i] then
+                    shownKeys[i] = nil
+                    if UnregisterStateDriver then UnregisterStateDriver(rows[i], "visibility") end
+                    rows[i]:Hide()
+                end
+            end
+        end
+        DRU.restRows = rows; DBagsAlertsState.restRows = rows
+    end
+    DRU.REST_CUES = DRU.REST_CUES or {}
+    function DRU.restLabel(a)
+        if not DRU.REST_CUES[a.key] then return end
+        a.c:Hide()                                  -- the row below the bars shows it instead
+    end
+    function DRU.restSize(a, words) a.restWord = words end
+    -- /pa why: what each between-pull check sees right now
+    function DRU.restWhy(say)
+        local function pct(u)
+            local h, m = UnitHealth(u), UnitHealthMax(u)
+            if secret(h) or secret(m) or not m or m == 0 then return "?" end
+            return math.floor(h / m * 100 + 0.5) .. "%"
+        end
+        local mp, mm = UnitPower("player", 0), UnitPowerMax("player", 0)
+        local mana = (not secret(mp) and not secret(mm) and mm and mm > 0) and (math.floor(mp / mm * 100 + 0.5) .. "%") or "?"
+        say("combat=%s mounted=%s eating=%s health=%s mana=%s pet=%s shards=%s",
+            tostring(ctx.combat), tostring(IsMounted()), tostring(DRU.eating()), pct("player"), mana,
+            DRU.havePet() and pct("pet") or "none", tostring((DRU.bags())))
+        say("knows: Life Tap=%s Health Funnel=%s Drain Soul=%s Create Healthstone=%s",
+            tostring(spell["Life Tap"] ~= nil), tostring(spell["Health Funnel"] ~= nil),
+            tostring(spell["Drain Soul"] ~= nil), tostring(spell["Create Healthstone"] ~= nil))
+        for _, a in ipairs(ALERTS) do
+            if DRU.REST_CUES[a.key] then
+                local st = a.st
+                say("  %s: %s%s", a.label, (st and st.ok) and "SHOWING" or "hidden", DB.off[a.key] and " (turned off)" or "")
+            end
+        end
+    end
+
 local function setIcon(a, name, label)
     name = name or a.icon
     if a.iconName ~= name then
@@ -2895,6 +3095,7 @@ local function setIcon(a, name, label)
         words = other.Cue(words, name, spell[name])
     end
     setText(a.c.text, words)
+    if DRU.REST_CUES[a.key] then DRU.restSize(a, words) end
 end
 
 local function safeAlpha(f, v)
@@ -3557,6 +3758,7 @@ local function update()
         byKey = {}; for _, a in ipairs(ALERTS) do byKey[a.key] = a end
         ctx.byKey, ctx.byKeyFor = byKey, ALERTS
     end
+    if CLASS == "WARLOCK" and not testing then DRU.restStack(byKey) end
     if CLASS == "WARRIOR" then
         -- Use only the existing readable enemy count, never hidden cooldown/health values.
         -- The same ordering drives both the big icon layers and the cooldown-strip glow.
@@ -4216,6 +4418,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                         styleText(a.c.text, 12, 1, 0.85, 0.25)
                         a.c.plate:Show(); a.c.text:Show()
                     end
+                    if DRU.restLabel then DRU.restLabel(a) end
                     if not DB.off[key] then a.root:Show() end
                 end
             end
@@ -4300,6 +4503,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
             end
         end
         if n > 0 then y = y + math.ceil(n / cdColumns) * 31 * cdScale end
+        DRU.restY, DRU.restPad, DRU.restW, DRU.restPS = y + 4, PAD, blockW, playerScale
         if CLASS ~= "WARLOCK" then shardText:SetText("") end
         main:SetSize(W, 260); main:SetScale(DB.scale)
         main:ClearAllPoints(); main:SetPoint(DB.point[1], UIParent, DB.point[2], DB.point[3], DB.point[4])
@@ -5498,6 +5702,9 @@ local PLAIN = {
     mkstone = { "Make Healthstone", "None in bags." },
     lifetap = { "Life Tap", "Mana low, health fine." },
     funnel = { "Health Funnel", "Pet health low." },
+    rest = { "Rest", "Between pulls: Life Tap or eat." },
+    petrest = { "Heal pet", "Between pulls, pet under 60%." },
+    noshards = { "No shards", "Drain Soul your next kill." },
     rof = { "Rain of Fire", "Group, 3+ mobs." },
 }
 
@@ -6085,6 +6292,8 @@ SlashCmdList.DBAGSALERTS = function(msg)
         local d = DB.foodDebug
         if d then say("eat button: %s %s", tostring(d.why), tostring(d.extra or ""))
         else say("eat button: not checked yet (try out of combat).") end
+    elseif cmd == "why" then
+        if DRU.restWhy then DRU.restWhy(say) end
     elseif cmd == "range" then
         local d = DB.rangeDebug
         if d then say("range %s: bar=%s book=%s 10yd=%s", tostring(d.spell), d.bar, d.book, d.close)

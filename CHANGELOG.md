@@ -2,6 +2,16 @@
 
 Every released version, newest first.
 
+## 1.2.1 (2026-11-20)
+
+- **Warlock between pulls.** Out of combat, clickable rows under your mana bar show what to do before the next pull. One click does it.
+- **EAT** when your health is low. It eats food from your bags, or says **NO FOOD**.
+- **LIFE TAP** when your mana is low and your health is fine.
+- **HEAL PET** casts Health Funnel. **MAKE STONE** when you have no Healthstone. **0 SHARDS** means Drain Soul your next kill.
+- The rows hide in combat, when mounted and when dead. Type `/bbuddy why` to see what each check sees.
+
+Type `/reload` after updating.
+
 ## 1.2.0 (2026-11-18)
 
 - **All nine classes.** Mage, Hunter, Rogue and Shaman now get the next button to press, danger cues and buff reminders, like the other classes. Mage: procs, finishers and your filler spell. Hunter: Hunter's Mark, Serpent Sting, Summon Hawk, Aimed Shot and Mend Pet. Rogue: Stealth openers, Slice and Dice, Eviscerate at 5 points and poison reminders. Shaman: Stormstrike, shocks, free Lightning Bolts, shields and weapon buffs. These are new, so tell us what feels wrong.

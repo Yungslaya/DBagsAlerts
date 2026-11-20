@@ -2,6 +2,7 @@
 
 ## What's new
 
+- **1.2.1:** Warlock rows between pulls: Eat, Life Tap, Heal Pet, Make Stone, 0 Shards, and one click does it. Type `/reload` after updating.
 - **1.1.1:** Update messages only come from real CurseForge releases. Type `/reload` after updating.
 - **1.1.0:** DBagsAlerts is now called **Battle Buddy**. Same addon, same settings. New command `/bbuddy`. Taunt icons no longer show on cooldown, and you get a message when a newer version is out. Fully restart WoW after updating (a new file was added).
 
