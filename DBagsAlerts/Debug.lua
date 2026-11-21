@@ -29,6 +29,14 @@ function D.record(message,stack,force)
  c.errors[#c.errors+1]={message=message,stack=safe(stack or (debugstack and debugstack(3,12,4)) or "No stack available"),
   count=1,first=GetTime(),last=GetTime(),context=context()}
 end
+-- DoT trace: what the DoT timers saw (casts, where they were filed, what each tile showed).
+-- Kept in memory only, newest 80 lines, and only while debug recording is on.
+D.dots={}
+function D.dot(line)
+ local c=config();if not c.enabled then return end
+ if #D.dots>=80 then table.remove(D.dots,1) end
+ D.dots[#D.dots+1]=string.format("%.1f %s",GetTime(),safe(line))
+end
 function D.note(label)
  local c=config();if not c.enabled then return end
  if #c.events>=40 then table.remove(c.events,1) end
@@ -85,6 +93,8 @@ function D.report()
  if DBagsAlertsDebug.lastWarriorScan then out[#out+1]=DBagsAlertsDebug.lastWarriorScan end
  if DBagsAlertsDebug.lastWarriorRescue then out[#out+1]="During Taunt downtime: "..DBagsAlertsDebug.lastWarriorRescue end
  if DBagsAlertsDebug.lastWarriorLoose then out[#out+1]="With a loose mob: "..DBagsAlertsDebug.lastWarriorLoose end
+ out[#out+1]="DoT trace ("..#D.dots.." lines):"
+ for _,line in ipairs(D.dots) do out[#out+1]=line end
  out[#out+1]="Recent events (bounded; no chat text):"
  for _,event in ipairs(c.events) do out[#out+1]=event end
  out[#out+1]="Errors: "..#c.errors
@@ -103,7 +113,7 @@ local function open()
   w:SetScript("OnDragStart",function(self) self:StartMoving() end);w:SetScript("OnDragStop",function(self) self:StopMovingOrSizing() end)
   local bg=w:CreateTexture(nil,"BACKGROUND");bg:SetAllPoints();bg:SetColorTexture(0.055,0.055,0.065,1)
   local function text(label,x,y,size)
-   local f=w:CreateFontString(nil,"OVERLAY");f:SetFont("Fonts\\FRIZQT__.TTF",size or 13,"OUTLINE");f:SetPoint("TOPLEFT",x,y);f:SetText(label);return f
+   local f=w:CreateFontString(nil,"OVERLAY");f:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"),size or 13,"OUTLINE");f:SetPoint("TOPLEFT",x,y);f:SetText(label);return f
   end
   text("Debug",18,-16,20)
   local function button(label,x,y,width,callback)
@@ -130,7 +140,7 @@ local function open()
   scroll:SetScrollChild(edit)
   button("Refresh",18,-438,110,function() edit:SetText(D.report());edit:ClearFocus() end)
   button("Select report",138,-438,140,function() edit:SetFocus();edit:HighlightText() end)
-  button("Clear log",288,-438,110,function() local c=config();c.errors={};c.events={};D.guards={};edit:SetText(D.report()) end)
+  button("Clear log",288,-438,110,function() local c=config();c.errors={};c.events={};D.guards={};D.dots={};edit:SetText(D.report()) end)
   text("Select report, then Ctrl+C.",410,-446,11)
   table.insert(UISpecialFrames,"DBagsAlertsDebugWindow")
  end

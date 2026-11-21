@@ -45,9 +45,9 @@ local function placeHud()
     hud:EnableMouse(not c.statusLocked)
 end
 placeHud()
-hud.title = hud:CreateFontString(nil,"OVERLAY"); hud.title:SetFont("Fonts\\FRIZQT__.TTF",15,"OUTLINE")
+hud.title = hud:CreateFontString(nil,"OVERLAY"); hud.title:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"),15,"OUTLINE")
 hud.title:SetPoint("TOP"); hud.name = hud:CreateFontString(nil,"OVERLAY")
-hud.name:SetFont("Fonts\\FRIZQT__.TTF",12,"OUTLINE"); hud.name:SetPoint("TOP",hud.title,"BOTTOM",0,-3)
+hud.name:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"),12,"OUTLINE"); hud.name:SetPoint("TOP",hud.title,"BOTTOM",0,-3)
 state.frame = hud
 local pendingUntil, noticeUntil
 local function show(title, name, r,g,b)
@@ -155,7 +155,7 @@ DBagsAlertsState.openFollowBuddy=function()
         DBagsAlertsState.settingsBackButton(w, DBagsAlertsState.openPartyDefensives)
         local bg=w:CreateTexture(nil,"BACKGROUND");bg:SetAllPoints();bg:SetColorTexture(0.055,0.055,0.065,1)
         local function text(label,x,y,size)
-            local t=w:CreateFontString(nil,"OVERLAY");t:SetFont("Fonts\\FRIZQT__.TTF",size or 13,"OUTLINE")
+            local t=w:CreateFontString(nil,"OVERLAY");t:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"),size or 13,"OUTLINE")
             t:SetText(label);t:SetPoint("TOPLEFT",x,y);return t
         end
         text("Follow buddy",18,-16,21)

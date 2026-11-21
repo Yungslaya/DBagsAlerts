@@ -173,7 +173,7 @@ end
 
 local function label(parent, size, x, y, width)
     local f = parent:CreateFontString(nil, "OVERLAY")
-    f:SetFont("Fonts\\FRIZQT__.TTF", size, "")
+    f:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"), size, "")
     f:SetPoint("TOPLEFT", x, y); f:SetWidth(width)
     f:SetJustifyH("LEFT"); f:SetWordWrap(true)
     f:SetTextColor(0.85, 0.81, 0.72)

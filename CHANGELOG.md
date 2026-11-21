@@ -2,6 +2,16 @@
 
 Every released version, newest first.
 
+## 1.3.0 (2026-11-21)
+
+- **New look.** The settings windows have a stone frame with gold corners, new fonts and red gold-edged buttons. Our other addons now look the same.
+- **Pet bars match.** The pet frame's bars use the same art and the same green as your own bars.
+- **New HUD font.** The HUD uses the same clean font as the windows.
+- **What's new window.** After an update, one window shows what changed, with a tab for each of our addons you have. Type `/bbuddy news` to see it again.
+- **DoT report.** With debug recording on, the debug report lists what the DoT timers saw. It helps us fix timer bugs faster.
+
+Fully restart WoW after updating (new files were added).
+
 ## 1.2.5 (2026-11-20)
 
 - **Big DoT alert is a reapply reminder.** It only shows for a DoT you already put on that target. A fresh mob shows nothing.

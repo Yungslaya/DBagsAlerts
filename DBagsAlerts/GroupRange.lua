@@ -46,10 +46,10 @@ local function variant(i)
         screenEdge("TOP", "VERTICAL", true), screenEdge("BOTTOM", "VERTICAL", false)}
     local edge = v.edges[1]
     local title = parent:CreateFontString(nil, "OVERLAY")
-    title:SetFont("Fonts\\FRIZQT__.TTF", 48, "THICKOUTLINE")
+    title:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"), 48, "THICKOUTLINE")
     title:SetTextColor(1, 0.3, 0.12); title:SetPoint("TOP", 0, 0); title:SetText("WAKE UP")
     local detail = parent:CreateFontString(nil, "OVERLAY")
-    detail:SetFont("Fonts\\FRIZQT__.TTF", 20, "OUTLINE")
+    detail:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"), 20, "OUTLINE")
     detail:SetTextColor(1, 0.9, 0.65); detail:SetPoint("TOP", title, "BOTTOM", 0, -8); detail:SetText("GROUP TOO FAR")
     v.title, v.detail, v.edge = title, detail, edge
     state.variants[i] = v
@@ -178,7 +178,7 @@ DBagsAlertsState.openGroupRange=function()
         DBagsAlertsState.settingsBackButton(w,DBagsAlertsState.openPartyDefensives)
         local bg=w:CreateTexture(nil,"BACKGROUND");bg:SetAllPoints();bg:SetColorTexture(0.055,0.055,0.065,1)
         local function text(label,x,y,size)
-            local t=w:CreateFontString(nil,"OVERLAY");t:SetFont("Fonts\\FRIZQT__.TTF",size or 13,"OUTLINE")
+            local t=w:CreateFontString(nil,"OVERLAY");t:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"),size or 13,"OUTLINE")
             t:SetText(label);t:SetPoint("TOPLEFT",x,y);return t
         end
         local function button(label,x,y,width,fn)

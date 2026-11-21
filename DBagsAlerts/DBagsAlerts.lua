@@ -415,10 +415,11 @@ function DRU.forgetPlate(unit)
     for _, t in pairs(DRU.dotAt or {}) do t[k] = nil end
 end
 
+function DRU.dotTrace(line) if DBagsAlertsDebug and DBagsAlertsDebug.dot then DBagsAlertsDebug.dot(line) end end
 local function onCast(spellID, dotKey)
-    if spellID == nil or secret(spellID) then return end
+    if spellID == nil or secret(spellID) then DRU.dotTrace("cast seen, spell id hidden: not counted") return end
     local name = C_Spell.GetSpellName and C_Spell.GetSpellName(spellID)
-    if type(name) ~= "string" or secret(name) then return end
+    if type(name) ~= "string" or secret(name) then DRU.dotTrace("cast seen, spell name hidden: not counted") return end
     local now = GetTime()
     if OWN_CD[name] then DRU.usedAt[name] = now end
     local group = GROUP_OF[name]
@@ -439,9 +440,10 @@ local function onCast(spellID, dotKey)
     elseif DRU.DOTS[name] then
         local k = dotKey
         if k == nil then k = castKey() end
-        if not k then return end
+        if not k then DRU.dotTrace("cast " .. name .. ": no place to file it") return end
         DRU.dotAt[name] = DRU.dotAt[name] or {}
         DRU.dotAt[name][k] = now
+        DRU.dotTrace("cast " .. name .. " filed under " .. tostring(k) .. " (target is " .. tostring(targetKey()) .. ", given key " .. tostring(dotKey) .. ")")
         if k == targetKey() then lastDebuff = { name = name, at = now, key = k } end
     end
 end
@@ -2251,6 +2253,11 @@ do -- Shared settings behavior: one opaque window at a time, draggable and remem
     end
     DBagsAlertsState.showSettingsWindow = function(w, key)
         for name, other in pairs(windows) do if name ~= key then other:Hide() end end
+        -- The family look. Done here, every time a settings window opens: these windows are built
+        -- already shown, so an OnShow hook never ran for them.
+        if DragbagEmporiumTheme then
+            DragbagEmporiumTheme.Settings(w, { title = rawget(w, "dbaTitle"), close = rawget(w, "dbaClose"), band = key == "main" and 50 or 43 })
+        end
         w:Show(); w:Raise()
     end
     DBagsAlertsState.isSettingsOpen = function()
@@ -2292,7 +2299,7 @@ end)
 local MEDIA = "Interface\\AddOns\\DBagsAlerts\\Media\\"
 local FLAT = "Interface\\Buttons\\WHITE8X8"
 local BAR_TEX = MEDIA .. "Smooth.tga"
-local FONT = "Fonts\\FRIZQT__.TTF"          -- WoW's own font: familiar, easy to read
+local FONT = (DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF")          -- WoW's own font: familiar, easy to read
 local FALLBACK_FONT = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
 local function styleText(fs, size, r, g, b)
     if not fs:SetFont(FONT, size, "OUTLINE") then fs:SetFont(FALLBACK_FONT, size, "OUTLINE") end
@@ -2738,6 +2745,25 @@ local function applyStyle()
         colorBorder(bar.px, 0, 0, 0, c and 0 or 1)
     end
     styleHealthColor(c and CLASSIC_TEX or BAR_TEX)
+end
+-- Other parts of Battle Buddy (the pet frame) hand their bars over, so every bar is drawn the same
+-- way and follows the same style setting. Looks only.
+DBagsAlertsState.adoptBar = function(bar, bg, r, g, b, framed)
+    bar.col = { r, g, b }
+    bar.bg = bg
+    bar.px = addBorder(bar, 0, 0, 0, 1, 1)
+    bar.frame = framed and goldFrame(bar, 4) or { SetShown = function() end, SetFrameLevel = function() end, Hide = function() end }
+    BARS[#BARS + 1] = bar
+    local c = classic()
+    local tex = c and CLASSIC_TEX or BAR_TEX
+    bar:SetStatusBarTexture(tex); bar:SetStatusBarColor(r, g, b)
+    bg:SetTexture(tex); bg:SetVertexColor(0.06, 0.06, 0.07, c and 0.9 or 0.85)
+    bar.frame:SetShown(c); colorBorder(bar.px, 0, 0, 0, c and 0 or 1)
+end
+-- the player health green of the look in use (the pet frame uses the same one)
+DBagsAlertsState.healthGreen = function()
+    if DRU.lux then return 0.19, 0.55, 0.38 end
+    return 0.1, 0.8, 0.1
 end
 
 local blockW = BAR_W
@@ -4753,6 +4779,14 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                 and left <= length * (refreshAt[f.name] or 0)
             local needs = ctx.hostile and ctx.combat and not nativeDuration and not onNoTime and (not left or left <= 0 or refreshSoon)
             setRefreshGlow(f, needs)
+            if DBagsAlertsDebug and DBagsAlertsDebug.dot then
+                -- one trace line each time a tile changes what it shows
+                local cached = DRU.targetAuraCache and DRU.targetAuraCache[f.name]
+                local state = (ctx.hostile and "enemy" or "no enemy") .. (ctx.combat and " fight" or " calm")
+                    .. " key=" .. tostring(key) .. " game says=" .. tostring(cached and cached.real)
+                    .. " shows=" .. (nativeDuration and "game timer" or onNoTime and "on, no time" or (left and left > 0) and "countdown" or "dark")
+                if f.traceState ~= state then f.traceState = state; DBagsAlertsDebug.dot("tile " .. tostring(f.name) .. ": " .. state) end
+            end
             -- Big alert = a reapply reminder: only a DoT you already put on THIS target,
             -- from its last 30% (pandemic window) or once it falls off. A fresh mob shows nothing.
             local had = key and DRU.dotAt[f.name] and DRU.dotAt[f.name][key]
@@ -6168,8 +6202,9 @@ local function buildSettings()
     outer:SetBackdropColor(0.030,0.040,0.090,0.94);outer:SetBackdropBorderColor(0.730,0.740,0.780,1)
     local title=outer:CreateFontString(nil,"OVERLAY");styleText(title,20,1,0.82,0)
     title:SetPoint("TOPLEFT",24,-18);title:SetText("Battle Buddy")
-    local close=CreateFrame("Button",nil,outer,"UIPanelCloseButton");close:SetPoint("TOPRIGHT",-8,-8)
+    local close=CreateFrame("Button",nil,outer,"UIPanelCloseButton");close:SetPoint("TOPRIGHT",-12,-12)
     close:SetScript("OnClick",function() outer:Hide() end)
+    outer.dbaTitle=title;outer.dbaClose=close
     local items,pages,tabs,independent={},{},{},{}
     outer.controls={};outer.pages=pages;outer.tabs=tabs
     local function refresh()
@@ -6180,7 +6215,11 @@ local function buildSettings()
     end
     local function selectPage(key)
         if not pages[key] then key="display" end
-        for name,page in pairs(pages) do page.scroll:SetShown(name==key);tabs[name]:SetAlpha(name==key and 1 or 0.65) end
+        for name,page in pairs(pages) do
+            page.scroll:SetShown(name==key)
+            if DragbagEmporiumTheme then DragbagEmporiumTheme.Select(tabs[name],name==key)   -- gold underline on the open page
+            else tabs[name]:SetAlpha(name==key and 1 or 0.65) end
+        end
         DB.settingsPage=key;outer.selectedPage=key;refresh()
     end
     outer.selectPage=selectPage

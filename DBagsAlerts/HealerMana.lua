@@ -1,7 +1,7 @@
 -- Pre-pull healer mana warning. Uses normal group roles and readable mana only.
 local secret = issecretvalue or function() return false end
 local function plain(v) if not secret(v) then return v end end
-local FONT = "Fonts\\FRIZQT__.TTF"
+local FONT = (DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF")
 local state = { status = "Not grouped" }
 DBagsAlertsState.healerMana = state
 local function config()

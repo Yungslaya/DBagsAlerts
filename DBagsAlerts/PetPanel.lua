@@ -1,7 +1,7 @@
 -- Native pet frame and manual controls. Works independently of rotation modules.
 local secret=issecretvalue or function() return false end
 local function plain(v) if not secret(v) then return v end end
-local FONT="Fonts\\FRIZQT__.TTF"
+local FONT=(DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF")
 local state={actions={},utilities={},status="No pet"}
 DBagsAlertsState.petPanel=state
 local function config()
@@ -34,9 +34,17 @@ local level=panel:CreateFontString(nil,"OVERLAY");level:SetFont(FONT,12,"OUTLINE
 local health=CreateFrame("StatusBar",nil,panel);health:SetPoint("TOPLEFT",0,-20);health:SetSize(356,19)
 health:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar");health:SetStatusBarColor(0.18,0.65,0.32)
 local hpbg=health:CreateTexture(nil,"BACKGROUND");hpbg:SetAllPoints();hpbg:SetColorTexture(0.04,0.04,0.04,0.8)
+local function petGreen() if DBagsAlertsState and DBagsAlertsState.healthGreen then return DBagsAlertsState.healthGreen() end return 0.18,0.65,0.3 end
 health.text=health:CreateFontString(nil,"OVERLAY");health.text:SetFont(FONT,13,"OUTLINE");health.text:SetPoint("CENTER")
 local power=CreateFrame("StatusBar",nil,panel);power:SetPoint("TOPLEFT",0,-41);power:SetSize(356,5)
 power:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+-- same bar art, background, edge and green as the player bars (one look for the whole HUD)
+if DBagsAlertsState and DBagsAlertsState.adoptBar then
+    local pg1,pg2,pg3=petGreen()
+    DBagsAlertsState.adoptBar(health,hpbg,pg1,pg2,pg3,true)
+    local pwbg=power:CreateTexture(nil,"BACKGROUND");pwbg:SetAllPoints()
+    DBagsAlertsState.adoptBar(power,pwbg,0.2,0.45,1,false)
+end
 state.health,state.power,state.name=health,power,name
 local tools=CreateFrame("Frame",nil,UIParent);tools:SetSize(356,63);tools:SetPoint("TOPLEFT",panel,"BOTTOMLEFT",0,-8)
 state.tools=tools
@@ -192,7 +200,7 @@ local function update()
         local h,m=plain(UnitHealth("pet")),plain(UnitHealthMax("pet"))
         if type(h)=="number" and type(m)=="number" and m>0 then
             health.text:SetFormattedText("%.0f%%",h/m*100)
-            health:SetStatusBarColor(h/m<0.3 and 0.9 or 0.18,h/m<0.3 and 0.2 or 0.65,0.3)
+            local g1,g2,g3=petGreen();if h/m<0.3 then g1,g2,g3=0.9,0.2,0.3 end;health:SetStatusBarColor(g1,g2,g3)
         elseif UnitHealthPercent and CurveConstants and CurveConstants.ScaleTo100 then
             health.text:SetFormattedText("%.0f%%",UnitHealthPercent("pet",false,CurveConstants.ScaleTo100))
         end

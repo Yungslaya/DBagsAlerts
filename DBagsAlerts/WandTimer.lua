@@ -13,7 +13,7 @@ local bg=bar:CreateTexture(nil,"BACKGROUND")
 bg:SetAllPoints(); bg:SetColorTexture(0.04,0.04,0.06,0.75)
 local text=bar:CreateFontString(nil,"OVERLAY")
 state.text = text
-text:SetFont("Fonts\\FRIZQT__.TTF",11,"OUTLINE"); text:SetPoint("CENTER")
+text:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"),11,"OUTLINE"); text:SetPoint("CENTER")
 bar:Hide()
 local function hidden(v) return issecretvalue and issecretvalue(v) end
 local function speed()

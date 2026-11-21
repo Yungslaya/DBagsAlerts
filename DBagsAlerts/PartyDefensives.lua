@@ -99,7 +99,7 @@ local function rowFor(unit)
         icon.cd:SetAllPoints(); icon.cd:SetDrawEdge(false); icon.cd:SetDrawBling(false)
         icon.cd:SetHideCountdownNumbers(false); icon.cd:SetReverse(true)
         icon.label = icon:CreateFontString(nil, "OVERLAY")
-        icon.label:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+        icon.label:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"), 10, "OUTLINE")
         icon.label:SetPoint("BOTTOM", 0, -2)
         icon:SetScript("OnEnter", function(self)
             if self.auraID and GameTooltip.SetUnitAuraByAuraInstanceID then
@@ -297,7 +297,7 @@ DBagsAlertsState.openPartyDefensives = function()
         end
         local bg = w:CreateTexture(nil, "BACKGROUND"); bg:SetAllPoints(); bg:SetColorTexture(0.055, 0.055, 0.065, 1)
         local function text(label, x, y, size)
-            local t = w:CreateFontString(nil, "OVERLAY"); t:SetFont("Fonts\\FRIZQT__.TTF", size or 13, "OUTLINE")
+            local t = w:CreateFontString(nil, "OVERLAY"); t:SetFont((DragbagEmporiumTheme and DragbagEmporiumTheme.bold or "Fonts\\FRIZQT__.TTF"), size or 13, "OUTLINE")
             t:SetText(label); t:SetPoint("TOPLEFT", x, y); return t
         end
         text("Party helpers", 18, -16, 20)
