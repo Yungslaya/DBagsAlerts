@@ -3,7 +3,7 @@
 ## Title: |cffff7d0aBattle|r Buddy
 ## Notes: Battle Buddy: alerts, bars and helpers for all nine classes. Was DBagsAlerts. Type /bbuddy
 ## Author: Yungslaya
-## Version: 1.2.1
+## Version: 1.2.2
 ## SavedVariables: DBagsAlertsDB
 
 Debug.lua

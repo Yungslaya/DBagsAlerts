@@ -367,13 +367,13 @@ local sunder = {}        -- target key -> { n = stacks, last = time }
 local rendAt = {}        -- target key -> time cast
 
 local lastDebuff             -- { name, at, key } of our last Rend / Sunder cast
-local function targetKey()
-    local g = UnitGUID("target")
+local function unitKey(unit)
+    local g = UnitGUID(unit)
     if g ~= nil and not secret(g) then return g end
     -- In combat the game can hide mob IDs. The target's nameplate still tells mobs apart,
     -- so Rend on two mobs stays two separate timers when you tab between them.
     if C_NamePlate and C_NamePlate.GetNamePlateForUnit then
-        local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, "target")
+        local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
         if ok and type(plate) == "table" then
             local unit = plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)
             if type(unit) == "string" and not secret(unit) then return "np:" .. unit end
@@ -381,7 +381,24 @@ local function targetKey()
     end
     return "?"
 end
+local function targetKey() return unitKey("target") end
 DRU.targetKey = targetKey
+
+-- Where a DoT went: the live enemy under the mouse (mouseover macros / mouseover cast),
+-- else your target. Warlock only (its macros cast DoTs on mouseover).
+local function castKey()
+    if CLASS ~= "WARLOCK" then return targetKey() end
+    -- in combat the game may hide these answers: hidden = assume an enemy (the macro has [harm])
+    if not plain(UnitExists("mouseover"), false) then return targetKey() end
+    if plain(UnitCanAttack("player", "mouseover"), true) == false then return targetKey() end
+    if plain(UnitIsDead("mouseover"), false) then return targetKey() end
+    if plain(UnitIsUnit("mouseover", "target"), false) then return targetKey() end
+    local k = unitKey("mouseover")
+    if k == "?" then return targetKey() end   -- can't tell that mob apart: old behaviour
+    return k
+end
+DRU.castKey = castKey
+DRU.pendingKey = {}   -- castGUID -> where the mouse was when a cast-time DoT started
 
 -- A nameplate that goes away (mob died or left view) may come back on a different mob:
 -- forget what we remembered for it, so the new mob starts clean.
@@ -392,7 +409,7 @@ function DRU.forgetPlate(unit)
     for _, t in pairs(DRU.dotAt or {}) do t[k] = nil end
 end
 
-local function onCast(spellID)
+local function onCast(spellID, dotKey)
     if spellID == nil or secret(spellID) then return end
     local name = C_Spell.GetSpellName and C_Spell.GetSpellName(spellID)
     if type(name) ~= "string" or secret(name) then return end
@@ -414,10 +431,12 @@ local function onCast(spellID)
         rendAt[k] = now
         lastDebuff = { name = name, at = now, key = k }
     elseif DRU.DOTS[name] then
-        local k = targetKey()
+        local k = dotKey
+        if k == nil then k = castKey() end
+        if not k then return end
         DRU.dotAt[name] = DRU.dotAt[name] or {}
         DRU.dotAt[name][k] = now
-        lastDebuff = { name = name, at = now, key = k }
+        if k == targetKey() then lastDebuff = { name = name, at = now, key = k } end
     end
 end
 
@@ -4022,7 +4041,13 @@ do   -- caster look (warlock): cast bar under your mana + a row of DoT timers
         local now = GetTime()
         if real == "on" then
             local exp = aura and plain(aura.expirationTime, nil)
-            if exp and exp > 0 then return exp - now, plain(aura.duration, nil) or durationOf(name) end
+            local dur = aura and plain(aura.duration, nil)
+            if exp and exp > 0 and dur and dur > 0 then
+                DB.durations[name] = dur
+                DRU.dotAt[name] = DRU.dotAt[name] or {}
+                DRU.dotAt[name][targetKey()] = exp - dur
+            end
+            if exp and exp > 0 then return exp - now, dur or durationOf(name) end
         elseif real == "off" then
             local t = DRU.dotAt[name]; local at = t and t[targetKey()]
             if not (at and now - at <= 1) then return nil end        -- just cast: still landing
@@ -4307,22 +4332,31 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         end
         local aura, real = cached.aura, cached.real
         local length = durationOf(name)
+        local t = DRU.dotAt[name]
         if real == "on" and aura then
             local exp, duration = plain(aura.expirationTime, nil), plain(aura.duration, nil)
             if exp and exp > 0 then
+                if duration and duration > 0 then
+                    -- the game told us: remember the true length and when it really started,
+                    -- so the countdown stays right after the game hides it again
+                    DB.durations[name] = duration
+                    if name == "Rend" then rendAt[key] = exp - duration
+                    else DRU.dotAt[name] = t or {}; DRU.dotAt[name][key] = exp - duration end
+                end
                 return math.max(0, exp - now), (duration and duration > 0) and duration or length
             end
             local id = plain(aura.auraInstanceID, nil)
             if id and C_UnitAuras.GetAuraDuration then
-                local obj = C_UnitAuras.GetAuraDuration("target", id)
-                if obj then return nil, length, obj end
+                local ok, obj = pcall(C_UnitAuras.GetAuraDuration, "target", id)
+                if ok and obj then return nil, length, obj end
             end
         end
-        local t = DRU.dotAt[name]
+        t = DRU.dotAt[name]
         local at = name == "Rend" and rendAt[key] or (t and t[key])
         -- Readable absence wins after the short spell-landing grace period.
         if real == "off" and not (at and now - at <= 1) then return nil, length end
-        if at then return math.max(0, length - (now - at)), length end
+        if at and now - at < length then return math.max(0, length - (now - at)), length end
+        if real == "on" then return nil, length, nil, true end   -- it's on; time unknown
         return nil, length
     end
     DRU.hideCaster = function()
@@ -4608,19 +4642,22 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         local key = ctx.hostile and targetKey()
         for _, f in ipairs(used) do
             f:SetShown(ctx.hostile and true or false)
-            local left, length, nativeDuration
-            if ctx.hostile then left, length, nativeDuration = dotLeft(f.name, now, key) end
+            local left, length, nativeDuration, onNoTime
+            if ctx.hostile then left, length, nativeDuration, onNoTime = dotLeft(f.name, now, key) end
             local refreshSoon = left ~= nil and length ~= nil and length > 0
                 and left <= length * (refreshAt[f.name] or 0)
-            setRefreshGlow(f, ctx.hostile and ctx.combat and not nativeDuration and (not left or left <= 0 or refreshSoon))
+            setRefreshGlow(f, ctx.hostile and ctx.combat and not nativeDuration and not onNoTime and (not left or left <= 0 or refreshSoon))
             f.nativeCD:SetShown(nativeDuration ~= nil)
             if nativeDuration then
                 f.nativeCD:SetCooldownFromDurationObject(nativeDuration)
                 f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
                 f.num:SetText(""); f.bar:SetValue(0)
+            elseif onNoTime then
+                f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
+                f.num:SetText(""); f.bar:SetValue(1)
             elseif left and left > 0 then
                 f.shade:SetAlpha(0); f.icon:SetDesaturated(false); f:SetAlpha(1)
-                f.num:SetFormattedText("%d", math.ceil(left))
+                f.num:SetFormattedText("%d", math.max(1, math.floor(left + 0.5)))   -- round like the game's own timers
                 f.bar:SetValue(length > 0 and left / length or 0)
                 local soon = refreshSoon
                 f.num:SetTextColor(1, soon and 0.73 or 1, soon and 0.28 or 1)
@@ -5605,11 +5642,19 @@ ev:SetScript("OnEvent", function(self, event, ...)
         barsDirty.threat = true
         tDirty.tot = true
     elseif event:find("^UNIT_SPELLCAST_") and event ~= "UNIT_SPELLCAST_SUCCEEDED" then
-        local unit = ...
+        local unit, castGUID = ...
+        if event == "UNIT_SPELLCAST_START" and unit == "player" and castGUID ~= nil and not secret(castGUID) then
+            DRU.pendingKey[castGUID] = castKey() or false
+        end
         if unit == "player" then tDirty.castP = true elseif unit == "target" then tDirty.castT = true end
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
-        local _, _, spellID = ...
-        onCast(spellID)
+        local _, castGUID, spellID = ...
+        local key   -- nil = look now; false = started on a mob we can't tell apart
+        if castGUID ~= nil and not secret(castGUID) then
+            key = DRU.pendingKey[castGUID]
+            DRU.pendingKey[castGUID] = nil
+        end
+        onCast(spellID, key)
     elseif event == "PLAYER_SWING" then
         onSwing(...)
     elseif event == "UNIT_COMBAT" then
@@ -5633,6 +5678,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
         if ... == "target" then DRU.targetAuraCache = {} end
         auraDirty = true          -- read once on the next tick, not on every aura event
     elseif event == "PLAYER_REGEN_ENABLED" then
+        wipe(DRU.pendingKey)
         if DRU.layoutPending then layout() end
         if DRU.applyHelperSize then DRU.applyHelperSize() end
         readAll()
@@ -5827,28 +5873,27 @@ local CLASS_MACROS = { WARRIOR = WARRIOR_MACROS, PALADIN = PALADIN_MACROS, DRUID
 -- Warlock: main nukes send your pet in too; DoTs, curses and Fear work on the mob
 -- under your mouse (spread DoTs without changing target).
 WARLOCK = {
-    { "PK Bolt", "#showtooltip Shadow Bolt\n/petattack\n/cast Shadow Bolt", "Shadow Bolt + pet attacks." },
-    { "PK Immolate", "#showtooltip Immolate\n/petattack\n/cast Immolate", "Immolate + pet attacks." },
-    { "PK Searing", "#showtooltip Searing Pain\n/petattack\n/cast Searing Pain", "Searing Pain + pet attacks." },
-    { "PK Conflag", "#showtooltip Conflagrate\n/petattack\n/cast Conflagrate", "Conflagrate + pet attacks." },
+    { "PK Bolt", "#showtooltip Shadow Bolt\n/petattack\n/cast [@mouseover,harm,nodead][] Shadow Bolt", "Shadow Bolt (mouseover or target); pet stays on your target." },
+    { "PK Immolate", "#showtooltip Immolate\n/petattack\n/cast [@mouseover,harm,nodead][] Immolate", "Immolate (mouseover or target); pet stays on your target." },
+    { "PK Searing", "#showtooltip Searing Pain\n/petattack\n/cast [@mouseover,harm,nodead][] Searing Pain", "Searing Pain (mouseover or target); pet stays on your target." },
+    { "PK Conflag", "#showtooltip Conflagrate\n/petattack\n/cast [@mouseover,harm,nodead][] Conflagrate", "Conflagrate (mouseover or target); pet stays on your target." },
     { "PK Corruption", "#showtooltip Corruption\n/cast [@mouseover,harm,nodead][] Corruption", "Mouseover Corruption." },
-    { "PK Agony", function()
-          local n = spell["Bane of Agony"] and "Bane of Agony" or "Curse of Agony"
-          return "#showtooltip " .. n .. "\n/cast [@mouseover,harm,nodead][] " .. n
-      end, "Mouseover Bane of Agony." },
+    -- both names: Forever may call it Bane or Curse of Agony; only the one you know casts
+    { "PK Agony", "#showtooltip\n/cast [@mouseover,harm,nodead][] Bane of Agony\n/cast [@mouseover,harm,nodead][] Curse of Agony",
+      "Mouseover Agony." },
     { "PK Siphon", "#showtooltip Siphon Life\n/cast [@mouseover,harm,nodead][] Siphon Life", "Mouseover Siphon Life." },
     { "PK Curse", function()
           local n = spell["Curse of the Elements"] and "Curse of the Elements" or "Curse of Weakness"
           return "#showtooltip " .. n .. "\n/cast [@mouseover,harm,nodead][] " .. n
       end, "Mouseover Curse of the Elements (Weakness before you have it)." },
     { "PK Fear", "#showtooltip Fear\n/cast [@mouseover,harm,nodead][] Fear", "Mouseover Fear." },
-    { "PK Drain Life", "#showtooltip Drain Life\n/cast Drain Life", "Drain Life." },
-    { "PK Drain Soul", "#showtooltip Drain Soul\n/cast Drain Soul", "Drain Soul (shards)." },
+    { "PK Drain Life", "#showtooltip Drain Life\n/cast [@mouseover,harm,nodead][] Drain Life", "Mouseover Drain Life." },
+    { "PK Drain Soul", "#showtooltip Drain Soul\n/cast [@mouseover,harm,nodead][] Drain Soul", "Mouseover Drain Soul (shards)." },
     { "PK Life Tap", "#showtooltip Life Tap\n/cast Life Tap", "Life Tap." },
     { "PK Healthstone", "#showtooltip\n/use Major Healthstone\n/use Greater Healthstone\n/use Healthstone\n"
           .. "/use Lesser Healthstone\n/use Minor Healthstone", "Eat your Healthstone (any size)." },
     { "PK Make Stone", "#showtooltip Create Healthstone\n/cast Create Healthstone", "Make a Healthstone." },
-    { "PK Funnel", "#showtooltip Health Funnel\n/cast Health Funnel", "Heal your pet." },
+    { "PK Funnel", "#showtooltip Health Funnel\n/cast [@pet,exists,nodead] Health Funnel", "Heal your pet." },
     { "PK Wand", "#showtooltip Shoot\n/cast !Shoot", "Wand. Pressing it again never stops it." },
     { "PK Pet", "#showtooltip\n/petattack [@mouseover,harm,nodead][]", "Pet attacks mouseover mob, or your target." },
     { "PK Pet Back", "/petfollow", "Pet comes back to you." },

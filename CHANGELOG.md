@@ -2,6 +2,15 @@
 
 Every released version, newest first.
 
+## 1.2.2 (2026-11-20)
+
+- **Warlock DoT timers fixed.** A DoT you cast on the mob under your mouse is now timed on that mob, not your target. Before, your target could show a timer for a DoT that wasn't there, and the real mob showed none.
+- **DoT numbers match the game.** Timers learn each DoT's real length when the game shows it, and round like the game's own numbers, so they no longer run a second behind the nameplates.
+- **Seen DoTs stay lit.** If the game shows your DoT on the target but not its time, the icon stays lit instead of grey.
+- **Mouseover macros.** Type `/bbuddy macros` to update them. Shadow Bolt, Immolate, Searing Pain, Conflagrate, Drain Life, Drain Soul and Agony now hit the mob under your mouse, or your target if there is none. Your pet stays on your target. The Agony macro works whether your game calls it Bane or Curse of Agony.
+
+Type `/reload` after updating.
+
 ## 1.2.1 (2026-11-20)
 
 - **Warlock between pulls.** Out of combat, clickable rows under your mana bar show what to do before the next pull. One click does it.
