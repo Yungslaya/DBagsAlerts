@@ -2,6 +2,14 @@
 
 Every released version, newest first.
 
+## 1.2.3 (2026-11-20)
+
+- **Big DoT refresh alert.** In combat, when a DoT is gone or about to run out, a big pulsing icon with its name shows in the middle of your screen, with one sound. It shows one DoT at a time, in rotation order, and moves on when you cast it.
+- **Refresh timing.** Corruption, Immolate and Siphon Life come back in their last 10%. Agony comes back when it drops off. Utility curses stay on the small icons only.
+- **Settings.** Turn it on or off, turn the sound on or off, and move it up or down in Settings → Display.
+
+Type `/reload` after updating.
+
 ## 1.2.2 (2026-11-20)
 
 - **Warlock DoT timers fixed.** A DoT you cast on the mob under your mouse is now timed on that mob, not your target. Before, your target could show a timer for a DoT that wasn't there, and the real mob showed none.

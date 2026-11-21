@@ -2,6 +2,7 @@
 
 ## What's new
 
+- **1.2.3:** Big DoT refresh alert in the middle of your screen, with a sound. Type `/reload` after updating.
 - **1.2.2:** Warlock DoT timers fixed for mouseover casts and match the game's numbers; mouseover Warlock macros. Type `/reload` after updating.
 - **1.2.1:** Warlock rows between pulls: Eat, Life Tap, Heal Pet, Make Stone, 0 Shards, and one click does it. Type `/reload` after updating.
 - **1.1.1:** Update messages only come from real CurseForge releases. Type `/reload` after updating.

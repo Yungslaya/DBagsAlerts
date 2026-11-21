@@ -91,6 +91,9 @@ local DEFAULTS = {
     lowMana = 20,        -- paladin: mana % for the LOW MANA warning
     dumpTank = 90,       -- warrior: spend line while you are getting hit a lot
     shardGoal = 5,       -- warlock: Soul Shards to keep (Drain Soul alert below this)
+    dotBig = true,       -- big DoT icon in the middle of the screen when one needs recasting
+    dotBigSound = true,  -- ...with a sound when it first shows
+    dotBigY = 160,       -- how high above screen center it sits
 }
 
 function DRU.partScale(key)
@@ -4320,6 +4323,45 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         end
         DRU.nativeDotsMode = false
     end
+    -- Big recast alert: one large pulsing icon + gold word in the middle of the screen,
+    -- for the first DoT (in rotation order) that is gone or in its refresh window.
+    do
+    local big = CreateFrame("Frame", "DBagsAlertsDotAlert", UIParent)
+    big:SetSize(84, 84); big:SetFrameStrata("HIGH"); big:Hide()
+    big.icon = big:CreateTexture(nil, "ARTWORK"); big.icon:SetAllPoints(); big.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    addBorder(big, 0, 0, 0, 1, 2)
+    big.glow = big:CreateTexture(nil, "OVERLAY"); big.glow:SetPoint("CENTER"); big.glow:SetSize(84 / 0.64, 84 / 0.64)
+    big.glow:SetTexture(MEDIA .. "ProcGlow.tga"); big.glow:SetBlendMode("ADD"); big.glow:SetVertexColor(1, 0.82, 0.2)
+    big.word = big:CreateFontString(nil, "OVERLAY"); styleText(big.word, 26, 1, 0.82, 0)
+    big.word:SetPoint("TOP", big, "BOTTOM", 0, -6)
+    big.pulse = big:CreateAnimationGroup(); big.pulse:SetLooping("BOUNCE")
+    local bp = big.pulse:CreateAnimation("Alpha"); bp:SetFromAlpha(1); bp:SetToAlpha(0.55); bp:SetDuration(0.45)
+    local bigName, soundAt = nil, 0
+    function DRU.dotBigShow(name, now)
+        if not name or not DB.dotBig then
+            if bigName then big.pulse:Stop(); big:Hide(); bigName = nil end
+            return
+        end
+        if name == bigName then return end
+        local first = bigName == nil
+        bigName = name
+        big:ClearAllPoints(); big:SetPoint("CENTER", UIParent, "CENTER", 0, DB.dotBigY or 160)
+        big:SetScale(DB.scale or 1)
+        big.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
+        big.word:SetText(string.upper(DRU.shortDot and DRU.shortDot[name] or name))
+        big:Show(); big.pulse:Play()
+        if first and DB.dotBigSound and now - soundAt > 3 then
+            soundAt = now
+            if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then PlaySound(SOUNDKIT.RAID_WARNING, "Master") end
+        end
+    end
+    DRU.shortDot = { ["Bane of Agony"] = "Agony", ["Curse of Agony"] = "Agony",
+                     ["Curse of the Elements"] = "Elements", ["Curse of Weakness"] = "Weakness",
+                     ["Faerie Fire (Feral)"] = "Faerie Fire" }
+    -- utility curses stay on the small icons only (no big nag on every trash mob)
+    DRU.noBig = { ["Curse of the Elements"] = true, ["Curse of Weakness"] = true }
+    DBagsAlertsState.dotBig = big
+    end
     DRU.targetAuraCache = {}
     local function dotLeft(name, now, key)
         -- Re-read the current target, including DoTs applied before switching away.
@@ -4638,15 +4680,18 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         end
         -- The unit frame shows every target; combat helpers still require an enemy.
         tf:SetShown(DB.target and plain(UnitExists("target"), false) and true or false)
-        if nativeDruidDots(now) then return end
+        if nativeDruidDots(now) then DRU.dotBigShow(nil, now) return end
         local key = ctx.hostile and targetKey()
+        local wantBig
         for _, f in ipairs(used) do
             f:SetShown(ctx.hostile and true or false)
             local left, length, nativeDuration, onNoTime
             if ctx.hostile then left, length, nativeDuration, onNoTime = dotLeft(f.name, now, key) end
             local refreshSoon = left ~= nil and length ~= nil and length > 0
                 and left <= length * (refreshAt[f.name] or 0)
-            setRefreshGlow(f, ctx.hostile and ctx.combat and not nativeDuration and not onNoTime and (not left or left <= 0 or refreshSoon))
+            local needs = ctx.hostile and ctx.combat and not nativeDuration and not onNoTime and (not left or left <= 0 or refreshSoon)
+            setRefreshGlow(f, needs)
+            if needs and not wantBig and not DRU.noBig[f.name] then wantBig = f.name end
             f.nativeCD:SetShown(nativeDuration ~= nil)
             if nativeDuration then
                 f.nativeCD:SetCooldownFromDurationObject(nativeDuration)
@@ -4668,6 +4713,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                 f.num:SetText(""); f.bar:SetValue(0)
             end
         end
+        DRU.dotBigShow(not plain(UnitIsDead("target"), false) and wantBig or nil, now)
     end)
     if DBagsAlertsDebug then
         local callback = driver:GetScript("OnUpdate")
@@ -6021,7 +6067,7 @@ end
 -- Starter setup only changes presentation/features, never spell history or macros.
 function DBagsAlertsState.starterSetup(restore)
     if not DB or InCombatLockdown() then say("Change the setup after combat.");return false end
-    local keys={"scale","customSizes","locked","lux","off","stack","names","advice","target","casts","hideBlizz","cursor","buffNag","stanceNag","foodNag","stoneNag","stoneNeed","range","sound"}
+    local keys={"scale","customSizes","locked","lux","off","stack","names","advice","target","casts","hideBlizz","cursor","buffNag","stanceNag","foodNag","stoneNag","stoneNeed","range","sound","dotBig","dotBigSound"}
     local modules={healerMana={"enabled","range"},partyDefensives={"enabled","groupRange","placeholders"},petPanel={"enabled"},followBuddy={"enabled"}}
     if restore then
         local old=DB.starterBackup;if not old then say("No previous setup saved.");return false end
@@ -6113,6 +6159,9 @@ local function buildSettings()
     check(display,"classic","Classic borders","Use WoW borders and glossy bars.",function() return DB.style~="clean" end,function(v) DB.style=v and "classic" or "clean";relayout() end)
     check(display,"sound","Alert sound","Play a sound for danger alerts.")
     check(display,"voice","Alert voice","Say danger alerts out loud.")
+    check(display,"dotBig","Big DoT refresh","Big icon in the middle when a DoT needs recasting.",nil,function(v) DB.dotBig=v;if not v and DRU.dotBigShow then DRU.dotBigShow(nil,GetTime()) end end)
+    check(display,"dotBigSound","DoT refresh sound","Play a sound when the big DoT icon shows.")
+    slider(display,"dotBigY","Big DoT height",-300,400,10,"%d px",function() return DB.dotBigY or 160 end,function(v) DB.dotBigY=v;local b=DBagsAlertsState.dotBig;if b then b:ClearAllPoints();b:SetPoint("CENTER",UIParent,"CENTER",0,v) end end)
     button(display,"preview","Preview HUD",function() testUntil=GetTime()+8 end)
     button(display,"starter","Use starter setup",function() DBagsAlertsState.starterSetup();refresh() end)
     button(display,"restoreStarter","Restore my previous setup",function() DBagsAlertsState.starterSetup(true);refresh() end)
