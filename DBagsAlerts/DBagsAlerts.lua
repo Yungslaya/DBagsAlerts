@@ -4420,6 +4420,8 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                      ["Faerie Fire (Feral)"] = "Faerie Fire" }
     -- utility curses stay on the small icons only (no big nag on every trash mob)
     DRU.noBig = { ["Curse of the Elements"] = true, ["Curse of Weakness"] = true }
+    -- when the big reminder starts: last 30% of the DoT; Agony only once it ends (let it finish)
+    DRU.bigWindow = { ["Bane of Agony"] = 0, ["Curse of Agony"] = 0 }
     DBagsAlertsState.dotBig = big
     end
     DRU.targetAuraCache = {}
@@ -4751,7 +4753,13 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                 and left <= length * (refreshAt[f.name] or 0)
             local needs = ctx.hostile and ctx.combat and not nativeDuration and not onNoTime and (not left or left <= 0 or refreshSoon)
             setRefreshGlow(f, needs)
-            if needs and not wantBig and not DRU.noBig[f.name] then wantBig = f.name end
+            -- Big alert = a reapply reminder: only a DoT you already put on THIS target,
+            -- from its last 30% (pandemic window) or once it falls off. A fresh mob shows nothing.
+            local had = key and DRU.dotAt[f.name] and DRU.dotAt[f.name][key]
+            local win = DRU.bigWindow[f.name] or 0.3
+            local bigNeeds = had and ctx.hostile and ctx.combat and not nativeDuration and not onNoTime
+                and (not left or left <= 0 or (length and length > 0 and left <= length * win))
+            if bigNeeds and not wantBig and not DRU.noBig[f.name] then wantBig = f.name end
             f.nativeCD:SetShown(nativeDuration ~= nil)
             if nativeDuration then
                 f.nativeCD:SetCooldownFromDurationObject(nativeDuration)

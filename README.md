@@ -2,6 +2,7 @@
 
 ## What's new
 
+- **1.2.5:** The big DoT alert only reminds you to reapply DoTs already on the target, from their last 30%. Type `/reload` after updating.
 - **1.2.4:** Immolate's timer no longer vanishes in combat. The big DoT alert can be moved anywhere (drag it), resized and made see-through. Type `/reload` after updating.
 - **1.2.3:** Big DoT refresh alert in the middle of your screen, with a sound. Type `/reload` after updating.
 - **1.2.2:** Warlock DoT timers fixed for mouseover casts and match the game's numbers; mouseover Warlock macros. Type `/reload` after updating.

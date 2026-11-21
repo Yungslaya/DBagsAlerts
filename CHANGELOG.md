@@ -2,6 +2,13 @@
 
 Every released version, newest first.
 
+## 1.2.5 (2026-11-20)
+
+- **Big DoT alert is a reapply reminder.** It only shows for a DoT you already put on that target. A fresh mob shows nothing.
+- **Earlier warning.** Corruption, Immolate and Siphon Life show in their last 30%. Agony shows when it ends. A DoT that falls off shows until you put it back.
+
+Type `/reload` after updating.
+
 ## 1.2.4 (2026-11-20)
 
 - **Immolate no longer goes missing.** In combat, Immolate's timer could vanish while Immolate was still on the mob, and the big alert asked you to cast it again. Fixed.
