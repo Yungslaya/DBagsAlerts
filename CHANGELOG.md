@@ -2,6 +2,15 @@
 
 Every released version, newest first.
 
+## 1.2.4 (2026-11-20)
+
+- **Immolate no longer goes missing.** In combat, Immolate's timer could vanish while Immolate was still on the mob, and the big alert asked you to cast it again. Fixed.
+- **Move and size the big DoT alert.** Settings → Sizes → **Big DoT alert** now has sliders for size, left / right, up / down and opacity.
+- **Drag it.** Click **Show it (drag to move)** and drag the icon where you want it. Click again to hide it. **Put it back** resets it.
+- Settings → Display has a button that takes you straight there. The old height slider moved to the new page.
+
+Type `/reload` after updating.
+
 ## 1.2.3 (2026-11-20)
 
 - **Big DoT refresh alert.** In combat, when a DoT is gone or about to run out, a big pulsing icon with its name shows in the middle of your screen, with one sound. It shows one DoT at a time, in rotation order, and moves on when you cast it.

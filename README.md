@@ -2,6 +2,7 @@
 
 ## What's new
 
+- **1.2.4:** Immolate's timer no longer vanishes in combat. The big DoT alert can be moved anywhere (drag it), resized and made see-through. Type `/reload` after updating.
 - **1.2.3:** Big DoT refresh alert in the middle of your screen, with a sound. Type `/reload` after updating.
 - **1.2.2:** Warlock DoT timers fixed for mouseover casts and match the game's numbers; mouseover Warlock macros. Type `/reload` after updating.
 - **1.2.1:** Warlock rows between pulls: Eat, Life Tap, Heal Pet, Make Stone, 0 Shards, and one click does it. Type `/reload` after updating.

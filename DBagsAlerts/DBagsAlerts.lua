@@ -94,6 +94,9 @@ local DEFAULTS = {
     dotBig = true,       -- big DoT icon in the middle of the screen when one needs recasting
     dotBigSound = true,  -- ...with a sound when it first shows
     dotBigY = 160,       -- how high above screen center it sits
+    dotBigX = 0,         -- ...and how far left or right
+    dotBigSize = 1,      -- its own size, on top of the HUD size
+    dotBigAlpha = 1,     -- 1 = solid, lower = see-through
 }
 
 function DRU.partScale(key)
@@ -467,8 +470,10 @@ local function timeLeft(name) return (expires[name] or 0) - GetTime() end
 -- game won't say (combat lock). When it does say, it beats our timers.
 local function targetDebuff(name)
     if not (C_UnitAuras and C_UnitAuras.GetAuraDataBySpellName) then return nil end
+    local restricted
     if C_Secrets and C_Secrets.ShouldAurasBeSecret then
-        local okR, restricted = pcall(C_Secrets.ShouldAurasBeSecret)
+        local okR
+        okR, restricted = pcall(C_Secrets.ShouldAurasBeSecret)
         if not okR or secret(restricted) then return nil end
         if restricted then
             local id = spell[name]
@@ -480,6 +485,9 @@ local function targetDebuff(name)
     local ok, a = pcall(C_UnitAuras.GetAuraDataBySpellName, "target", name, "HARMFUL|PLAYER")
     if not ok or secret(a) or sectable(a) then return nil end
     if a then return "on", a end
+    -- In combat (auras restricted) a blank answer can mean "won't say", not "gone":
+    -- Immolate was wiped this way while still on the mob. Only trust "off" when unrestricted.
+    if restricted then return nil end
     return "off"
 end
 
@@ -4326,18 +4334,71 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
     -- Big recast alert: one large pulsing icon + gold word in the middle of the screen,
     -- for the first DoT (in rotation order) that is gone or in its refresh window.
     do
+    -- `big` holds the place, size and opacity you picked; `body` inside it does the pulsing,
+    -- so the pulse never overrides your opacity.
     local big = CreateFrame("Frame", "DBagsAlertsDotAlert", UIParent)
     big:SetSize(84, 84); big:SetFrameStrata("HIGH"); big:Hide()
-    big.icon = big:CreateTexture(nil, "ARTWORK"); big.icon:SetAllPoints(); big.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    addBorder(big, 0, 0, 0, 1, 2)
-    big.glow = big:CreateTexture(nil, "OVERLAY"); big.glow:SetPoint("CENTER"); big.glow:SetSize(84 / 0.64, 84 / 0.64)
+    big:SetMovable(true); big:SetClampedToScreen(true); big:RegisterForDrag("LeftButton"); big:EnableMouse(false)
+    local body = CreateFrame("Frame", nil, big); body:SetAllPoints()
+    big.body = body
+    big.icon = body:CreateTexture(nil, "ARTWORK"); big.icon:SetAllPoints(); big.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    addBorder(body, 0, 0, 0, 1, 2)
+    big.glow = body:CreateTexture(nil, "OVERLAY"); big.glow:SetPoint("CENTER"); big.glow:SetSize(84 / 0.64, 84 / 0.64)
     big.glow:SetTexture(MEDIA .. "ProcGlow.tga"); big.glow:SetBlendMode("ADD"); big.glow:SetVertexColor(1, 0.82, 0.2)
-    big.word = big:CreateFontString(nil, "OVERLAY"); styleText(big.word, 26, 1, 0.82, 0)
+    big.word = body:CreateFontString(nil, "OVERLAY"); styleText(big.word, 26, 1, 0.82, 0)
     big.word:SetPoint("TOP", big, "BOTTOM", 0, -6)
-    big.pulse = big:CreateAnimationGroup(); big.pulse:SetLooping("BOUNCE")
+    big.pulse = body:CreateAnimationGroup(); big.pulse:SetLooping("BOUNCE")
     local bp = big.pulse:CreateAnimation("Alpha"); bp:SetFromAlpha(1); bp:SetToAlpha(0.55); bp:SetDuration(0.45)
-    local bigName, soundAt = nil, 0
+    local bigName, soundAt, placing = nil, 0, false
+    local function pick(value, lo, hi, default)
+        return math.max(lo, math.min(hi, tonumber(value) or default))
+    end
+    -- Size, place and opacity from the settings. Left/right and up/down are screen pixels from the middle.
+    function DRU.dotBigApply()
+        local scale = (tonumber(DB.scale) or 1) * pick(DB.dotBigSize, 0.5, 3, 1)
+        big:SetScale(scale)
+        big:ClearAllPoints()
+        big:SetPoint("CENTER", UIParent, "CENTER", pick(DB.dotBigX, -1000, 1000, 0) / scale, pick(DB.dotBigY, -600, 600, 160) / scale)
+        big:SetAlpha(pick(DB.dotBigAlpha, 0.2, 1, 1))
+    end
+    -- Settings preview: shows the alert so you can see your changes and drag it. A real alert,
+    -- or closing the settings, ends it.
+    function DRU.dotBigPlacing() return placing end
+    function DRU.dotBigPlace(on)
+        on = on and true or false
+        if on == placing then if on then DRU.dotBigApply() end return end
+        placing = on; bigName = nil
+        big:EnableMouse(on)
+        if on then
+            DRU.dotBigApply()
+            local first = dotList()[1]
+            big.icon:SetTexture(first and spell[first] and C_Spell.GetSpellTexture(spell[first])
+                or "Interface\\Icons\\Spell_Shadow_AbominationExplosion")
+            big.word:SetText("DRAG ME")
+            big:Show(); big.pulse:Play()
+        else
+            big.pulse:Stop(); big:Hide()
+        end
+    end
+    big:SetScript("OnDragStart", function(self) if placing then self:StartMoving() end end)
+    big:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        if self.SetUserPlaced then self:SetUserPlaced(false) end   -- we save the place ourselves
+        local x, y = self:GetCenter()
+        local midX, midY = UIParent:GetCenter()
+        local mine, screen = self:GetEffectiveScale(), UIParent:GetEffectiveScale()
+        if x and y and midX and midY and mine and screen and screen > 0 then
+            DB.dotBigX = math.floor(x * mine / screen - midX + 0.5)
+            DB.dotBigY = math.floor(y * mine / screen - midY + 0.5)
+        end
+        DRU.dotBigApply()
+        if DRU.dotBigMoved then DRU.dotBigMoved() end
+    end)
     function DRU.dotBigShow(name, now)
+        if placing then
+            if not (name and DB.dotBig) then return end
+            placing = false; big:EnableMouse(false)   -- a real alert takes over
+        end
         if not name or not DB.dotBig then
             if bigName then big.pulse:Stop(); big:Hide(); bigName = nil end
             return
@@ -4345,8 +4406,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         if name == bigName then return end
         local first = bigName == nil
         bigName = name
-        big:ClearAllPoints(); big:SetPoint("CENTER", UIParent, "CENTER", 0, DB.dotBigY or 160)
-        big:SetScale(DB.scale or 1)
+        DRU.dotBigApply()
         big.icon:SetTexture(C_Spell.GetSpellTexture(spell[name]))
         big.word:SetText(string.upper(DRU.shortDot and DRU.shortDot[name] or name))
         big:Show(); big.pulse:Play()
@@ -6161,7 +6221,7 @@ local function buildSettings()
     check(display,"voice","Alert voice","Say danger alerts out loud.")
     check(display,"dotBig","Big DoT refresh","Big icon in the middle when a DoT needs recasting.",nil,function(v) DB.dotBig=v;if not v and DRU.dotBigShow then DRU.dotBigShow(nil,GetTime()) end end)
     check(display,"dotBigSound","DoT refresh sound","Play a sound when the big DoT icon shows.")
-    slider(display,"dotBigY","Big DoT height",-300,400,10,"%d px",function() return DB.dotBigY or 160 end,function(v) DB.dotBigY=v;local b=DBagsAlertsState.dotBig;if b then b:ClearAllPoints();b:SetPoint("CENTER",UIParent,"CENTER",0,v) end end)
+    button(display,"dotBigPlace","Big DoT size and place",function() selectPage("sizes");outer.selectPart("dotBig") end)
     button(display,"preview","Preview HUD",function() testUntil=GetTime()+8 end)
     button(display,"starter","Use starter setup",function() DBagsAlertsState.starterSetup();refresh() end)
     button(display,"restoreStarter","Restore my previous setup",function() DBagsAlertsState.starterSetup(true);refresh() end)
@@ -6183,7 +6243,21 @@ local function buildSettings()
         {"alerts","Spell cues"},{"dots","Debuff timers"},{"cooldowns","Cooldown row"},
         {"buff","Buff reminder"},{"stance","Stance reminder"},{"food","Food reminder"},{"stone","Weapon stone"},
         {"player","All player bars",false},{"casts","Both cast bars",false},{"helpers","All reminders",false},
+        {"dotBig","Big DoT alert",false,0,true},   -- its own sliders: it is not part of the HUD block
     }
+    -- The big DoT alert: size, place and opacity work without "Separate sizes". Any change shows
+    -- the alert so you see it; it can also be dragged while it is shown this way.
+    DRU.dotBigMoved=refresh
+    if outer.HookScript then outer:HookScript("OnHide",function() if DRU.dotBigPlace then DRU.dotBigPlace(false) end end) end
+    local function dotBigGroup(group)
+        local function show() if DRU.dotBigPlace then DRU.dotBigPlace(true) end end
+        slider(group,"dotBigSize","Size",0.5,3,0.05,"%.2fx",function() return DB.dotBigSize or 1 end,function(v) DB.dotBigSize=v;show() end)
+        slider(group,"dotBigX","Left / right",-1000,1000,5,"%d px",function() return DB.dotBigX or 0 end,function(v) DB.dotBigX=v;show() end)
+        slider(group,"dotBigY","Up / down",-600,600,5,"%d px",function() return DB.dotBigY or 160 end,function(v) DB.dotBigY=v;show() end)
+        slider(group,"dotBigAlpha","Opacity",20,100,5,"%d%%",function() return math.floor((DB.dotBigAlpha or 1)*100+0.5) end,function(v) DB.dotBigAlpha=v/100;show() end)
+        button(group,"dotBigMove","Show it (drag to move)",function() if DRU.dotBigPlace then DRU.dotBigPlace(not DRU.dotBigPlacing()) end end)
+        button(group,"dotBigReset","Put it back",function() DB.dotBigSize,DB.dotBigX,DB.dotBigY,DB.dotBigAlpha=1,0,160,1;show();refresh() end)
+    end
     local partLabel=sizes.body:CreateFontString(nil,"OVERLAY");styleText(partLabel,16,1,0.82,0.2)
     partLabel:SetPoint("TOP",sizes.body,"TOP",0,sizes.y-6)
     local partGroups={};outer.partGroups=partGroups;local selected=1
@@ -6199,11 +6273,13 @@ local function buildSettings()
     nextPart:SetPoint("TOPRIGHT",-8,sizes.y)
     sizes.y=sizes.y-50
     for i,entry in ipairs(parts) do
-        local key,label,w,h=unpack(entry)
+        local key,label,w,h,own=unpack(entry)
         local frame=CreateFrame("Frame",nil,sizes.body);frame:SetSize(490,350);frame:SetPoint("TOPLEFT",0,sizes.y)
         local group={body=frame,y=0};partGroups[i]=group
+        if own then dotBigGroup(group) else
         slider(group,"size_"..key,"Size",0.6,2,0.05,"%.2fx",function() return DB.partSizes[key] or 1 end,
             function(v) if DB.customSizes then DB.partSizes[key]=v;relayout() end end,true)
+        end
         if w then
             for _,field in ipairs({{"width","Width",120,600,5,w},{"height",key=="pet" and "Pet health height" or "Health bar height",3,80,1,h}}) do
                 local fieldKey,fieldLabel,lo,hi,step,default=unpack(field)
