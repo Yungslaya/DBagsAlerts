@@ -2,6 +2,13 @@
 
 Every released version, newest first.
 
+## 1.3.1 (2026-11-21)
+
+- **DoT timers stay on.** A DoT tile could go grey while the DoT was still on the mob. It happened when your pet's attack was dodged, parried or missed right after your cast. Fixed.
+- **No reminder on dying mobs.** The big DoT reminder now stays quiet when the mob is too low for the DoT to be worth it, the same as the small spell cues. Bosses, elites, dungeons and raids always get the reminder.
+
+Type `/reload` after updating.
+
 ## 1.3.0 (2026-11-21)
 
 - **New look.** The settings windows have a stone frame with gold corners, new fonts and red gold-edged buttons. Our other addons now look the same.

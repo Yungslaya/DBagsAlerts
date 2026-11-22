@@ -2,6 +2,7 @@
 
 ## What's new
 
+- **1.3.1:** DoT tiles no longer go grey while the DoT is still on the mob, and the big DoT reminder stays quiet on dying open-world mobs. Type `/reload` after updating.
 - **1.3.0:** New look for the settings windows, pet bars that match your own bars, and a What's new window after updates. Fully restart WoW after updating.
 - **1.2.5:** The big DoT alert only reminds you to reapply DoTs already on the target, from their last 30%. Type `/reload` after updating.
 - **1.2.4:** Immolate's timer no longer vanishes in combat. The big DoT alert can be moved anywhere (drag it), resized and made see-through. Type `/reload` after updating.

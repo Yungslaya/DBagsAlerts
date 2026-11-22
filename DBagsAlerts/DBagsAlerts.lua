@@ -444,6 +444,13 @@ local function onCast(spellID, dotKey)
         DRU.dotAt[name] = DRU.dotAt[name] or {}
         DRU.dotAt[name][k] = now
         DRU.dotTrace("cast " .. name .. " filed under " .. tostring(k) .. " (target is " .. tostring(targetKey()) .. ", given key " .. tostring(dotKey) .. ")")
+        if DBagsAlertsDebug and DBagsAlertsDebug.dot then
+            -- what the game said about the thing under the mouse at that moment ("hidden" = it would not say)
+            local function say(v) if secret(v) then return "hidden" end return tostring(v) end
+            DRU.dotTrace("  mouse: exists=" .. say(UnitExists("mouseover")) .. " enemy=" .. say(UnitCanAttack("player", "mouseover"))
+                .. " dead=" .. say(UnitIsDead("mouseover")) .. " is target=" .. say(UnitIsUnit("mouseover", "target"))
+                .. " mouse key=" .. tostring(unitKey("mouseover")))
+        end
         if k == targetKey() then lastDebuff = { name = name, at = now, key = k } end
     end
 end
@@ -461,7 +468,12 @@ local function onTargetCombat(action)
     elseif ld.name == "Sunder Armor" and sunder[ld.key] then
         sunder[ld.key].n = math.max(0, sunder[ld.key].n - 1)
     elseif DRU.dotAt[ld.name] then
+        -- A DoT is a spell: it cannot be dodged, parried or missed. Those words right after your
+        -- cast come from your pet's (or a friend's) swing on the same mob, and used to wipe the
+        -- timer of a DoT that had landed (the tile went grey with the DoT still on the mob).
+        if action == "DODGE" or action == "PARRY" or action == "MISS" or action == "DEFLECT" then return end
         DRU.dotAt[ld.name][ld.key] = nil
+        if DRU.dotTrace then DRU.dotTrace("took back " .. ld.name .. ": the mob reported " .. action) end
     end
     lastDebuff = nil
 end
@@ -4365,7 +4377,10 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
     local big = CreateFrame("Frame", "DBagsAlertsDotAlert", UIParent)
     big:SetSize(84, 84); big:SetFrameStrata("HIGH"); big:Hide()
     big:SetMovable(true); big:SetClampedToScreen(true); big:RegisterForDrag("LeftButton"); big:EnableMouse(false)
-    local body = CreateFrame("Frame", nil, big); body:SetAllPoints()
+    -- `gate` hides the reminder when the mob is too low to be worth the DoT (see DRU.bigLives)
+    local gate = CreateFrame("Frame", nil, big); gate:SetAllPoints()
+    big.gate = gate
+    local body = CreateFrame("Frame", nil, gate); body:SetAllPoints()
     big.body = body
     big.icon = body:CreateTexture(nil, "ARTWORK"); big.icon:SetAllPoints(); big.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
     addBorder(body, 0, 0, 0, 1, 2)
@@ -4420,7 +4435,9 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         DRU.dotBigApply()
         if DRU.dotBigMoved then DRU.dotBigMoved() end
     end)
-    function DRU.dotBigShow(name, now)
+    function DRU.dotBigShow(name, now, gateAlpha)
+        -- gateAlpha: 1 or 0 from the game when it hides the mob's health (same rule as the small cues)
+        if gateAlpha ~= nil then safeAlpha(big.gate, gateAlpha) else big.gate:SetAlpha(1) end
         if placing then
             if not (name and DB.dotBig) then return end
             placing = false; big:EnableMouse(false)   -- a real alert takes over
@@ -4448,6 +4465,32 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
     DRU.noBig = { ["Curse of the Elements"] = true, ["Curse of Weakness"] = true }
     -- when the big reminder starts: last 30% of the DoT; Agony only once it ends (let it finish)
     DRU.bigWindow = { ["Bane of Agony"] = 0, ["Curse of Agony"] = 0 }
+    -- The big reminder follows the small spell cues: no reminder for a DoT the cue would not
+    -- suggest, because the mob is about to die. Same health marks as the cues; elites always count.
+    DRU.bigLives = { ["Corruption"] = 35, ["Bane of Agony"] = 50, ["Curse of Agony"] = 50,
+                     ["Immolate"] = 40, ["Siphon Life"] = 60 }
+    function DRU.bigWorth(name)       -- false = not worth it; true = worth it; else a hidden 1/0 alpha
+        local pct = DRU.bigLives[name]
+        if not pct or ctx.elite then return true end
+        -- Bosses, dungeons and raids always get the reminder: the dying-mob rule is for open-world
+        -- mobs only. When the game will not say what the mob is, it counts as a boss.
+        if secret(UnitClassification("target")) or secret(UnitLevel("target")) then return true end
+        local inside, kind = false, "none"
+        if IsInInstance then inside, kind = IsInInstance() end
+        if secret(inside) or secret(kind) then return true end
+        if inside and kind ~= "none" then return true end
+        if IsInRaid and plain(IsInRaid(), true) then return true end
+        local h, m = UnitHealth("target"), UnitHealthMax("target")
+        if not secret(h) and not secret(m) then
+            return not (m and m > 0 and h / m < pct / 100)
+        end
+        local cv = UnitHealthPercent and stepCurve("thp" .. pct, false, pct / 100)
+        if not cv then return true end
+        local ok, a = pcall(UnitHealthPercent, "target", false, cv)
+        if not ok or a == nil then return true end
+        if secret(a) then return a end
+        return a >= 0.5
+    end
     DBagsAlertsState.dotBig = big
     end
     DRU.targetAuraCache = {}
@@ -4770,7 +4813,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
         tf:SetShown(DB.target and plain(UnitExists("target"), false) and true or false)
         if nativeDruidDots(now) then DRU.dotBigShow(nil, now) return end
         local key = ctx.hostile and targetKey()
-        local wantBig
+        local wantBig, wantGate
         for _, f in ipairs(used) do
             f:SetShown(ctx.hostile and true or false)
             local left, length, nativeDuration, onNoTime
@@ -4793,7 +4836,11 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
             local win = DRU.bigWindow[f.name] or 0.3
             local bigNeeds = had and ctx.hostile and ctx.combat and not nativeDuration and not onNoTime
                 and (not left or left <= 0 or (length and length > 0 and left <= length * win))
-            if bigNeeds and not wantBig and not DRU.noBig[f.name] then wantBig = f.name end
+            if bigNeeds and not wantBig and not DRU.noBig[f.name] then
+                local worth = DRU.bigWorth(f.name)
+                if worth == true then wantBig, wantGate = f.name, nil
+                elseif worth then wantBig, wantGate = f.name, worth end   -- hidden answer: the game shows or hides it
+            end
             f.nativeCD:SetShown(nativeDuration ~= nil)
             if nativeDuration then
                 f.nativeCD:SetCooldownFromDurationObject(nativeDuration)
@@ -4815,7 +4862,7 @@ do   -- Shared floating HUD: class/form-specific timers, no enclosing panel.
                 f.num:SetText(""); f.bar:SetValue(0)
             end
         end
-        DRU.dotBigShow(not plain(UnitIsDead("target"), false) and wantBig or nil, now)
+        DRU.dotBigShow(not plain(UnitIsDead("target"), false) and wantBig or nil, now, wantGate)
     end)
     if DBagsAlertsDebug then
         local callback = driver:GetScript("OnUpdate")
